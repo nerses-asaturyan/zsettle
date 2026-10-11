@@ -9,6 +9,7 @@ use std::{
     io::Read,
     num::NonZeroU32,
     path::{Path, PathBuf},
+    sync::Mutex,
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -17,13 +18,23 @@ use rand_core::OsRng;
 use secrecy::{ExposeSecret, SecretVec, Zeroize};
 use serde::Deserialize;
 use zcash_client_backend::data_api::{
-    locking::LockFilter, wallet::TargetHeight, Account as _, AccountBirthday, AccountPurpose,
-    InputSource, NullifierQuery, WalletRead, WalletWrite,
+    chain::{error as chain_error, BlockCache, BlockSource},
+    locking::LockFilter,
+    scanning::ScanRange,
+    wallet::TargetHeight,
+    Account as _, AccountBirthday, AccountPurpose, InputSource, NullifierQuery, WalletRead,
+    WalletWrite,
 };
-use zcash_client_backend::wallet::{Note, ReceivedNote};
-use zcash_client_sqlite::{util::SystemClock, AccountUuid, ReceivedNoteId, WalletDb};
+use zcash_client_backend::proto::compact_formats::CompactBlock;
+use zcash_client_backend::wallet::Note;
+use zcash_client_sqlite::{util::SystemClock, AccountUuid, WalletDb};
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
-use zcash_protocol::{consensus::Network, ShieldedPool, TxId};
+use zcash_protocol::{
+    consensus::{BlockHeight, Network},
+    ShieldedPool, TxId,
+};
+
+use crate::broadcast::{connect, install_crypto_provider};
 
 /// The wallet database type used throughout zsettle.
 pub type Db = WalletDb<rusqlite::Connection, Network, SystemClock, OsRng>;
@@ -188,9 +199,14 @@ pub struct IronwoodNote {
     pub position: incrementalmerkletree::Position,
 }
 
-/// Look up a specific Ironwood note by transaction id and output index.
-pub fn ironwood_note(db: &Db, r: NoteRef, target_height: TargetHeight) -> Result<IronwoodNote> {
-    let received: ReceivedNote<ReceivedNoteId, Note> = db
+/// Look up a specific Ironwood note. `None` when the wallet has no spendable note with this
+/// reference at the target height: it is unknown to the wallet, or already spent.
+pub fn find_ironwood_note(
+    db: &Db,
+    r: NoteRef,
+    target_height: TargetHeight,
+) -> Result<Option<IronwoodNote>> {
+    let Some(received) = db
         .get_spendable_note(
             &r.txid,
             ShieldedPool::Ironwood,
@@ -199,13 +215,9 @@ pub fn ironwood_note(db: &Db, r: NoteRef, target_height: TargetHeight) -> Result
             LockFilter::Unfiltered,
         )
         .map_err(|e| anyhow!("{e}"))?
-        .ok_or_else(|| {
-            anyhow!(
-                "note {}:{} not found or not spendable at this height",
-                r.txid,
-                r.index
-            )
-        })?;
+    else {
+        return Ok(None);
+    };
     let note = match received.note() {
         Note::Orchard {
             note,
@@ -216,10 +228,29 @@ pub fn ironwood_note(db: &Db, r: NoteRef, target_height: TargetHeight) -> Result
         }
         Note::Sapling(_) => return Err(anyhow!("note is a Sapling note")),
     };
-    Ok(IronwoodNote {
+    Ok(Some(IronwoodNote {
         note,
         position: received.note_commitment_tree_position(),
+    }))
+}
+
+/// Look up a specific Ironwood note by transaction id and output index.
+pub fn ironwood_note(db: &Db, r: NoteRef, target_height: TargetHeight) -> Result<IronwoodNote> {
+    find_ironwood_note(db, r, target_height)?.ok_or_else(|| {
+        anyhow!(
+            "note {}:{} not found or not spendable at this height",
+            r.txid,
+            r.index
+        )
     })
+}
+
+/// Highest block the wallet has scanned, if any.
+pub fn max_scanned_height(db: &Db) -> Result<Option<u32>> {
+    Ok(db
+        .block_max_scanned()
+        .map_err(|e| anyhow!("{e}"))?
+        .map(|m| u32::from(m.block_height())))
 }
 
 /// Nullifiers of every unspent Ironwood note in this wallet, across all accounts.
@@ -303,4 +334,151 @@ pub fn largest_spendable_note(
             index: u32::from(n.output_index()),
         });
     Ok(best)
+}
+
+// ---- Synchronisation ----------------------------------------------------------------
+
+/// Blocks fetched per batch while syncing; each batch is scanned and dropped before the next.
+const SYNC_BATCH_BLOCKS: u32 = 500;
+
+/// Error type of the in-memory block cache. The cache cannot fail; the traits need a type.
+#[derive(Debug)]
+pub struct CacheError;
+
+impl std::fmt::Display for CacheError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("block cache error")
+    }
+}
+
+impl std::error::Error for CacheError {}
+
+/// Compact blocks held in memory while they are scanned. The synchronizer downloads a
+/// batch, scans it and deletes it, so the cache never holds more than one batch and
+/// nothing besides the wallet database touches the disk.
+#[derive(Default)]
+pub struct MemBlockCache {
+    blocks: Mutex<Vec<CompactBlock>>,
+}
+
+fn height_of(block: &CompactBlock) -> BlockHeight {
+    BlockHeight::from_u32(u32::try_from(block.height).unwrap_or(u32::MAX))
+}
+
+impl MemBlockCache {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<CompactBlock>> {
+        self.blocks.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl BlockSource for MemBlockCache {
+    type Error = CacheError;
+
+    fn with_blocks<F, WalletErrT>(
+        &self,
+        from_height: Option<BlockHeight>,
+        limit: Option<usize>,
+        mut with_block: F,
+    ) -> Result<(), chain_error::Error<WalletErrT, Self::Error>>
+    where
+        F: FnMut(CompactBlock) -> Result<(), chain_error::Error<WalletErrT, Self::Error>>,
+    {
+        let mut blocks: Vec<CompactBlock> = self
+            .lock()
+            .iter()
+            .filter(|b| match from_height {
+                Some(h) => height_of(b) >= h,
+                None => true,
+            })
+            .cloned()
+            .collect();
+        blocks.sort_by_key(|b| b.height);
+        for b in blocks.into_iter().take(limit.unwrap_or(usize::MAX)) {
+            with_block(b)?;
+        }
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl BlockCache for MemBlockCache {
+    fn get_tip_height(
+        &self,
+        range: Option<&ScanRange>,
+    ) -> Result<Option<BlockHeight>, Self::Error> {
+        Ok(self
+            .lock()
+            .iter()
+            .map(height_of)
+            .filter(|h| match range {
+                Some(r) => r.block_range().contains(h),
+                None => true,
+            })
+            .max())
+    }
+
+    async fn read(&self, range: &ScanRange) -> Result<Vec<CompactBlock>, Self::Error> {
+        let mut blocks: Vec<CompactBlock> = self
+            .lock()
+            .iter()
+            .filter(|b| range.block_range().contains(&height_of(b)))
+            .cloned()
+            .collect();
+        blocks.sort_by_key(|b| b.height);
+        Ok(blocks)
+    }
+
+    async fn insert(&self, compact_blocks: Vec<CompactBlock>) -> Result<(), Self::Error> {
+        let mut guard = self.lock();
+        for b in compact_blocks {
+            guard.retain(|x| x.height != b.height);
+            guard.push(b);
+        }
+        Ok(())
+    }
+
+    async fn delete(&self, range: ScanRange) -> Result<(), Self::Error> {
+        self.lock()
+            .retain(|b| !range.block_range().contains(&height_of(b)));
+        Ok(())
+    }
+}
+
+/// Outcome of a sync pass.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct SyncReport {
+    /// Chain tip the server reported.
+    pub chain_tip: Option<u32>,
+    /// Highest block the wallet has scanned.
+    pub scanned_to: Option<u32>,
+}
+
+/// Bring the wallet up to date with a lightwalletd server: refresh the commitment-tree
+/// roots and the chain tip, then download and scan every block range the wallet still
+/// needs. Blocks are cached in memory only.
+pub fn sync_blocking(wallet: &Wallet, db: &mut Db, server: &str) -> Result<SyncReport> {
+    install_crypto_provider();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async {
+        let mut client = connect(server).await?;
+        let cache = MemBlockCache::default();
+        zcash_client_backend::sync::run(
+            &mut client,
+            &wallet.network,
+            &cache,
+            &mut *db,
+            SYNC_BATCH_BLOCKS,
+        )
+        .await
+        .map_err(|e| anyhow!("sync: {e}"))
+    })?;
+    Ok(SyncReport {
+        chain_tip: db
+            .chain_height()
+            .map_err(|e| anyhow!("{e}"))?
+            .map(u32::from),
+        scanned_to: max_scanned_height(db)?,
+    })
 }

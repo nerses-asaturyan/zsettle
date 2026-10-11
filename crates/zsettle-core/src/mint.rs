@@ -12,13 +12,12 @@ use rand_core::OsRng;
 use secrecy::SecretVec;
 use zcash_address::ZcashAddress;
 use zcash_client_backend::data_api::{
-    locking::LockFilter,
     wallet::{
         create_proposed_transactions,
         input_selection::{GreedyInputSelector, SpendPolicy},
-        propose_transfer, ConfirmationsPolicy, SpendingKeys, TargetHeight,
+        propose_transfer, ConfirmationsPolicy, SpendingKeys,
     },
-    InputSource, MaxSpendMode, TargetValue, WalletRead,
+    WalletRead,
 };
 use zcash_client_backend::fees::{
     standard::MultiOutputChangeStrategy, DustOutputPolicy, SplitPolicy, StandardFeeRule,
@@ -31,7 +30,7 @@ use zcash_protocol::{
     consensus::Network,
     memo::{Memo, MemoBytes},
     value::Zatoshis,
-    ShieldedPool,
+    ShieldedPool, TxId,
 };
 use zip321::{Payment, TransactionRequest};
 
@@ -48,36 +47,61 @@ pub struct ItemNote {
     pub mined_height: Option<u32>,
 }
 
-/// Unspent Ironwood notes of an account, largest first.
-pub fn unspent_notes(
-    db: &Db,
-    account: AccountUuid,
-    target_height: TargetHeight,
-) -> Result<Vec<ItemNote>> {
-    let notes = db
-        .select_spendable_notes(
-            account,
-            TargetValue::AllFunds(MaxSpendMode::MaxSpendable),
-            &[ShieldedPool::Ironwood],
-            target_height,
-            ConfirmationsPolicy::default(),
-            &[],
-            LockFilter::Unfiltered,
+/// Every unspent Ironwood note of an account, dust included, oldest first and unmined notes
+/// last. The wallet's own note selection ignores notes at or below the ZIP 317 marginal fee,
+/// which is exactly where item notes live, so this reads the wallet's tables directly.
+pub fn unspent_notes(wallet: &Wallet, db: &Db, account: AccountUuid) -> Result<Vec<ItemNote>> {
+    let tip = crate::wallet::max_scanned_height(db)?.unwrap_or(0);
+    let conn = rusqlite::Connection::open_with_flags(
+        wallet.dir.join("data.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| anyhow!("opening wallet database: {e}"))?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT t.txid, n.action_index, n.value, t.mined_height
+             FROM ironwood_received_notes n
+             JOIN transactions t ON t.id_tx = n.transaction_id
+             JOIN accounts a ON a.id = n.account_id
+             WHERE a.uuid = ?1
+               AND NOT EXISTS (
+                 SELECT 1 FROM ironwood_received_note_spends s
+                 JOIN transactions st ON st.id_tx = s.transaction_id
+                 WHERE s.ironwood_received_note_id = n.id
+                   AND (st.mined_height IS NOT NULL
+                        OR st.expiry_height IS NULL
+                        OR st.expiry_height = 0
+                        OR st.expiry_height >= ?2))
+             ORDER BY t.mined_height IS NULL, t.mined_height, n.action_index",
         )
         .map_err(|e| anyhow!("{e}"))?;
-    let mut out: Vec<ItemNote> = notes
-        .ironwood()
-        .iter()
-        .map(|n| ItemNote {
-            note: NoteRef {
-                txid: *n.txid(),
-                index: u32::from(n.output_index()),
+    let rows = stmt
+        .query_map(
+            rusqlite::params![account.expose_uuid().as_bytes().as_slice(), tip],
+            |row| {
+                let txid: Vec<u8> = row.get(0)?;
+                let index: u32 = row.get(1)?;
+                let value: i64 = row.get(2)?;
+                let mined: Option<u32> = row.get(3)?;
+                Ok((txid, index, value, mined))
             },
-            value_zat: n.note().value().inner(),
-            mined_height: n.mined_height().map(u32::from),
-        })
-        .collect();
-    out.sort_by(|a, b| b.value_zat.cmp(&a.value_zat));
+        )
+        .map_err(|e| anyhow!("{e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (txid, index, value, mined_height) = row.map_err(|e| anyhow!("{e}"))?;
+        let txid: [u8; 32] = txid
+            .try_into()
+            .map_err(|_| anyhow!("bad txid in the wallet database"))?;
+        out.push(ItemNote {
+            note: NoteRef {
+                txid: TxId::from_bytes(txid),
+                index,
+            },
+            value_zat: u64::try_from(value).unwrap_or(0),
+            mined_height,
+        });
+    }
     Ok(out)
 }
 

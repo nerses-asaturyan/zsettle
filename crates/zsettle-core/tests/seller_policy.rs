@@ -1,14 +1,13 @@
 //! Seller policy against synthetic trades: the checks must approve a correct trade and
 //! refuse underpayment, long expiry, a missing item spend and an extra seller spend.
 
-use incrementalmerkletree::{Hashable, Level};
-use orchard::keys::{FullViewingKey, Scope, SpendingKey};
-use orchard::note::{ExtractedNoteCommitment, Note, NoteVersion, RandomSeed, Rho};
-use orchard::tree::{MerkleHashOrchard, MerklePath};
-use orchard::value::NoteValue;
+mod common;
+
+use common::{fixture, Fixture};
+use orchard::keys::Scope;
 use pczt::roles::{creator::Creator, io_finalizer::IoFinalizer};
 use pczt::Pczt;
-use rand::{RngCore, SeedableRng};
+use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use zcash_primitives::transaction::builder::{BuildConfig, Builder, BundlePadding};
 use zcash_primitives::transaction::fees::zip317::{FeeError, FeeRule};
@@ -17,103 +16,7 @@ use zcash_protocol::memo::MemoBytes;
 use zcash_protocol::value::Zatoshis;
 use zsettle_core::policy::{check, prepared_ivk, PolicyError, SellerPolicy};
 
-const DEPTH: usize = orchard::NOTE_COMMITMENT_TREE_DEPTH;
 const TARGET: u32 = 3_514_200;
-
-fn note(rng: &mut ChaCha20Rng, addr: orchard::Address, value: u64) -> Note {
-    loop {
-        let mut rho_bytes = [0u8; 32];
-        rng.fill_bytes(&mut rho_bytes);
-        let Some(rho) = Rho::from_bytes(&rho_bytes).into() else {
-            continue;
-        };
-        let mut rs = [0u8; 32];
-        rng.fill_bytes(&mut rs);
-        let Some(rseed) = RandomSeed::from_bytes(rs, &rho).into() else {
-            continue;
-        };
-        if let Some(n) = Note::from_parts(
-            addr,
-            NoteValue::from_raw(value),
-            rho,
-            rseed,
-            NoteVersion::V3,
-        )
-        .into()
-        {
-            return n;
-        }
-    }
-}
-
-/// A small tree holding the given notes at positions 0..n; returns their paths and the anchor.
-fn tree(notes: &[Note]) -> (Vec<MerklePath>, orchard::Anchor) {
-    let leaves: Vec<MerkleHashOrchard> = notes
-        .iter()
-        .map(|n| MerkleHashOrchard::from_cmx(&ExtractedNoteCommitment::from(n.commitment())))
-        .collect();
-    // Level-0 siblings; levels above hold the empty roots of a tree with <= 4 leaves.
-    let empty = MerkleHashOrchard::empty_leaf();
-    let get = |i: usize| leaves.get(i).copied().unwrap_or(empty);
-    let l1 = [
-        MerkleHashOrchard::combine(Level::from(0), &get(0), &get(1)),
-        MerkleHashOrchard::combine(Level::from(0), &get(2), &get(3)),
-    ];
-    let mut paths = Vec::new();
-    for (i, _) in notes.iter().enumerate() {
-        let mut p = [empty; DEPTH];
-        p[0] = get(i ^ 1);
-        p[1] = l1[(i / 2) ^ 1];
-        for (l, slot) in p.iter_mut().enumerate().skip(2) {
-            *slot = MerkleHashOrchard::empty_root(Level::from(l as u8));
-        }
-        paths.push(MerklePath::from_parts(i as u32, p));
-    }
-    let anchor = paths[0].root(ExtractedNoteCommitment::from(notes[0].commitment()));
-    for (i, p) in paths.iter().enumerate() {
-        assert_eq!(
-            anchor,
-            p.root(ExtractedNoteCommitment::from(notes[i].commitment()))
-        );
-    }
-    (paths, anchor)
-}
-
-struct Fixture {
-    fvk_item: FullViewingKey,
-    fvk_seller: FullViewingKey,
-    fvk_buyer: FullViewingKey,
-    item_note: Note,
-    extra_seller_note: Note,
-    buyer_note: Note,
-    paths: Vec<MerklePath>,
-    anchor: orchard::Anchor,
-}
-
-fn fixture() -> Fixture {
-    let mut rng = ChaCha20Rng::seed_from_u64(11);
-    let fvk_item = FullViewingKey::from(&SpendingKey::from_bytes([1u8; 32]).unwrap());
-    let fvk_buyer = FullViewingKey::from(&SpendingKey::from_bytes([2u8; 32]).unwrap());
-    let fvk_seller = FullViewingKey::from(&SpendingKey::from_bytes([3u8; 32]).unwrap());
-    let item_note = note(&mut rng, fvk_item.address_at(0u32, Scope::External), 1_000);
-    let extra_seller_note = note(&mut rng, fvk_item.address_at(1u32, Scope::External), 1_000);
-    let buyer_note = note(
-        &mut rng,
-        fvk_buyer.address_at(0u32, Scope::External),
-        100_000,
-    );
-    let (paths, anchor) = tree(&[item_note, extra_seller_note, buyer_note]);
-    Fixture {
-        fvk_item,
-        fvk_seller,
-        fvk_buyer,
-        item_note,
-        extra_seller_note,
-        buyer_note,
-        paths,
-        anchor,
-    }
-}
 
 /// Build an unsigned, unproven trade PCZT. `price` is what the buyer actually pays.
 fn trade(f: &Fixture, price: u64, expiry_delta: u32, spend_extra: bool) -> Pczt {

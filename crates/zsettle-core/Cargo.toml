@@ -38,6 +38,7 @@ rand_core = { workspace = true }
 tonic = { workspace = true }
 tokio = { workspace = true }
 rustls = { workspace = true }
+async-trait = { workspace = true }
 
 [dev-dependencies]
 rand_chacha = { workspace = true }

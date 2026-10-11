@@ -19,7 +19,7 @@ use rand_core::OsRng;
 use zcash_client_backend::data_api::WalletCommitmentTrees;
 use zcash_client_sqlite::AccountUuid;
 use zcash_keys::address::Address;
-use zcash_primitives::transaction::builder::{BuildConfig, Builder, BundlePadding};
+use zcash_primitives::transaction::builder::{BuildConfig, Builder, BundlePadding, PcztResult};
 use zcash_primitives::transaction::fees::zip317::{FeeError, FeeRule};
 use zcash_protocol::consensus::{BlockHeight, Network};
 use zcash_protocol::memo::MemoBytes;
@@ -49,6 +49,11 @@ pub struct TradeRequest {
     pub min_confirmations: u32,
     /// Memo attached to the payment output.
     pub memo: String,
+    /// Memo attached to the new item note (for example the item's name).
+    pub item_memo: String,
+    /// Account of the buyer's wallet that receives the item; defaults to `buyer_account`.
+    /// A dedicated item account lets the buyer resell later without exposing other funds.
+    pub receive_account: Option<AccountUuid>,
 }
 
 impl TradeRequest {
@@ -140,7 +145,14 @@ pub fn build_trade(db: &mut Db, network: Network, req: &TradeRequest) -> Result<
         }
         None => return Err(anyhow!("cannot decode seller address for this network")),
     };
-    let buyer_item_addr = fvk_buyer.address_at(0u32, Scope::External);
+    let fvk_receive = match req.receive_account {
+        Some(account) => account_ufvk(db, account)?
+            .orchard()
+            .cloned()
+            .ok_or_else(|| anyhow!("receiving account has no Orchard/Ironwood key"))?,
+        None => fvk_buyer.clone(),
+    };
+    let buyer_item_addr = fvk_receive.address_at(0u32, Scope::External);
     let buyer_change_addr = fvk_buyer.address_at(0u32, Scope::Internal);
 
     // Anchor and witnesses at one checkpoint.
@@ -170,66 +182,67 @@ pub fn build_trade(db: &mut Db, network: Network, req: &TradeRequest) -> Result<
         })?
         .ok_or_else(|| anyhow!("wallet has no Ironwood commitment tree"))?;
 
-    // The bundle.
+    // The bundle. The Orchard builder shuffles spends and outputs independently, so the
+    // item spend and the new item note would share an action only by chance. The protocol
+    // needs them in one action (the new note's rho is then the spent note's nullifier, which
+    // is what binds the lineage), so the bundle is rebuilt with fresh randomness until the
+    // pairing holds. Each attempt is cheap: proving happens once, afterwards.
     let target: BlockHeight = target_height.into();
     let expiry = target + req.expiry_delta;
-    let mut builder = Builder::new(
-        network,
-        target,
-        BuildConfig::Standard {
-            sapling_anchor: None,
-            orchard_anchor: None,
-            ironwood_anchor: Some(anchor),
-            orchard_padding: BundlePadding::DEFAULT,
-            ironwood_padding: BundlePadding::DEFAULT,
-        },
-    )
-    .with_expiry_height(expiry);
-
-    builder
-        .add_ironwood_spend::<FeeError>(fvk_item.clone(), item.note, path_item)
-        .map_err(|e| anyhow!("adding item spend: {e:?}"))?;
-    builder
-        .add_ironwood_spend::<FeeError>(fvk_buyer.clone(), payer.note, path_payer)
-        .map_err(|e| anyhow!("adding buyer spend: {e:?}"))?;
-    builder
-        .add_ironwood_output::<FeeError>(
-            Some(fvk_item.to_ovk(Scope::External)),
-            buyer_item_addr,
-            Zatoshis::from_u64(item_value).map_err(|_| anyhow!("item value"))?,
-            MemoBytes::empty(),
+    let item_value_zat = Zatoshis::from_u64(item_value).map_err(|_| anyhow!("item value"))?;
+    let price = Zatoshis::from_u64(req.price_zat).map_err(|_| anyhow!("price"))?;
+    let change_zat = Zatoshis::from_u64(change).map_err(|_| anyhow!("change"))?;
+    let item_memo = memo_bytes(&req.item_memo)?;
+    let payment_memo = memo_bytes(&req.memo)?;
+    let make_builder = || -> Result<Builder<Network, ()>> {
+        let mut builder = Builder::new(
+            network,
+            target,
+            BuildConfig::Standard {
+                sapling_anchor: None,
+                orchard_anchor: None,
+                ironwood_anchor: Some(anchor),
+                orchard_padding: BundlePadding::DEFAULT,
+                ironwood_padding: BundlePadding::DEFAULT,
+            },
         )
-        .map_err(|e| anyhow!("adding item output: {e:?}"))?;
-    builder
-        .add_ironwood_output::<FeeError>(
-            Some(fvk_buyer.to_ovk(Scope::External)),
-            seller_addr,
-            Zatoshis::from_u64(req.price_zat).map_err(|_| anyhow!("price"))?,
-            memo_bytes(&req.memo)?,
-        )
-        .map_err(|e| anyhow!("adding payment output: {e:?}"))?;
-    if change > 0 {
+        .with_expiry_height(expiry);
+        builder
+            .add_ironwood_spend::<FeeError>(fvk_item.clone(), item.note, path_item.clone())
+            .map_err(|e| anyhow!("adding item spend: {e:?}"))?;
+        builder
+            .add_ironwood_spend::<FeeError>(fvk_buyer.clone(), payer.note, path_payer.clone())
+            .map_err(|e| anyhow!("adding buyer spend: {e:?}"))?;
         builder
             .add_ironwood_output::<FeeError>(
-                Some(fvk_buyer.to_ovk(Scope::Internal)),
-                buyer_change_addr,
-                Zatoshis::from_u64(change).map_err(|_| anyhow!("change"))?,
-                MemoBytes::empty(),
+                Some(fvk_item.to_ovk(Scope::External)),
+                buyer_item_addr,
+                item_value_zat,
+                item_memo.clone(),
             )
-            .map_err(|e| anyhow!("adding change output: {e:?}"))?;
-    }
+            .map_err(|e| anyhow!("adding item output: {e:?}"))?;
+        builder
+            .add_ironwood_output::<FeeError>(
+                Some(fvk_buyer.to_ovk(Scope::External)),
+                seller_addr,
+                price,
+                payment_memo.clone(),
+            )
+            .map_err(|e| anyhow!("adding payment output: {e:?}"))?;
+        if change > 0 {
+            builder
+                .add_ironwood_output::<FeeError>(
+                    Some(fvk_buyer.to_ovk(Scope::Internal)),
+                    buyer_change_addr,
+                    change_zat,
+                    MemoBytes::empty(),
+                )
+                .map_err(|e| anyhow!("adding change output: {e:?}"))?;
+        }
+        Ok(builder)
+    };
 
-    let result = builder
-        .build_for_pczt(OsRng, &FeeRule::standard())
-        .map_err(|e| anyhow!("building transaction: {e:?}"))?;
-    let item_action_index = result
-        .ironwood_meta
-        .spend_action_index(0)
-        .ok_or_else(|| anyhow!("no action for the item spend"))?;
-    let payment_action_index = result
-        .ironwood_meta
-        .spend_action_index(1)
-        .ok_or_else(|| anyhow!("no action for the buyer spend"))?;
+    let (result, item_action_index, payment_action_index) = build_paired(make_builder)?;
 
     let pczt = Creator::build_from_parts(result.pczt_parts)
         .ok_or_else(|| anyhow!("PCZT creation failed"))?;
@@ -254,6 +267,39 @@ pub fn build_trade(db: &mut Db, network: Network, req: &TradeRequest) -> Result<
         expiry_height: expiry.into(),
     })
 }
+
+/// Build the bundle until the item spend (spend 0) and the new item note (output 0) share an
+/// action. With cross-address outputs enabled the builder pairs them at random, so each
+/// attempt succeeds with probability 1/n for n actions; `MAX_PAIRING_ATTEMPTS` makes failure
+/// astronomically unlikely. Returns the build result and the item and payment action indices.
+pub fn build_paired(
+    mut make_builder: impl FnMut() -> Result<Builder<Network, ()>>,
+) -> Result<(PcztResult<Network>, usize, usize)> {
+    for _ in 0..MAX_PAIRING_ATTEMPTS {
+        let result = make_builder()?
+            .build_for_pczt(OsRng, &FeeRule::standard())
+            .map_err(|e| anyhow!("building transaction: {e:?}"))?;
+        let meta = &result.ironwood_meta;
+        let item_spend = meta
+            .spend_action_index(0)
+            .ok_or_else(|| anyhow!("no action for the item spend"))?;
+        let item_output = meta
+            .output_action_index(0)
+            .ok_or_else(|| anyhow!("no action for the item output"))?;
+        let payment = meta
+            .spend_action_index(1)
+            .ok_or_else(|| anyhow!("no action for the buyer spend"))?;
+        if item_spend == item_output {
+            return Ok((result, item_spend, payment));
+        }
+    }
+    Err(anyhow!(
+        "could not pair the item spend with the item output in {MAX_PAIRING_ATTEMPTS} attempts"
+    ))
+}
+
+/// Upper bound on bundle rebuilds while looking for a paired item action.
+pub const MAX_PAIRING_ATTEMPTS: usize = 128;
 
 fn memo_bytes(s: &str) -> Result<MemoBytes> {
     if s.is_empty() {

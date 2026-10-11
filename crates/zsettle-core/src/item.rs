@@ -1,6 +1,6 @@
 //! Note-sealed items: identity, anchor, manifest and consignment.
 //!
-//! Encodings follow the nscv convention where it is cheap to do so
+//! Day 6–7 work. Encodings follow the nscv convention where it is cheap to do so
 //! (`ZBT1` anchor, `ZBM1` manifest, 96-byte per-hop consignment entries), updated for
 //! Ironwood v3 notes. Items MUST carry non-zero value: a zero-value note has no Merkle
 //! binding in the Action circuit.

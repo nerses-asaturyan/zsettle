@@ -19,11 +19,11 @@ The buyer builds and proves the whole transaction holding only viewing keys. The
 
 | Crate | Role |
 |---|---|
-| `zsettle-core` | library: items, listings, two-party bundle, PCZT roles, seller policy, keyless verifier, lightwalletd client |
-| `zsettle` | buyer and verifier CLI: `list`, `import-listing`, `buy`, `finish`, `broadcast`, `verify` |
-| `zsettle-seller` | seller service: `mint`, `items`, `publish`, `sign`, `serve` (inbox/outbox loop that signs only the item action) |
+| `zsettle-core` | library: items, listings, two-party bundle, PCZT roles, seller policy, wallet sync, keyless verifier, lightwalletd client |
+| `zsettle` | buyer and verifier CLI: `list`, `sync`, `import-listing`, `buy`, `finish`, `broadcast`, `verify` |
+| `zsettle-seller` | seller service: `sync`, `mint`, `items`, `publish`, `sign`, `serve` (syncs, reconciles listings with the chain, signs only the item action) |
 
-See [docs/SETUP.md](docs/SETUP.md) for wallets and [docs/TRADE.md](docs/TRADE.md) for the full flow, [spec/PROTOCOL.md](spec/PROTOCOL.md) and [spec/THREAT_MODEL.md](spec/THREAT_MODEL.md) for the design.
+See [docs/SETUP.md](docs/SETUP.md) for wallets, [docs/TRADE.md](docs/TRADE.md) for the full flow including resale, [spec/PROTOCOL.md](spec/PROTOCOL.md) and [spec/THREAT_MODEL.md](spec/THREAT_MODEL.md) for the design.
 
 ## What is private, what is real, what is a mock
 
@@ -31,16 +31,18 @@ See [docs/SETUP.md](docs/SETUP.md) for wallets and [docs/TRADE.md](docs/TRADE.md
 |---|---|
 | Buyer and seller identities | private (shielded Ironwood notes) |
 | Trade amounts | private; only the listed price is public, by choice |
-| Settlement | real: mainnet transactions `e76531b9…6ae2` (block 3514109) and `2e0f4af1…9167c` (block 3514119) |
+| Settlement | real: four mainnet trades, `e76531b9…6ae2` (block 3514109), `2e0f4af1…9167c` (3514119), `e70f4890…8877` (3514159) and a resale `af09c2cf…5804` (3514174) |
 | Items | real shielded notes minted by this tool; no claim about any third-party collection |
-| Provenance | real: `zsettle verify` traces an item through mainnet compact blocks with the listing's viewing key only |
+| Provenance | real: `zsettle verify` traces an item through mainnet compact blocks with the listings' viewing keys only, across resales |
 | Mock | nothing |
 
 ## Status
 
 - Two-party trade construction, proving, redaction, seller policy, signing, extraction and broadcast: working on mainnet.
-- Listings, seller service loop, minting, keyless verification: working on mainnet.
-- Tests: the proven settlement core as an integration test, six seller-policy tests on synthetic trades.
+- Listings, seller service loop, minting, built-in wallet sync, keyless verification: working on mainnet.
+- Seller service: syncs before every pass, removes sold items and relists expired offers by itself, honours one offer per item, survives restarts and server outages.
+- Resale: items can be received into a dedicated item account and relisted; provenance follows them across holders.
+- Tests: the proven settlement core as an integration test, six seller-policy tests on synthetic trades, listings format tests.
 
 ## License
 

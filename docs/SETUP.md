@@ -1,50 +1,43 @@
-# Development setup
+# Setup
 
-Mainnet, Ironwood pool, published crates. Testnet is on NU7 since 2026-10-04 and needs pre-release crates, so we develop on mainnet with dust.
+Mainnet, Ironwood pool, published crates. Testnet has been on NU7 since 2026-10-04 and needs pre-release crates, so everything here runs on mainnet with dust amounts.
 
-## Tooling
+## Build
+
+```
+cargo build --release
+```
+
+Binaries: `target/release/zsettle` (buyer and verifier) and `target/release/zsettle-seller` (seller service). First build downloads the Sapling parameters for the bundled prover; the Orchard circuit keys are built at run time.
+
+## Wallets
+
+zsettle reads and writes the wallet layout of [zcash-devtool](https://github.com/zcash/zcash-devtool): `data.sqlite`, and `keys.toml` with the network, birthday and an age-encrypted mnemonic. Creating wallets and accounts is the one step that still uses devtool; syncing, minting, trading and verifying are zsettle commands.
 
 ```
 git clone https://github.com/zcash/zcash-devtool ~/code/tools/zcash-devtool
 cd ~/code/tools/zcash-devtool && cargo build --release
-```
-
-Pinned by devtool at this commit: zcash_client_backend 0.24, zcash_client_sqlite 0.22, pczt 0.9.1, orchard 0.15, zcash_primitives 0.30. The zsettle crates stay on the same line.
-
-Light server: `zec.rocks:443` (built into devtool as `-s zecrocks`). Use `--connection direct`; it is the default. The first connection attempt can stall; a retry connects in under a second.
-
-## Wallets
-
-Two wallets outside the repo, in `~/.zsettle/`:
-
-```
 D=~/code/tools/zcash-devtool/target/release/zcash-devtool
-$D wallet -w ~/.zsettle/buyer  init --name buyer  -i ~/.zsettle/buyer/key.txt  -n main -s zecrocks
+
 $D wallet -w ~/.zsettle/seller init --name seller -i ~/.zsettle/seller/key.txt -n main -s zecrocks
-$D wallet -w ~/.zsettle/seller generate-account --name item -i ~/.zsettle/seller/key.txt
+$D wallet -w ~/.zsettle/seller generate-account --name item -i ~/.zsettle/seller/key.txt -s zecrocks
+$D wallet -w ~/.zsettle/buyer  init --name buyer  -i ~/.zsettle/buyer/key.txt  -n main -s zecrocks
+$D wallet -w ~/.zsettle/buyer  generate-account --name item -i ~/.zsettle/buyer/key.txt -s zecrocks
 ```
 
-The seller wallet has two accounts: `seller` (index 0, payout) and `item` (index 1, holds item notes). Item notes are minted by sending from account 0 to the item account's address.
+Each wallet gets two accounts: index 0 pays and receives payments, index 1 holds items. Items live in their own ZIP 32 account so that publishing its viewing key reveals nothing about the rest of the wallet. The buyer's item account is only needed to resell.
 
-Hand the item account's viewing key to the buyer (this is the "consignment" step of the protocol):
+`$D wallet -w <dir> list-accounts` prints the account UUIDs the commands take. `-s zecrocks` is `https://zec.rocks:443`, the default server of every zsettle command; `--server` overrides it. The first connection to it occasionally stalls; a retry connects in under a second.
 
-```
-$D wallet -w ~/.zsettle/seller list-accounts        # copy the UFVK of the `item` account
-$D wallet -w ~/.zsettle/buyer  import-ufvk --name item-view <UFVK> <birthday>
-```
-
-Sync and inspect:
+## Syncing
 
 ```
-$D wallet -w ~/.zsettle/buyer  sync -s zecrocks
-$D wallet -w ~/.zsettle/seller sync -s zecrocks
-$D wallet -w ~/.zsettle/buyer  balance
-$D wallet -w ~/.zsettle/buyer  list-addresses [ACCOUNT_UUID]
+zsettle sync --wallet ~/.zsettle/buyer
+zsettle-seller sync --wallet ~/.zsettle/seller
 ```
 
-## Devtool pieces zsettle builds on
+This is the `zcash_client_backend` synchronizer with an in-memory block cache: it refreshes the commitment-tree roots and the chain tip, downloads the block ranges the wallet still needs in batches of 500, scans them and drops them. Nothing besides the wallet database is written. The seller service runs the same sync before every pass, so a seller never signs against a stale view of the chain.
 
-- `pczt sign` signs every action whose key lives in the local wallet. A seller wallet that holds only the item account signs only the item action; `zsettle-seller` adds the policy checks in front of it.
-- `pczt redact -k <key>` strips fields before the hand-off.
-- `pczt extract` runs the spend finalizer and transaction extractor.
-- `pczt create` is single-account; the two-account trade bundle is zsettle's own code.
+## Funding
+
+Send ZEC to the buyer account's unified address (`$D wallet -w ~/.zsettle/buyer list-addresses`). A trade costs the price plus the ZIP 317 fee: 15,000 zat with a change output, 10,000 when the paying note is exact. A mint costs 10,000 zat plus 5,000 for every input beyond the first. Everything in [TRADE.md](TRADE.md) was funded with 161,000 zat.

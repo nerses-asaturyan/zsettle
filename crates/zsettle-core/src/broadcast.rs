@@ -10,7 +10,8 @@ use zcash_client_backend::proto::service::{
 /// Default mainnet lightwalletd endpoint.
 pub const DEFAULT_SERVER: &str = "https://zec.rocks:443";
 
-async fn connect(server: &str) -> Result<CompactTxStreamerClient<Channel>> {
+/// Open a gRPC channel to a lightwalletd server (TLS with WebPKI roots for `https` URLs).
+pub async fn connect(server: &str) -> Result<CompactTxStreamerClient<Channel>> {
     let uri: tonic::transport::Uri = server.parse().map_err(|e| anyhow!("server url: {e}"))?;
     let host = uri
         .host()
@@ -29,7 +30,8 @@ async fn connect(server: &str) -> Result<CompactTxStreamerClient<Channel>> {
     Ok(CompactTxStreamerClient::new(channel))
 }
 
-fn install_crypto_provider() {
+/// Install the process-wide rustls crypto provider. Call before any TLS connection.
+pub fn install_crypto_provider() {
     // rustls needs a process-wide crypto provider; installing twice is harmless.
     let _ = rustls::crypto::ring::default_provider().install_default();
 }

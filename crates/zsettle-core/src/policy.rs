@@ -54,6 +54,12 @@ pub enum PolicyError {
         /// Policy limit.
         max_delta: u32,
     },
+    /// A signed trade for this item is still outstanding; the seller honours one at a time.
+    #[error("the item is under offer until block {until}; retry after that height")]
+    UnderOffer {
+        /// Height after which the outstanding trade can no longer be mined.
+        until: u32,
+    },
     /// The PCZT cannot be parsed as an Ironwood bundle.
     #[error("invalid Ironwood bundle: {0}")]
     Invalid(String),

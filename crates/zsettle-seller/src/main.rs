@@ -5,7 +5,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     thread,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -13,13 +13,19 @@ use clap::{Parser, Subcommand};
 use orchard::keys::{FullViewingKey, Scope, SpendAuthorizingKey};
 use orchard::note::Nullifier;
 use zcash_keys::address::UnifiedAddress;
-use zsettle_core::listing::{ListedItem, Listings};
+use zsettle_core::listing::{ListedItem, Listings, Pending};
 use zsettle_core::pczt as pczt_ops;
-use zsettle_core::policy::{check, describe, prepared_ivk, SellerPolicy};
+use zsettle_core::policy::{check, describe, prepared_ivk, Approved, PolicyError, SellerPolicy};
 use zsettle_core::wallet::{
-    account_ufvk, heights, ironwood_note, parse_account, unspent_ironwood_nullifiers, Db, NoteRef,
-    Wallet,
+    account_ufvk, find_ironwood_note, heights, ironwood_note, max_scanned_height, parse_account,
+    sync_blocking, unspent_ironwood_nullifiers, Db, NoteRef, Wallet,
 };
+
+/// Longest pause between passes after repeated failures.
+const MAX_BACKOFF_SECS: u64 = 300;
+/// Inbox files modified more recently than this are left for the next pass: they may still be
+/// in the middle of being written.
+const SETTLE_SECS: u64 = 2;
 
 #[derive(Parser)]
 #[command(
@@ -51,6 +57,15 @@ struct WalletArgs {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Sync the wallet with a lightwalletd server (no other tool needed).
+    Sync {
+        /// Wallet directory.
+        #[arg(long)]
+        wallet: PathBuf,
+        /// lightwalletd server URL.
+        #[arg(long, default_value = zsettle_core::broadcast::DEFAULT_SERVER)]
+        server: String,
+    },
     /// Mint an item: pay a small amount from the payout account to the item account, memo = name.
     Mint {
         #[command(flatten)]
@@ -117,13 +132,17 @@ enum Cmd {
         dry_run: bool,
     },
     /// Watch an inbox directory, sign every acceptable trade, and write results to an outbox.
+    ///
+    /// Each pass syncs the wallet, reconciles the listings with the chain (sold items are
+    /// removed, expired offers are listed again), then handles every envelope in the inbox.
+    /// A failed pass is logged and retried with backoff; the service does not exit on its own.
     Serve {
         #[command(flatten)]
         w: WalletArgs,
         /// age identity file that decrypts the seller wallet's mnemonic.
         #[arg(long)]
         identity: PathBuf,
-        /// Listings file (sold items are removed from it).
+        /// Listings file (kept in sync with the chain: sold items removed, offers tracked).
         #[arg(long)]
         listings: PathBuf,
         /// Directory watched for `*.pczt` envelopes.
@@ -132,22 +151,37 @@ enum Cmd {
         /// Directory where `*.signed.pczt` files are written.
         #[arg(long)]
         outbox: PathBuf,
-        /// Seconds between inbox scans.
+        /// Seconds between passes.
         #[arg(long, default_value_t = 5)]
         poll_secs: u64,
-        /// Shell command run before each scan (for example a wallet sync).
+        /// lightwalletd server URL for the built-in sync.
+        #[arg(long, default_value = zsettle_core::broadcast::DEFAULT_SERVER)]
+        server: String,
+        /// Do not sync; something else keeps the wallet up to date.
+        #[arg(long)]
+        no_sync: bool,
+        /// Shell command to run instead of the built-in sync.
         #[arg(long)]
         sync_cmd: Option<String>,
-        /// Process the inbox once and exit.
+        /// Run one pass and exit; a failed pass exits with an error.
         #[arg(long)]
         once: bool,
     },
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .init();
     let cli = Cli::parse();
     match cli.cmd {
+        Cmd::Sync { wallet, server } => {
+            let wallet = Wallet::open(&wallet)?;
+            let mut db = wallet.db()?;
+            let report = sync_blocking(&wallet, &mut db, &server)?;
+            println!("{}", serde_json::to_string(&report)?);
+            Ok(())
+        }
         Cmd::Mint {
             w,
             identity,
@@ -177,9 +211,8 @@ fn main() -> Result<()> {
         Cmd::Items { w } => {
             let wallet = Wallet::open(&w.wallet)?;
             let db = wallet.db()?;
-            let (target, _) = heights(&db, 1)?;
             let notes =
-                zsettle_core::mint::unspent_notes(&db, parse_account(&w.item_account)?, target)?;
+                zsettle_core::mint::unspent_notes(&wallet, &db, parse_account(&w.item_account)?)?;
             for n in &notes {
                 println!(
                     "{}:{}  {:>8} zat  mined {}",
@@ -243,6 +276,7 @@ fn main() -> Result<()> {
                 name,
                 price_zat: price,
                 max_expiry_delta,
+                pending: None,
             });
             l.write(&listings)?;
             println!(
@@ -265,7 +299,7 @@ fn main() -> Result<()> {
             let pczt = pczt_ops::from_bytes(
                 &fs::read(&input).with_context(|| format!("reading {}", input.display()))?,
             )?;
-            let outcome = process(&wallet, &db, &w, &l, &pczt)?;
+            let outcome = process(&db, &w, &l, &pczt)?;
             println!("{}", describe(&outcome.result));
             let (item, approved) = match outcome.result {
                 Ok(a) => (outcome.item.expect("matched item"), a),
@@ -302,113 +336,264 @@ fn main() -> Result<()> {
             inbox,
             outbox,
             poll_secs,
+            server,
+            no_sync,
             sync_cmd,
             once,
         } => {
-            fs::create_dir_all(&inbox)?;
-            fs::create_dir_all(inbox.join("done"))?;
-            fs::create_dir_all(inbox.join("rejected"))?;
-            fs::create_dir_all(&outbox)?;
-            loop {
-                if let Some(cmd) = &sync_cmd {
-                    let status = std::process::Command::new("sh").arg("-c").arg(cmd).status();
-                    if let Err(e) = status {
-                        eprintln!("sync command failed to start: {e}");
-                    }
-                }
-                let wallet = Wallet::open(&w.wallet)?;
+            for dir in [
+                inbox.clone(),
+                inbox.join("done"),
+                inbox.join("rejected"),
+                outbox.clone(),
+            ] {
+                fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+            }
+            // Configuration errors stop the service before it starts; everything after is retried.
+            let wallet = Wallet::open(&w.wallet)?;
+            {
                 let db = wallet.db()?;
-                let mut l = Listings::read(&listings)?;
-                let mut entries: Vec<PathBuf> = fs::read_dir(&inbox)?
-                    .filter_map(|e| e.ok().map(|e| e.path()))
-                    .filter(|p| p.is_file() && p.extension().map(|x| x == "pczt").unwrap_or(false))
-                    .collect();
-                entries.sort();
-                for path in entries {
-                    let stem = path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("trade")
-                        .to_string();
-                    let outcome = match fs::read(&path)
-                        .map_err(anyhow::Error::from)
-                        .and_then(|b| pczt_ops::from_bytes(&b))
-                    {
-                        Ok(pczt) => match process(&wallet, &db, &w, &l, &pczt) {
-                            Ok(o) => match o.result {
-                                Ok(approved) => {
-                                    let item = o.item.expect("matched item");
-                                    match sign(
-                                        &wallet,
-                                        &identity,
-                                        w.item_account_index,
-                                        pczt,
-                                        approved.item_action_index,
-                                    )
-                                    .and_then(|signed| pczt_ops::to_bytes(&signed))
-                                    {
-                                        Ok(bytes) => {
-                                            let out = outbox.join(format!("{stem}.signed.pczt"));
-                                            fs::write(&out, bytes)?;
-                                            l.remove(&item.note);
-                                            l.write(&listings)?;
-                                            Ok(serde_json::json!({
-                                                "file": path, "item": item.note, "signed_action": approved.item_action_index,
-                                                "paid_zat": approved.paid_zat, "expiry_height": approved.expiry_height, "out": out,
-                                            }))
-                                        }
-                                        Err(e) => Err(format!("signing failed: {e}")),
-                                    }
-                                }
-                                Err(e) => Err(format!("refused: {e}")),
-                            },
-                            Err(e) => Err(format!("error: {e}")),
-                        },
-                        Err(e) => Err(format!("unreadable: {e}")),
-                    };
-                    match outcome {
-                        Ok(v) => {
-                            println!("{v}");
-                            fs::rename(&path, inbox.join("done").join(path.file_name().unwrap()))?;
+                account_ufvk(&db, parse_account(&w.item_account)?)?;
+                payout_key(&db, &w)?;
+            }
+            wallet
+                .seed(&identity)
+                .context("the identity file does not decrypt this wallet's mnemonic")?;
+            let l = Listings::read(&listings)?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "event": "start",
+                    "listed": l.items.len(),
+                    "under_offer": l.items.iter().filter(|i| i.pending.is_some()).count(),
+                    "inbox": inbox,
+                    "outbox": outbox,
+                    "sync": if sync_cmd.is_some() { "command" } else if no_sync { "off" } else { "built-in" },
+                    "server": server,
+                })
+            );
+            let service = Service {
+                w: &w,
+                identity: &identity,
+                listings: &listings,
+                inbox: &inbox,
+                outbox: &outbox,
+                server: &server,
+                no_sync,
+                sync_cmd: sync_cmd.as_deref(),
+            };
+            let poll = poll_secs.max(1);
+            let mut delay = poll;
+            loop {
+                match service.pass() {
+                    Ok(()) => delay = poll,
+                    Err(e) => {
+                        println!(
+                            "{}",
+                            serde_json::json!({ "event": "error", "error": format!("{e:#}"), "retry_in_secs": delay })
+                        );
+                        if once {
+                            return Err(e);
                         }
-                        Err(reason) => {
-                            println!(
-                                "{}",
-                                serde_json::json!({ "file": path, "rejected": reason })
-                            );
-                            fs::rename(
-                                &path,
-                                inbox.join("rejected").join(path.file_name().unwrap()),
-                            )?;
-                            fs::write(
-                                inbox.join("rejected").join(format!("{stem}.reason.txt")),
-                                reason,
-                            )?;
-                        }
+                        thread::sleep(Duration::from_secs(delay));
+                        delay = (delay * 2).min(MAX_BACKOFF_SECS);
+                        continue;
                     }
                 }
                 if once {
                     return Ok(());
                 }
-                thread::sleep(Duration::from_secs(poll_secs));
+                thread::sleep(Duration::from_secs(delay));
             }
         }
     }
 }
 
+/// One running seller service.
+struct Service<'a> {
+    w: &'a WalletArgs,
+    identity: &'a Path,
+    listings: &'a Path,
+    inbox: &'a Path,
+    outbox: &'a Path,
+    server: &'a str,
+    no_sync: bool,
+    sync_cmd: Option<&'a str>,
+}
+
+impl Service<'_> {
+    /// One pass: sync, reconcile the listings with the chain, handle every envelope.
+    fn pass(&self) -> Result<()> {
+        if let Some(cmd) = self.sync_cmd {
+            run_sync_command(cmd)?;
+        }
+        let wallet = Wallet::open(&self.w.wallet)?;
+        let mut db = wallet.db()?;
+        if self.sync_cmd.is_none() && !self.no_sync {
+            sync_blocking(&wallet, &mut db, self.server).context("syncing the seller wallet")?;
+        }
+        let mut l = Listings::read(self.listings)?;
+        if reconcile(&db, &mut l)? {
+            l.write(self.listings)?;
+        }
+        for path in self.envelopes()? {
+            self.handle(&wallet, &db, &mut l, &path)?;
+        }
+        Ok(())
+    }
+
+    /// Envelopes waiting in the inbox, oldest name first, skipping files still being written.
+    fn envelopes(&self) -> Result<Vec<PathBuf>> {
+        let now = SystemTime::now();
+        let mut paths: Vec<PathBuf> = fs::read_dir(self.inbox)
+            .with_context(|| format!("reading {}", self.inbox.display()))?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_file() && e.path().extension().is_some_and(|x| x == "pczt"))
+            .filter(|e| settled(e, now))
+            .map(|e| e.path())
+            .collect();
+        paths.sort();
+        Ok(paths)
+    }
+
+    /// Handle one envelope: sign it or reject it, record the outcome, move the file.
+    fn handle(&self, wallet: &Wallet, db: &Db, l: &mut Listings, path: &Path) -> Result<()> {
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("trade")
+            .to_string();
+        let out = self.outbox.join(format!("{stem}.signed.pczt"));
+        if out.exists() {
+            // Signed in an earlier pass that stopped before moving the envelope.
+            println!(
+                "{}",
+                serde_json::json!({ "event": "already_signed", "file": path, "out": out })
+            );
+            return move_into(path, &self.inbox.join("done"));
+        }
+        match self.sign_envelope(wallet, db, l, path) {
+            Ok((item, approved, bytes)) => {
+                write_atomic(&out, &bytes)?;
+                l.set_pending(
+                    &item.note,
+                    Pending {
+                        expiry_height: approved.expiry_height,
+                        trade: stem.clone(),
+                    },
+                );
+                l.write(self.listings)?;
+                move_into(path, &self.inbox.join("done"))?;
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "event": "signed", "file": path, "item": item.note, "name": item.name,
+                        "signed_action": approved.item_action_index, "paid_zat": approved.paid_zat,
+                        "expiry_height": approved.expiry_height, "out": out,
+                    })
+                );
+            }
+            Err(reason) => {
+                println!(
+                    "{}",
+                    serde_json::json!({ "event": "rejected", "file": path, "reason": reason })
+                );
+                let rejected = self.inbox.join("rejected");
+                move_into(path, &rejected)?;
+                fs::write(rejected.join(format!("{stem}.reason.txt")), reason)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Read, check and sign one envelope. The error is the reason recorded for the buyer.
+    fn sign_envelope(
+        &self,
+        wallet: &Wallet,
+        db: &Db,
+        l: &Listings,
+        path: &Path,
+    ) -> std::result::Result<(ListedItem, Approved, Vec<u8>), String> {
+        let bytes = fs::read(path).map_err(|e| format!("unreadable: {e}"))?;
+        let pczt = pczt_ops::from_bytes(&bytes).map_err(|e| format!("unreadable: {e:#}"))?;
+        let outcome = process(db, self.w, l, &pczt).map_err(|e| format!("error: {e:#}"))?;
+        let approved = outcome.result.map_err(|e| format!("refused: {e}"))?;
+        let item = outcome
+            .item
+            .ok_or_else(|| "error: approved trade without a listed item".to_string())?;
+        let signed = sign(
+            wallet,
+            self.identity,
+            self.w.item_account_index,
+            pczt,
+            approved.item_action_index,
+        )
+        .map_err(|e| format!("signing failed: {e:#}"))?;
+        let bytes = pczt_ops::to_bytes(&signed).map_err(|e| format!("signing failed: {e:#}"))?;
+        Ok((item, approved, bytes))
+    }
+}
+
+/// Bring the listings in line with the wallet's view of the chain. Items whose note is no
+/// longer spendable are removed (sold through the service, or spent some other way); offers
+/// whose expiry height has been scanned with the note still unspent are listed again.
+/// Returns whether anything changed.
+fn reconcile(db: &Db, l: &mut Listings) -> Result<bool> {
+    let (target, _) = heights(db, 1)?;
+    let scanned = max_scanned_height(db)?;
+    let mut changed = false;
+    let mut kept = Vec::with_capacity(l.items.len());
+    for mut item in std::mem::take(&mut l.items) {
+        let Ok(r) = item.note_ref() else {
+            println!(
+                "{}",
+                serde_json::json!({ "event": "dropped", "item": item.note, "reason": "bad note reference" })
+            );
+            changed = true;
+            continue;
+        };
+        if find_ironwood_note(db, r, target)?.is_none() {
+            let event = if item.pending.is_some() {
+                "sold"
+            } else {
+                "spent_elsewhere"
+            };
+            println!(
+                "{}",
+                serde_json::json!({ "event": event, "item": item.note, "name": item.name })
+            );
+            changed = true;
+            continue;
+        }
+        let expired = match (&item.pending, scanned) {
+            (Some(p), Some(h)) => h >= p.expiry_height,
+            _ => false,
+        };
+        if expired {
+            if let Some(p) = item.pending.take() {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "event": "relisted", "item": item.note, "name": item.name,
+                        "expired_trade": p.trade, "expiry_height": p.expiry_height,
+                    })
+                );
+                changed = true;
+            }
+        }
+        kept.push(item);
+    }
+    l.items = kept;
+    Ok(changed)
+}
+
 struct Outcome {
     item: Option<ListedItem>,
-    result: Result<zsettle_core::policy::Approved, zsettle_core::policy::PolicyError>,
+    result: std::result::Result<Approved, PolicyError>,
 }
 
 /// Match a trade against the listings and run the policy checks.
-fn process(
-    wallet: &Wallet,
-    db: &Db,
-    w: &WalletArgs,
-    l: &Listings,
-    pczt: &pczt::Pczt,
-) -> Result<Outcome> {
+fn process(db: &Db, w: &WalletArgs, l: &Listings, pczt: &pczt::Pczt) -> Result<Outcome> {
     let (target, _) = heights(db, 1)?;
     let tip: u32 =
         u32::from(zcash_protocol::consensus::BlockHeight::from(target)).saturating_sub(1);
@@ -437,16 +622,22 @@ fn process(
     let Some((item, nf)) = matched else {
         return Ok(Outcome {
             item: None,
-            result: Err(zsettle_core::policy::PolicyError::ItemNotSpent),
+            result: Err(PolicyError::ItemNotSpent),
         });
     };
+    if let Some(p) = &item.pending {
+        let until = p.expiry_height;
+        return Ok(Outcome {
+            item: Some(item),
+            result: Err(PolicyError::UnderOffer { until }),
+        });
+    }
     let ivk = prepared_ivk(&payout_key(db, w)?);
     let policy = SellerPolicy {
         price_zat: item.price_zat,
         max_expiry_delta: item.max_expiry_delta,
         tip,
     };
-    let _ = wallet;
     let result = check(pczt, &nf, &seller_nfs, &ivk, &policy);
     Ok(Outcome {
         item: Some(item),
@@ -472,6 +663,43 @@ fn payout_key(db: &Db, w: &WalletArgs) -> Result<FullViewingKey> {
         .orchard()
         .cloned()
         .ok_or_else(|| anyhow!("payout account has no Orchard/Ironwood key"))
+}
+
+fn run_sync_command(cmd: &str) -> Result<()> {
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .status()
+        .context("starting the sync command")?;
+    if !status.success() {
+        return Err(anyhow!("sync command exited with {status}"));
+    }
+    Ok(())
+}
+
+/// True when the file has not been modified for `SETTLE_SECS`.
+fn settled(entry: &fs::DirEntry, now: SystemTime) -> bool {
+    match entry.metadata().and_then(|m| m.modified()) {
+        Ok(modified) => now
+            .duration_since(modified)
+            .is_ok_and(|age| age >= Duration::from_secs(SETTLE_SECS)),
+        Err(_) => true,
+    }
+}
+
+/// Write a file through a temporary name so readers never see a partial file.
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
+    fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
+}
+
+fn move_into(path: &Path, dir: &Path) -> Result<()> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow!("{} has no file name", path.display()))?;
+    fs::rename(path, dir.join(name))
+        .with_context(|| format!("moving {} to {}", path.display(), dir.display()))
 }
 
 fn item_note_str(r: &NoteRef) -> String {

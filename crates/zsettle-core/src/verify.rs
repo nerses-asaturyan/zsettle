@@ -1,16 +1,18 @@
 //! Keyless provenance verification from chain data.
 //!
-//! Anyone holding an item's consignment (the item account's full viewing key) can trace
-//! the item without any spending key:
+//! Anyone holding an item's consignments (the full viewing keys of the item accounts it has
+//! passed through) can trace the item without any spending key:
 //!
-//! 1. stream compact blocks from the item's birthday and trial-decrypt Ironwood actions
-//!    with the consignment's incoming viewing key until the genesis note is found;
-//! 2. derive the genesis note's nullifier with the consignment's nullifier key;
+//! 1. stream compact blocks from the earliest consignment's birthday and trial-decrypt
+//!    Ironwood actions until the genesis note is found;
+//! 2. derive the genesis note's nullifier with that consignment's nullifier key;
 //! 3. keep streaming until an action spends that nullifier: by construction of a trade,
-//!    the same action's output commitment is the successor note, now owned by the buyer.
+//!    the same action's output commitment is the successor note, now owned by the buyer;
+//! 4. when another supplied consignment decrypts the successor, continue from there.
 //!
-//! The successor belongs to a new holder, so tracing stops there unless that holder's
-//! consignment is supplied too. The genesis name is read from the full genesis transaction.
+//! The chain ends at a note none of the supplied keys can open (sold to a holder whose
+//! consignment was not supplied) or at an unspent note one of them owns. The item name is
+//! read from the full genesis transaction's memo.
 
 use anyhow::{anyhow, Result};
 use orchard::keys::{FullViewingKey, PreparedIncomingViewingKey, Scope};
@@ -27,7 +29,19 @@ use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
 use zcash_protocol::memo::{Memo, MemoBytes};
 
+use crate::broadcast::{connect, install_crypto_provider};
 use crate::wallet::NoteRef;
+
+/// A consignment: one item account's full viewing key and the height to scan from.
+#[derive(Clone)]
+pub struct Consignment {
+    /// Name shown in the report (for example the listings file it came from).
+    pub label: String,
+    /// The item account's full viewing key.
+    pub fvk: FullViewingKey,
+    /// Height from which this account's notes can appear.
+    pub birthday: u32,
+}
 
 /// One step in an item's history.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -38,21 +52,23 @@ pub struct Hop {
     pub height: u32,
     /// Note commitment of this hop's note.
     pub cmx: String,
-    /// Value of the note, when the verifier could decrypt it.
+    /// Value of the note, when a supplied key could decrypt it.
     pub value_zat: Option<u64>,
-    /// Whether the verifier could decrypt this note (it holds this hop's viewing key).
-    pub decryptable: bool,
+    /// Label of the consignment that decrypts this note; `None` for an unknown holder.
+    pub holder: Option<String>,
 }
 
-/// Result of walking an item's history.
+/// Where the item is after the last hop.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case")]
 pub enum Status {
-    /// The last known hop is unspent as of the scanned height; held by the account whose key was used.
-    CurrentlyHeld,
-    /// The last known hop was spent into a successor the verifier cannot decrypt (sold or moved).
+    /// The last hop is unspent as of the scanned height and one of the supplied keys owns it.
+    Held {
+        /// Label of the consignment that owns the last hop.
+        by: String,
+    },
+    /// The last hop was spent into a note none of the supplied keys can decrypt.
     TransferredToUnknownHolder,
-    /// The last known hop was spent into a successor it could decrypt (same key, internal move).
-    MovedWithinAccount,
 }
 
 /// Full provenance report.
@@ -62,6 +78,8 @@ pub struct Provenance {
     pub name: Option<String>,
     /// Genesis note reference.
     pub genesis: String,
+    /// Labels of the consignments used, in the order supplied.
+    pub keys: Vec<String>,
     /// Hops in order, starting with the genesis note.
     pub hops: Vec<Hop>,
     /// Status after the last hop.
@@ -70,48 +88,55 @@ pub struct Provenance {
     pub scanned_to: u32,
 }
 
-fn install_crypto_provider() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+struct Key {
+    label: String,
+    fvk: FullViewingKey,
+    external: PreparedIncomingViewingKey,
+    internal: PreparedIncomingViewingKey,
 }
 
-/// Trace an item from its genesis note. `from_height` is where scanning starts (the
-/// consignment's birthday); `to_height` defaults to the server's tip.
+struct Keyring(Vec<Key>);
+
+impl Keyring {
+    fn new(consignments: &[Consignment]) -> Self {
+        Keyring(
+            consignments
+                .iter()
+                .map(|c| Key {
+                    label: c.label.clone(),
+                    fvk: c.fvk.clone(),
+                    external: PreparedIncomingViewingKey::new(&c.fvk.to_ivk(Scope::External)),
+                    internal: PreparedIncomingViewingKey::new(&c.fvk.to_ivk(Scope::Internal)),
+                })
+                .collect(),
+        )
+    }
+
+    /// The first supplied key that decrypts the action's output, with the note.
+    fn decrypt(&self, act: &CompactAction) -> Option<(usize, orchard::Note)> {
+        let domain = IronwoodDomain::for_compact_action(act);
+        self.0.iter().enumerate().find_map(|(i, k)| {
+            try_compact_note_decryption(&domain, &k.external, act)
+                .or_else(|| try_compact_note_decryption(&domain, &k.internal, act))
+                .map(|(note, _)| (i, note))
+        })
+    }
+}
+
+/// Trace an item from its genesis note with the supplied consignments. Scanning starts at
+/// the earliest birthday; `to_height` defaults to the server's tip.
 pub fn trace_blocking(
     server: &str,
     network: Network,
-    fvk: &FullViewingKey,
+    consignments: &[Consignment],
     genesis: NoteRef,
-    from_height: u32,
     to_height: Option<u32>,
 ) -> Result<Provenance> {
     install_crypto_provider();
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(trace(server, network, fvk, genesis, from_height, to_height))
-}
-
-async fn connect(server: &str) -> Result<CompactTxStreamerClient<tonic::transport::Channel>> {
-    let uri: tonic::transport::Uri = server.parse().map_err(|e| anyhow!("server url: {e}"))?;
-    let host = uri
-        .host()
-        .ok_or_else(|| anyhow!("server url has no host"))?
-        .to_string();
-    let mut endpoint = tonic::transport::Channel::builder(uri.clone());
-    if uri.scheme_str() == Some("https") {
-        endpoint = endpoint
-            .tls_config(
-                tonic::transport::ClientTlsConfig::new()
-                    .domain_name(host)
-                    .with_webpki_roots(),
-            )
-            .map_err(|e| anyhow!("tls config: {e}"))?;
-    }
-    let channel = endpoint
-        .connect()
-        .await
-        .map_err(|e| anyhow!("connecting to {server}: {e}"))?;
-    Ok(CompactTxStreamerClient::new(channel))
+        .block_on(trace(server, network, consignments, genesis, to_height))
 }
 
 fn compact_action(
@@ -159,11 +184,18 @@ fn txid_hex(bytes: &[u8]) -> String {
 async fn trace(
     server: &str,
     network: Network,
-    fvk: &FullViewingKey,
+    consignments: &[Consignment],
     genesis: NoteRef,
-    from_height: u32,
     to_height: Option<u32>,
 ) -> Result<Provenance> {
+    if consignments.is_empty() {
+        return Err(anyhow!(
+            "at least one consignment (listings file) is required"
+        ));
+    }
+    let ring = Keyring::new(consignments);
+    let from_height = consignments.iter().map(|c| c.birthday).min().unwrap_or(0);
+
     let mut client = connect(server).await?;
     let tip = match to_height {
         Some(h) => h,
@@ -176,8 +208,6 @@ async fn trace(
             u32::try_from(id.height)?
         }
     };
-    let pivk = PreparedIncomingViewingKey::new(&fvk.to_ivk(Scope::External));
-    let pivk_int = PreparedIncomingViewingKey::new(&fvk.to_ivk(Scope::Internal));
     let genesis_txid = genesis.txid.to_string();
 
     let mut stream = client
@@ -197,12 +227,11 @@ async fn trace(
         .into_inner();
 
     let mut hops: Vec<Hop> = Vec::new();
-    // The nullifier of the hop we are currently watching for a spend.
-    let mut watch: Option<Nullifier> = None;
-    let mut status = Status::CurrentlyHeld;
+    // Nullifier of the hop we are watching for a spend, and the key that owns it.
+    let mut watch: Option<(Nullifier, usize)> = None;
     let mut scanned_to = from_height;
 
-    while let Some(block) = stream.message().await.map_err(|e| anyhow!("stream: {e}"))? {
+    'blocks: while let Some(block) = stream.message().await.map_err(|e| anyhow!("stream: {e}"))? {
         let height = u32::try_from(block.height)?;
         scanned_to = height;
         for vtx in &block.vtx {
@@ -212,11 +241,9 @@ async fn trace(
                 if hops.is_empty() {
                     // Still looking for the genesis note.
                     if txid == genesis_txid && i as u32 == genesis.index {
-                        let domain = IronwoodDomain::for_compact_action(&act);
-                        let Some((note, _)) = try_compact_note_decryption(&domain, &pivk, &act)
-                        else {
+                        let Some((k, note)) = ring.decrypt(&act) else {
                             return Err(anyhow!(
-                                "the genesis note does not decrypt with this consignment key"
+                                "the genesis note does not decrypt with any supplied consignment"
                             ));
                         };
                         hops.push(Hop {
@@ -224,42 +251,38 @@ async fn trace(
                             height,
                             cmx: hex::encode(act.cmx().to_bytes()),
                             value_zat: Some(note.value().inner()),
-                            decryptable: true,
+                            holder: Some(ring.0[k].label.clone()),
                         });
-                        watch = Some(note.nullifier(fvk));
+                        watch = Some((note.nullifier(&ring.0[k].fvk), k));
                     }
                     continue;
                 }
-                if let Some(nf) = watch {
-                    if act.nullifier() == nf {
-                        // Spent: the successor is this action's output.
-                        let domain = IronwoodDomain::for_compact_action(&act);
-                        let decrypted = try_compact_note_decryption(&domain, &pivk, &act)
-                            .or_else(|| try_compact_note_decryption(&domain, &pivk_int, &act));
-                        match decrypted {
-                            Some((note, _)) => {
-                                hops.push(Hop {
-                                    txid: txid.clone(),
-                                    height,
-                                    cmx: hex::encode(act.cmx().to_bytes()),
-                                    value_zat: Some(note.value().inner()),
-                                    decryptable: true,
-                                });
-                                watch = Some(note.nullifier(fvk));
-                                status = Status::MovedWithinAccount;
-                            }
-                            None => {
-                                hops.push(Hop {
-                                    txid: txid.clone(),
-                                    height,
-                                    cmx: hex::encode(act.cmx().to_bytes()),
-                                    value_zat: None,
-                                    decryptable: false,
-                                });
-                                watch = None;
-                                status = Status::TransferredToUnknownHolder;
-                            }
-                        }
+                let Some((nf, _)) = watch else { break 'blocks };
+                if act.nullifier() != nf {
+                    continue;
+                }
+                // Spent: the successor note is this action's output.
+                match ring.decrypt(&act) {
+                    Some((k, note)) => {
+                        hops.push(Hop {
+                            txid: txid.clone(),
+                            height,
+                            cmx: hex::encode(act.cmx().to_bytes()),
+                            value_zat: Some(note.value().inner()),
+                            holder: Some(ring.0[k].label.clone()),
+                        });
+                        watch = Some((note.nullifier(&ring.0[k].fvk), k));
+                    }
+                    None => {
+                        hops.push(Hop {
+                            txid: txid.clone(),
+                            height,
+                            cmx: hex::encode(act.cmx().to_bytes()),
+                            value_zat: None,
+                            holder: None,
+                        });
+                        watch = None;
+                        break 'blocks;
                     }
                 }
             }
@@ -272,20 +295,31 @@ async fn trace(
             genesis.index
         ));
     }
-    if watch.is_some() {
-        // The last hop decrypts with this key and is unspent: the key holder has it.
-        status = Status::CurrentlyHeld;
-    }
+    let status = match watch {
+        Some((_, k)) => Status::Held {
+            by: ring.0[k].label.clone(),
+        },
+        None => Status::TransferredToUnknownHolder,
+    };
 
-    // Item name from the genesis transaction's memo.
-    let name = genesis_name(&mut client, network, fvk, genesis, hops[0].height)
-        .await
-        .ok()
-        .flatten();
+    // Item name from the genesis transaction's memo, read with the key that owns the genesis note.
+    let genesis_key = ring
+        .0
+        .iter()
+        .find(|k| Some(&k.label) == hops[0].holder.as_ref())
+        .map(|k| &k.fvk);
+    let name = match genesis_key {
+        Some(fvk) => genesis_name(&mut client, network, fvk, genesis, hops[0].height)
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
 
     Ok(Provenance {
         name,
         genesis: format!("{}:{}", genesis.txid, genesis.index),
+        keys: ring.0.iter().map(|k| k.label.clone()).collect(),
         hops,
         status,
         scanned_to,

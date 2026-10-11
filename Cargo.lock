@@ -4041,6 +4041,7 @@ version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07ad58d8ca5daacbc089bf82ec09e45cf2a8be40adeb40b9399b16545c81a528"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
  "bech32",
  "bip32",
@@ -4049,6 +4050,7 @@ dependencies = [
  "byteorder",
  "document-features",
  "flume",
+ "futures-util",
  "getset",
  "group",
  "hex",
@@ -4440,6 +4442,7 @@ version = "0.1.0"
 dependencies = [
  "age",
  "anyhow",
+ "async-trait",
  "bip0039",
  "blake2b_simd",
  "hex",

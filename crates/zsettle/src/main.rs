@@ -6,12 +6,14 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use orchard::keys::SpendAuthorizingKey;
+use zcash_protocol::consensus::Network;
 use zsettle_core::listing::Listings;
 use zsettle_core::pczt as pczt_ops;
 use zsettle_core::trade::{build_trade, TradeRequest};
+use zsettle_core::verify::Consignment;
 use zsettle_core::wallet::{
     account_ufvk, find_account_by_ufvk, heights, import_viewing_key, largest_spendable_note,
-    parse_account, NoteRef, Wallet,
+    parse_account, sync_blocking, NoteRef, Wallet,
 };
 
 #[derive(Parser)]
@@ -32,6 +34,15 @@ enum Cmd {
         /// Listings file published by a seller.
         #[arg(long)]
         listings: PathBuf,
+    },
+    /// Sync a wallet with a lightwalletd server (no other tool needed).
+    Sync {
+        /// Wallet directory.
+        #[arg(long)]
+        wallet: PathBuf,
+        /// lightwalletd server URL.
+        #[arg(long, default_value = zsettle_core::broadcast::DEFAULT_SERVER)]
+        server: String,
     },
     /// Import the item viewing key from a listings file into the buyer wallet (the consignment).
     ImportListing {
@@ -65,6 +76,10 @@ enum Cmd {
         /// UUID of the imported, view-only account that holds the item note (auto-detected from the listings).
         #[arg(long)]
         item_account: Option<String>,
+        /// UUID of the account of this wallet that receives the item (default: the buyer account).
+        /// Use a dedicated item account if you may resell the item later.
+        #[arg(long)]
+        receive_account: Option<String>,
         /// The buyer's note that pays, as <txid>:<output index> (default: the largest spendable note).
         #[arg(long)]
         buyer_note: Option<NoteRef>,
@@ -83,6 +98,9 @@ enum Cmd {
         /// Memo for the payment output.
         #[arg(long, default_value = "")]
         memo: String,
+        /// Build the trade even if the listing marks the item as under offer.
+        #[arg(long)]
+        force: bool,
         /// Where to write the full PCZT (keep private).
         #[arg(long)]
         out: PathBuf,
@@ -107,7 +125,7 @@ enum Cmd {
         /// The seller's signed copy.
         #[arg(long)]
         signed: PathBuf,
-        /// Where to write the final transaction (raw bytes) and `<out>.pczt`.
+        /// Where to write the final transaction (raw bytes); the final PCZT goes to `<out>.final.pczt`.
         #[arg(long)]
         out: PathBuf,
         /// Broadcast through the lightwalletd server after extraction.
@@ -126,11 +144,14 @@ enum Cmd {
         #[arg(long, default_value = zsettle_core::broadcast::DEFAULT_SERVER)]
         server: String,
     },
-    /// Keyless provenance check of an item: trace it from its genesis note using only the listing's viewing key.
+    /// Keyless provenance check of an item: trace it from its genesis note with the listings' viewing keys.
+    ///
+    /// Pass `--listings` once per holder the item has passed through; each file contributes
+    /// one consignment and the trace follows the item across every resale it can decrypt.
     Verify {
-        /// Listings file (provides the item viewing key and birthday).
-        #[arg(long)]
-        listings: PathBuf,
+        /// Listings file(s) providing item viewing keys and birthdays.
+        #[arg(long, required = true)]
+        listings: Vec<PathBuf>,
         /// Genesis note of the item, as <txid>:<output index>.
         #[arg(long)]
         item: NoteRef,
@@ -143,8 +164,18 @@ enum Cmd {
     },
 }
 
+fn parse_network(name: &str) -> Result<Network> {
+    match name {
+        "main" => Ok(Network::MainNetwork),
+        "test" => Ok(Network::TestNetwork),
+        other => Err(anyhow!("unknown network {other}")),
+    }
+}
+
 fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .init();
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::List { listings } => {
@@ -156,11 +187,22 @@ fn main() -> Result<()> {
                 &l.payout_address[l.payout_address.len() - 6..]
             );
             for i in &l.items {
+                let state = match &i.pending {
+                    Some(p) => format!("  under offer until block {}", p.expiry_height),
+                    None => String::new(),
+                };
                 println!(
-                    "{}  {:>10} zat  expiry<= {:>3} blocks  {}",
+                    "{}  {:>10} zat  expiry<= {:>3} blocks  {}{state}",
                     i.note, i.price_zat, i.max_expiry_delta, i.name
                 );
             }
+            Ok(())
+        }
+        Cmd::Sync { wallet, server } => {
+            let w = Wallet::open(&wallet)?;
+            let mut db = w.db()?;
+            let report = sync_blocking(&w, &mut db, &server)?;
+            println!("{}", serde_json::to_string(&report)?);
             Ok(())
         }
         Cmd::ImportListing {
@@ -199,12 +241,14 @@ fn main() -> Result<()> {
             listings,
             item,
             item_account,
+            receive_account,
             buyer_note,
             seller,
             price,
             expiry_delta,
             min_confirmations,
             memo,
+            force,
             out,
             seller_copy,
         } => {
@@ -214,6 +258,14 @@ fn main() -> Result<()> {
             let listed = l
                 .as_ref()
                 .and_then(|l| l.find(&format!("{}:{}", item.txid, item.index)).cloned());
+            if let Some(p) = listed.as_ref().and_then(|i| i.pending.as_ref()) {
+                if !force {
+                    return Err(anyhow!(
+                        "the listing marks this item as under offer until block {}; pass --force to build a trade anyway",
+                        p.expiry_height
+                    ));
+                }
+            }
             let seller_address = seller
                 .or_else(|| l.as_ref().map(|l| l.payout_address.clone()))
                 .ok_or_else(|| anyhow!("--seller or --listings is required"))?;
@@ -223,6 +275,10 @@ fn main() -> Result<()> {
             let expiry = expiry_delta
                 .or_else(|| listed.as_ref().map(|i| i.max_expiry_delta))
                 .unwrap_or(zsettle_core::DEFAULT_MAX_EXPIRY_DELTA);
+            let item_memo = match listed.as_ref().map(|i| i.name.as_str()) {
+                Some(name) if !name.is_empty() => format!("zsettle item: {name}"),
+                _ => String::new(),
+            };
             let buyer_account = parse_account(&buyer_account)?;
             let item_account = match (item_account, &l) {
                 (Some(s), _) => parse_account(&s)?,
@@ -233,6 +289,7 @@ fn main() -> Result<()> {
                 }
                 (None, None) => return Err(anyhow!("--item-account or --listings is required")),
             };
+            let receive_account = receive_account.as_deref().map(parse_account).transpose()?;
             let buyer_note = match buyer_note {
                 Some(n) => n,
                 None => {
@@ -252,6 +309,8 @@ fn main() -> Result<()> {
                 expiry_delta: expiry,
                 min_confirmations,
                 memo,
+                item_memo,
+                receive_account,
             };
             let built = build_trade(&mut db, w.network, &req)?;
             fs::write(&out, pczt_ops::to_bytes(&built.pczt)?)
@@ -272,6 +331,7 @@ fn main() -> Result<()> {
                     "change_zat": built.change,
                     "target_height": built.target_height,
                     "expiry_height": built.expiry_height,
+                    "receive_account": receive_account.map(|a| a.expose_uuid().to_string()),
                     "full_pczt": out,
                     "seller_copy": seller_copy,
                 })
@@ -296,7 +356,7 @@ fn main() -> Result<()> {
             let usk = w.spending_key(&seed, account_index)?;
             let ask = SpendAuthorizingKey::from(usk.orchard());
             let (pczt, signed_n) = pczt_ops::sign_matching_actions(combined, &ask)?;
-            let final_pczt_path = out.with_extension("pczt");
+            let final_pczt_path = out.with_extension("final.pczt");
             fs::write(&final_pczt_path, pczt_ops::to_bytes(&pczt)?)?;
             let tx = pczt_ops::extract(pczt)?;
             let bytes = pczt_ops::tx_bytes(&tx)?;
@@ -335,24 +395,37 @@ fn main() -> Result<()> {
             server,
             to_height,
         } => {
-            let l = Listings::read(&listings)?;
-            let network = match l.network.as_str() {
-                "main" => zcash_protocol::consensus::Network::MainNetwork,
-                "test" => zcash_protocol::consensus::Network::TestNetwork,
-                other => return Err(anyhow!("unknown network {other}")),
-            };
-            let ufvk = zcash_keys::keys::UnifiedFullViewingKey::decode(&network, &l.item_ufvk)
-                .map_err(|e| anyhow!("decoding item viewing key: {e}"))?;
-            let fvk = ufvk
-                .orchard()
-                .cloned()
-                .ok_or_else(|| anyhow!("listing key has no Orchard/Ironwood component"))?;
+            let mut network: Option<Network> = None;
+            let mut consignments = Vec::with_capacity(listings.len());
+            for path in &listings {
+                let l = Listings::read(path)?;
+                let net = parse_network(&l.network)?;
+                match network {
+                    None => network = Some(net),
+                    Some(n) if n != net => {
+                        return Err(anyhow!("{} is for another network", path.display()))
+                    }
+                    Some(_) => {}
+                }
+                let ufvk = zcash_keys::keys::UnifiedFullViewingKey::decode(&net, &l.item_ufvk)
+                    .map_err(|e| anyhow!("decoding item viewing key in {}: {e}", path.display()))?;
+                let fvk = ufvk.orchard().cloned().ok_or_else(|| {
+                    anyhow!("{} has no Orchard/Ironwood viewing key", path.display())
+                })?;
+                let label = path.display().to_string();
+                consignments.push(Consignment {
+                    label,
+                    fvk,
+                    birthday: l.item_birthday,
+                });
+            }
+            let network =
+                network.ok_or_else(|| anyhow!("at least one --listings file is required"))?;
             let report = zsettle_core::verify::trace_blocking(
                 &server,
                 network,
-                &fvk,
+                &consignments,
                 item,
-                l.item_birthday,
                 to_height,
             )?;
             println!("{}", serde_json::to_string_pretty(&report)?);
