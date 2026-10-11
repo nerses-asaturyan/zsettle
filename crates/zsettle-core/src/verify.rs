@@ -128,8 +128,9 @@ impl Keyring {
 
 /// Trace an item from its genesis note with the supplied consignments. By default the
 /// server is asked where the genesis transaction is, so scanning starts at that block and
-/// the item name can be read from the transaction; with `private` the server learns nothing
-/// about the item, scanning starts at the earliest birthday and the name is left out.
+/// the item name can be read from the transaction; with `private` the server is not told which
+/// item is traced: scanning starts at the earliest listing birthday (which still shows the
+/// server which consignment is of interest) and the name is left out.
 /// `to_height` defaults to the server's tip.
 pub fn trace_blocking(
     server: &str,

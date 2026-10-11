@@ -3,7 +3,7 @@
 | Threat | Outcome | Mitigation |
 |---|---|---|
 | Seller sells the item elsewhere after signing | Trade tx invalid (duplicate nullifier); buyer's ZEC untouched | consensus |
-| Buyer withholds broadcast after seller signs | Seller's signature is a free option until expiry | expiry bounded by `max_expiry_delta` (default 40 blocks, the ecosystem default); the seller may cancel earlier by self-spending the item (one fee) |
+| Buyer withholds broadcast after seller signs | Seller's signature is a free option until expiry | expiry bounded by `max_expiry_delta` (default 40 blocks, the ecosystem default); the seller may cancel earlier with `cancel`, which spends the item note to a fresh address of its own account together with one payout note (an item note alone is below the fee)|
 | Buyer submits a transaction with no expiry, or one already expired | Perpetual option, or a signature on a dead transaction | policy refuses expiry 0 and expiry at or below the tip |
 | Buyer alters the payment after seller signs | Impossible: ZIP 244 sighash commits every action's cv, nullifier, rk, cmx and ciphertext | protocol |
 | Buyer forges an envelope without owning any note | Seller signs for nothing; items could be tied up | the anchor must be one of the seller wallet's own recent tree roots and the proof is verified against it, so a proof over a synthetic tree is refused; no offer locks an item in any case |
@@ -33,6 +33,7 @@
 ## What stays visible
 - The listed price and payout address, by the seller's choice.
 - To anyone holding a consignment: the item notes of that account, their values and names, and the block in which each one was spent.
-- To the light server: the IP that syncs an imported viewing key, broadcasts a trade or fetches an item's genesis transaction. Route through Tor or run your own lightwalletd if that matters.
+- To the light server: the IP behind every call; the block ranges a wallet scans, from its birthday; on `import-listing`, the tree state at the listing's birthday, which identifies the public listing imported; on `verify` without `--private`, the item's genesis transaction, which names the item (with `--private` only the listing's birthday, which still names the consignment); the full transaction on broadcast. The wallet's transparent addresses are never sent: the wallet library's UTXO refresh is answered inside the process (`broadcast::Shielded`). Route through Tor or run your own lightwalletd if the rest matters.
+- To holders of the listings file: the height the file was last signed at (`issued_at`), which the service refreshes after every sale, so the seller's sync height at that moment.
 - To the seller: the nullifier of the buyer's paying note, from the envelope. If the offer settles, the chain reveals it anyway. If the offer does not settle (lost race, expiry, abandoned), the seller could later recognise the transaction in which that note is finally spent; `zsettle rotate` retires such notes in a plain two-action transfer to the buyer's own account, after which the nullifier points at that transfer and nothing else. With an exact-value two-action offer the seller also learns that note's value (price plus fee).
 - Nothing else links the buyer's paying note, the buyer's address, the seller's other notes or either party's balance to the trade.
