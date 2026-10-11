@@ -12,6 +12,22 @@ use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
 /// Default mainnet lightwalletd endpoint.
 pub const DEFAULT_SERVER: &str = "https://zec.rocks:443";
 
+/// Default testnet lightwalletd endpoint.
+pub const DEFAULT_TESTNET_SERVER: &str = "https://testnet.zec.rocks:443";
+
+/// The default server for a network.
+pub fn default_server(network: Network) -> &'static str {
+    match network {
+        Network::MainNetwork => DEFAULT_SERVER,
+        Network::TestNetwork => DEFAULT_TESTNET_SERVER,
+    }
+}
+
+/// The server to use: the one given on the command line, or the network's default.
+pub fn pick_server(server: Option<String>, network: Network) -> String {
+    server.unwrap_or_else(|| default_server(network).to_string())
+}
+
 /// Open a gRPC channel to a lightwalletd server (TLS with WebPKI roots for `https` URLs).
 pub async fn connect(server: &str) -> Result<CompactTxStreamerClient<Channel>> {
     let uri: tonic::transport::Uri = server.parse().map_err(|e| anyhow!("server url: {e}"))?;

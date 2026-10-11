@@ -172,7 +172,7 @@ pub fn verifying_key() -> VerifyingKey {
 pub fn sign_ironwood_action(pczt: Pczt, index: usize, ask: &SpendAuthorizingKey) -> Result<Pczt> {
     let mut signer = Signer::new(pczt).map_err(|e| anyhow!("signer: {e:?}"))?;
     signer
-        .sign_ironwood(index, ask)
+        .sign_ironwood(rand::rng(), index, ask)
         .map_err(|e| anyhow!("signing action {index}: {e:?}"))?;
     Ok(signer.finish())
 }
@@ -184,7 +184,7 @@ pub fn sign_matching_actions(pczt: Pczt, ask: &SpendAuthorizingKey) -> Result<(P
     let mut signer = Signer::new(pczt).map_err(|e| anyhow!("signer: {e:?}"))?;
     let mut signed = 0;
     for i in 0..n {
-        match signer.sign_ironwood(i, ask) {
+        match signer.sign_ironwood(rand::rng(), i, ask) {
             Ok(()) => signed += 1,
             Err(SignError::IronwoodSign(
                 SignerError::WrongSpendAuthorizingKey | SignerError::MissingSpendAuthRandomizer,
@@ -211,7 +211,7 @@ pub fn extract(pczt: Pczt) -> Result<Transaction> {
         .map_err(|e| anyhow!("spend finalizer: {e:?}"))?;
     TransactionExtractor::new(finalized)
         .with_orchard(&vk)
-        .extract()
+        .extract(rand::rng())
         .map_err(|e| anyhow!("transaction extractor: {e:?}"))
 }
 

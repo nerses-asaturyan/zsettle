@@ -16,9 +16,8 @@ use std::{fs, path::Path};
 use anyhow::{anyhow, Context, Result};
 use orchard::keys::{FullViewingKey, SpendAuthorizingKey};
 use orchard::primitives::redpallas::{Signature, SpendAuth, VerificationKey};
-use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
-use zcash_address::unified::{Encoding, Fvk, Ufvk};
+use zcash_address::unified::{Encoding, Fvk, Revision, Ufvk, Uitem};
 use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_protocol::consensus::{Network, Parameters};
 
@@ -133,8 +132,11 @@ impl Listings {
     /// component. Publishing the account's complete unified key would also hand out its
     /// Sapling and transparent keys, which the consignment does not need.
     pub fn encode_item_key(fvk: &FullViewingKey, network: Network) -> Result<String> {
-        let ufvk = Ufvk::try_from_items(vec![Fvk::Orchard(fvk.to_bytes())])
-            .map_err(|e| anyhow!("encoding viewing key: {e}"))?;
+        let ufvk = Ufvk::try_from_items(
+            Revision::R0,
+            vec![Uitem::Data(Fvk::Orchard(fvk.to_bytes()))],
+        )
+        .map_err(|e| anyhow!("encoding viewing key: {e}"))?;
         Ok(ufvk.encode(&network.network_type()))
     }
 
@@ -158,7 +160,7 @@ impl Listings {
     pub fn sign(&mut self, ask: &SpendAuthorizingKey) -> Result<()> {
         // Randomizer zero: the signing key is `ask` itself and the verification key is `ak`.
         let key = ask.randomize(&pasta_curves::pallas::Scalar::from(0u64));
-        let sig = key.sign(OsRng, &self.signing_bytes()?);
+        let sig = key.sign(rand::rng(), &self.signing_bytes()?);
         self.signature = Some(hex::encode(<[u8; 64]>::from(&sig)));
         Ok(())
     }

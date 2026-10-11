@@ -13,12 +13,12 @@ use orchard::keys::{FullViewingKey, Scope, SpendAuthorizingKey, SpendingKey};
 use orchard::note::{ExtractedNoteCommitment, Note, NoteVersion, RandomSeed, Rho};
 use orchard::tree::{MerkleHashOrchard, MerklePath};
 use orchard::value::NoteValue;
-use rand::{RngCore, SeedableRng};
-use rand_chacha::ChaCha20Rng;
+use rand::rngs::ThreadRng;
+use rand::Rng as _;
 
 const DEPTH: usize = orchard::NOTE_COMMITMENT_TREE_DEPTH;
 
-fn note(rng: &mut ChaCha20Rng, addr: orchard::Address, value: u64) -> Note {
+fn note(rng: &mut ThreadRng, addr: orchard::Address, value: u64) -> Note {
     loop {
         let mut rho_bytes = [0u8; 32];
         rng.fill_bytes(&mut rho_bytes);
@@ -46,7 +46,7 @@ fn note(rng: &mut ChaCha20Rng, addr: orchard::Address, value: u64) -> Note {
 
 #[test]
 fn two_party_bundle_is_atomic() {
-    let mut rng = ChaCha20Rng::seed_from_u64(7);
+    let mut rng = rand::rng();
 
     let sk_item = SpendingKey::from_bytes([1u8; 32]).unwrap();
     let sk_buyer = SpendingKey::from_bytes([2u8; 32]).unwrap();
@@ -80,7 +80,7 @@ fn two_party_bundle_is_atomic() {
     let anchor = mp0.root(cmx0);
     assert_eq!(anchor, mp1.root(cmx1));
 
-    let make_bundle = |rng: &mut ChaCha20Rng| {
+    let make_bundle = |rng: &mut ThreadRng| {
         let mut b = Builder::new(
             BundleType::Transactional {
                 bundle_required: false,

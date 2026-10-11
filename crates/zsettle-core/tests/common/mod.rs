@@ -7,13 +7,13 @@ use orchard::keys::{FullViewingKey, Scope, SpendingKey};
 use orchard::note::{ExtractedNoteCommitment, Note, NoteVersion, RandomSeed, Rho};
 use orchard::tree::{MerkleHashOrchard, MerklePath};
 use orchard::value::NoteValue;
-use rand::{RngCore, SeedableRng};
-use rand_chacha::ChaCha20Rng;
+use rand::rngs::ThreadRng;
+use rand::Rng as _;
 
 pub const DEPTH: usize = orchard::NOTE_COMMITMENT_TREE_DEPTH;
 
 /// A random v3 note to `addr` worth `value`.
-pub fn note(rng: &mut ChaCha20Rng, addr: orchard::Address, value: u64) -> Note {
+pub fn note(rng: &mut ThreadRng, addr: orchard::Address, value: u64) -> Note {
     loop {
         let mut rho_bytes = [0u8; 32];
         rng.fill_bytes(&mut rho_bytes);
@@ -86,7 +86,7 @@ pub struct Fixture {
 }
 
 pub fn fixture() -> Fixture {
-    let mut rng = ChaCha20Rng::seed_from_u64(11);
+    let mut rng = rand::rng();
     let fvk_item = FullViewingKey::from(&SpendingKey::from_bytes([1u8; 32]).unwrap());
     let fvk_buyer = FullViewingKey::from(&SpendingKey::from_bytes([2u8; 32]).unwrap());
     let fvk_seller = FullViewingKey::from(&SpendingKey::from_bytes([3u8; 32]).unwrap());

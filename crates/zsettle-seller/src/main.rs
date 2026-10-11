@@ -14,7 +14,7 @@ use orchard::circuit::VerifyingKey;
 use orchard::keys::{FullViewingKey, SpendAuthorizingKey};
 use orchard::note::Nullifier;
 use zcash_keys::address::UnifiedAddress;
-use zsettle_core::broadcast::{check_consensus_blocking, server_info_blocking, DEFAULT_SERVER};
+use zsettle_core::broadcast::{check_consensus_blocking, pick_server, server_info_blocking};
 use zsettle_core::listing::{ListedItem, Listings};
 use zsettle_core::mint::{note_state, NoteState};
 use zsettle_core::pczt as pczt_ops;
@@ -66,9 +66,18 @@ enum Cmd {
         /// Wallet directory.
         #[arg(long)]
         wallet: PathBuf,
-        /// lightwalletd server URL.
-        #[arg(long, default_value = DEFAULT_SERVER)]
-        server: String,
+        /// lightwalletd server URL (default: the zec.rocks endpoint of the wallet's network).
+        #[arg(long)]
+        server: Option<String>,
+    },
+    /// Bring the wallet database schema up to date, with the seed for migrations that need it.
+    Upgrade {
+        /// Wallet directory.
+        #[arg(long)]
+        wallet: PathBuf,
+        /// age identity file that decrypts the wallet's mnemonic.
+        #[arg(long)]
+        identity: PathBuf,
     },
     /// Mint an item: pay a small amount from the payout account to the item account, memo = name.
     Mint {
@@ -86,9 +95,9 @@ enum Cmd {
         /// Item note value in zatoshis.
         #[arg(long, default_value_t = zsettle_core::item::MIN_ITEM_VALUE)]
         value: u64,
-        /// lightwalletd server URL.
-        #[arg(long, default_value = DEFAULT_SERVER)]
-        server: String,
+        /// lightwalletd server URL (default: the zec.rocks endpoint of the wallet's network).
+        #[arg(long)]
+        server: Option<String>,
     },
     /// List the item account's unspent notes (the references to publish).
     Items {
@@ -163,9 +172,9 @@ enum Cmd {
         /// Seconds between passes.
         #[arg(long, default_value_t = 5)]
         poll_secs: u64,
-        /// lightwalletd server URL for the built-in sync.
-        #[arg(long, default_value = DEFAULT_SERVER)]
-        server: String,
+        /// lightwalletd server URL (default: the zec.rocks endpoint of the wallet's network).
+        #[arg(long)]
+        server: Option<String>,
         /// Do not sync; something else keeps the wallet up to date.
         #[arg(long)]
         no_sync: bool,
@@ -186,9 +195,19 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Sync { wallet, server } => {
             let wallet = Wallet::open(&wallet)?;
+            let server = pick_server(server, wallet.network);
             let mut db = wallet.db()?;
             let report = sync_blocking(&wallet, &mut db, &server)?;
             println!("{}", serde_json::to_string(&report)?);
+            Ok(())
+        }
+        Cmd::Upgrade { wallet, identity } => {
+            let w = Wallet::open(&wallet)?;
+            w.upgrade(&identity)?;
+            println!(
+                "{}",
+                serde_json::json!({ "wallet": wallet, "upgraded": true })
+            );
             Ok(())
         }
         Cmd::Mint {
@@ -200,6 +219,7 @@ fn main() -> Result<()> {
             server,
         } => {
             let wallet = Wallet::open(&w.wallet)?;
+            let server = pick_server(server, wallet.network);
             let mut db = wallet.db()?;
             let info = server_info_blocking(&server)?;
             check_consensus_blocking(&server, wallet.network, info.block_height.saturating_add(1))?;
@@ -275,8 +295,9 @@ fn main() -> Result<()> {
             } else {
                 // A payout address derived for the market, not the account's default address.
                 let payout = next_orchard_address(&mut db, parse_account(&w.payout_account)?)?;
-                let payout_ua = UnifiedAddress::from_receivers(Some(payout), None, None)
-                    .ok_or_else(|| anyhow!("cannot build payout address"))?;
+                let payout_ua =
+                    UnifiedAddress::from_receivers(Some(payout), None, None, None, None)
+                        .ok_or_else(|| anyhow!("cannot build payout address"))?;
                 Listings {
                     version: 1,
                     network: network_name(wallet.network).into(),
@@ -365,6 +386,7 @@ fn main() -> Result<()> {
             }
             // Configuration errors stop the service before it starts; everything after is retried.
             let wallet = Wallet::open(&w.wallet)?;
+            let server = pick_server(server, wallet.network);
             {
                 let db = wallet.db()?;
                 account_orchard_fvk(&db, parse_account(&w.item_account)?)?;

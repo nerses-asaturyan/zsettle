@@ -42,5 +42,4 @@ async-trait = { workspace = true }
 pasta_curves = { workspace = true }
 
 [dev-dependencies]
-rand_chacha = { workspace = true }
 zcash_primitives = { workspace = true }

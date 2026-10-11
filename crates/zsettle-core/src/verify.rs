@@ -17,14 +17,12 @@
 use anyhow::{anyhow, Result};
 use orchard::keys::{FullViewingKey, PreparedIncomingViewingKey, Scope};
 use orchard::note::{ExtractedNoteCommitment, Nullifier};
-use orchard::note_encryption::{CompactAction, IronwoodDomain};
+use orchard::note_encryption::{CompactAction, IronwoodDomain, COMPACT_NOTE_SIZE};
 use serde::Serialize;
 use zcash_client_backend::proto::service::{
     compact_tx_streamer_client::CompactTxStreamerClient, BlockId, BlockRange, TxFilter,
 };
-use zcash_note_encryption::{
-    try_compact_note_decryption, try_note_decryption, EphemeralKeyBytes, COMPACT_NOTE_SIZE,
-};
+use zcash_note_encryption::{try_compact_note_decryption, try_note_decryption, EphemeralKeyBytes};
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
 use zcash_protocol::memo::{Memo, MemoBytes};

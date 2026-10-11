@@ -14,7 +14,7 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use bip0039::{English, Mnemonic};
-use rand_core::OsRng;
+use rand::rngs::ThreadRng;
 use secrecy::{ExposeSecret, SecretVec, Zeroize};
 use serde::{Deserialize, Serialize};
 use zcash_client_backend::data_api::{
@@ -37,7 +37,7 @@ use zcash_protocol::{
 use crate::broadcast::{connect, install_crypto_provider};
 
 /// The wallet database type used throughout zsettle.
-pub type Db = WalletDb<rusqlite::Connection, Network, SystemClock, OsRng>;
+pub type Db = WalletDb<rusqlite::Connection, Network, SystemClock, ThreadRng>;
 
 /// A reference to a shielded note by the transaction that created it and its output index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -123,15 +123,33 @@ impl Wallet {
         })
     }
 
-    /// Open the SQLite wallet database.
+    /// Open the SQLite wallet database and bring its schema up to date with the wallet
+    /// library this build uses. A migration that needs the seed fails here; run
+    /// [`Wallet::upgrade`] (the `upgrade --identity` command) once to apply it.
     pub fn db(&self) -> Result<Db> {
+        let mut db = self.open_db()?;
+        zcash_client_sqlite::wallet::init::init_wallet_db(&mut db, None).map_err(|e| {
+            anyhow!("wallet database migration: {e:?}; if it needs the seed, run the upgrade command with --identity")
+        })?;
+        Ok(db)
+    }
+
+    fn open_db(&self) -> Result<Db> {
         WalletDb::for_path(
             self.dir.join("data.sqlite"),
             self.network,
             SystemClock,
-            OsRng,
+            rand::rng(),
         )
         .context("opening wallet database")
+    }
+
+    /// Run the wallet database migrations with the seed available.
+    pub fn upgrade(&self, identity_file: &Path) -> Result<()> {
+        let seed = self.seed(identity_file)?;
+        let mut db = self.open_db()?;
+        zcash_client_sqlite::wallet::init::init_wallet_db(&mut db, Some(seed))
+            .map_err(|e| anyhow!("wallet database migration: {e:?}"))
     }
 
     /// Decrypt the mnemonic with the given age identity file and derive the BIP 39 seed.

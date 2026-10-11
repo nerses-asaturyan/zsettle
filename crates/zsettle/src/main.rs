@@ -7,7 +7,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use orchard::keys::SpendAuthorizingKey;
 use zcash_protocol::consensus::Network;
-use zsettle_core::broadcast::{check_consensus_blocking, server_info_blocking, DEFAULT_SERVER};
+use zsettle_core::broadcast::{check_consensus_blocking, pick_server, server_info_blocking};
 use zsettle_core::listing::Listings;
 use zsettle_core::pczt as pczt_ops;
 use zsettle_core::trade::{build_trade, TradeRequest};
@@ -41,9 +41,18 @@ enum Cmd {
         /// Wallet directory.
         #[arg(long)]
         wallet: PathBuf,
-        /// lightwalletd server URL.
-        #[arg(long, default_value = DEFAULT_SERVER)]
-        server: String,
+        /// lightwalletd server URL (default: the zec.rocks endpoint of the wallet's network).
+        #[arg(long)]
+        server: Option<String>,
+    },
+    /// Bring the wallet database schema up to date, with the seed for migrations that need it.
+    Upgrade {
+        /// Wallet directory.
+        #[arg(long)]
+        wallet: PathBuf,
+        /// age identity file that decrypts the wallet's mnemonic.
+        #[arg(long)]
+        identity: PathBuf,
     },
     /// Import the item viewing key from a listings file into the buyer wallet (the consignment).
     ImportListing {
@@ -56,9 +65,9 @@ enum Cmd {
         /// Name for the imported view-only account.
         #[arg(long, default_value = "item-view")]
         name: String,
-        /// lightwalletd server URL (for the account birthday).
-        #[arg(long, default_value = DEFAULT_SERVER)]
-        server: String,
+        /// lightwalletd server URL (default: the zec.rocks endpoint of the wallet's network).
+        #[arg(long)]
+        server: Option<String>,
     },
     /// Build, prove and redact a trade; writes the full PCZT and the seller's copy.
     Buy {
@@ -100,9 +109,9 @@ enum Cmd {
         /// Memo for the payment output.
         #[arg(long, default_value = "")]
         memo: String,
-        /// lightwalletd server URL, asked which consensus branch is live before building.
-        #[arg(long, default_value = DEFAULT_SERVER)]
-        server: String,
+        /// lightwalletd server URL (default: the zec.rocks endpoint of the wallet's network).
+        #[arg(long)]
+        server: Option<String>,
         /// Skip the consensus-branch check against the server.
         #[arg(long)]
         offline: bool,
@@ -136,9 +145,9 @@ enum Cmd {
         /// Broadcast through the lightwalletd server after extraction.
         #[arg(long)]
         broadcast: bool,
-        /// lightwalletd server URL.
-        #[arg(long, default_value = DEFAULT_SERVER)]
-        server: String,
+        /// lightwalletd server URL (default: the zec.rocks endpoint of the wallet's network).
+        #[arg(long)]
+        server: Option<String>,
     },
     /// Broadcast a raw transaction file through a lightwalletd server.
     Broadcast {
@@ -148,9 +157,9 @@ enum Cmd {
         /// Network the transaction is for (`main` or `test`).
         #[arg(long, default_value = "main")]
         network: String,
-        /// lightwalletd server URL.
-        #[arg(long, default_value = DEFAULT_SERVER)]
-        server: String,
+        /// lightwalletd server URL (default: the zec.rocks endpoint of the wallet's network).
+        #[arg(long)]
+        server: Option<String>,
     },
     /// Keyless provenance check of an item: trace it from its genesis note with the listings' viewing keys.
     ///
@@ -163,9 +172,9 @@ enum Cmd {
         /// Genesis note of the item, as <txid>:<output index>.
         #[arg(long)]
         item: NoteRef,
-        /// lightwalletd server URL.
-        #[arg(long, default_value = DEFAULT_SERVER)]
-        server: String,
+        /// lightwalletd server URL (default: the zec.rocks endpoint of the wallet's network).
+        #[arg(long)]
+        server: Option<String>,
         /// Stop scanning at this height (default: chain tip).
         #[arg(long)]
         to_height: Option<u32>,
@@ -215,9 +224,19 @@ fn main() -> Result<()> {
         }
         Cmd::Sync { wallet, server } => {
             let w = Wallet::open(&wallet)?;
+            let server = pick_server(server, w.network);
             let mut db = w.db()?;
             let report = sync_blocking(&w, &mut db, &server)?;
             println!("{}", serde_json::to_string(&report)?);
+            Ok(())
+        }
+        Cmd::Upgrade { wallet, identity } => {
+            let w = Wallet::open(&wallet)?;
+            w.upgrade(&identity)?;
+            println!(
+                "{}",
+                serde_json::json!({ "wallet": wallet, "upgraded": true })
+            );
             Ok(())
         }
         Cmd::ImportListing {
@@ -227,6 +246,7 @@ fn main() -> Result<()> {
             server,
         } => {
             let w = Wallet::open(&wallet)?;
+            let server = pick_server(server, w.network);
             let l = Listings::read_verified(&listings)?;
             if l.network()? != w.network {
                 return Err(anyhow!("the listings file is for another network"));
@@ -272,6 +292,7 @@ fn main() -> Result<()> {
             seller_copy,
         } => {
             let w = Wallet::open(&wallet)?;
+            let server = pick_server(server, w.network);
             let mut db = w.db()?;
             let l = listings
                 .as_ref()
@@ -379,6 +400,7 @@ fn main() -> Result<()> {
             server,
         } => {
             let w = Wallet::open(&wallet)?;
+            let server = pick_server(server, w.network);
             let full_pczt = pczt_ops::from_bytes(&fs::read(&full)?)?;
             let signed_pczt = pczt_ops::from_bytes(&fs::read(&signed)?)?;
             let combined = pczt_ops::combine(full_pczt, signed_pczt)?;
@@ -417,7 +439,9 @@ fn main() -> Result<()> {
             server,
         } => {
             let bytes = fs::read(&tx).with_context(|| format!("reading {}", tx.display()))?;
-            check_server_before_sending(&server, parse_network(&network)?)?;
+            let network = parse_network(&network)?;
+            let server = pick_server(server, network);
+            check_server_before_sending(&server, network)?;
             let msg = zsettle_core::broadcast::send_raw_transaction_blocking(&server, bytes)?;
             println!(
                 "{}",
@@ -451,6 +475,7 @@ fn main() -> Result<()> {
             }
             let network =
                 network.ok_or_else(|| anyhow!("at least one --listings file is required"))?;
+            let server = pick_server(server, network);
             let report = zsettle_core::verify::trace_blocking(
                 &server,
                 network,

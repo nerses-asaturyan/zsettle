@@ -15,7 +15,6 @@ use orchard::circuit::{OrchardCircuitVersion, ProvingKey};
 use orchard::keys::Scope;
 use pczt::roles::{creator::Creator, io_finalizer::IoFinalizer, prover::Prover};
 use pczt::Pczt;
-use rand_core::OsRng;
 use zcash_client_backend::data_api::WalletCommitmentTrees;
 use zcash_client_sqlite::AccountUuid;
 use zcash_keys::address::Address;
@@ -255,13 +254,13 @@ pub fn build_trade(db: &mut Db, network: Network, req: &TradeRequest) -> Result<
     let pczt = Creator::build_from_parts(result.pczt_parts)
         .ok_or_else(|| anyhow!("PCZT creation failed"))?;
     let pczt = IoFinalizer::new(pczt)
-        .finalize_io()
+        .finalize_io(rand::rng())
         .map_err(|e| anyhow!("IO finalizer: {e:?}"))?;
 
     // Prove with viewing keys only.
     let pk = ProvingKey::build(OrchardCircuitVersion::PostNu6_3);
     let pczt = Prover::new(pczt)
-        .create_ironwood_proof(&pk)
+        .create_ironwood_proof(rand::rng(), &pk)
         .map_err(|e| anyhow!("prover: {e:?}"))?
         .finish();
 
@@ -285,7 +284,7 @@ pub fn build_paired(
 ) -> Result<(PcztResult<Network>, usize, usize)> {
     for _ in 0..MAX_PAIRING_ATTEMPTS {
         let result = make_builder()?
-            .build_for_pczt(OsRng, &FeeRule::standard())
+            .build_for_pczt(rand::rng(), &FeeRule::standard())
             .map_err(|e| anyhow!("building transaction: {e:?}"))?;
         let meta = &result.ironwood_meta;
         let item_spend = meta

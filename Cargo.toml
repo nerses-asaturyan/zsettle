@@ -15,19 +15,19 @@ authors = ["Nerses Asaturyan"]
 
 [workspace.dependencies]
 # Zcash stack (mainnet = NU6.3 Ironwood; published crates only)
-orchard = { version = "0.15", default-features = false, features = ["circuit", "std"] }
-pczt = { version = "0.9", features = ["orchard", "prover", "signer", "io-finalizer", "spend-finalizer", "tx-extractor", "transparent"] }
-zcash_client_backend = { version = "0.24", features = ["orchard", "pczt", "unstable", "lightwalletd-tonic-tls-webpki-roots", "sync"] }
-zcash_client_sqlite = { version = "0.22", features = ["orchard", "unstable", "transparent-inputs"] }
-zcash_primitives = "0.30"
-zcash_protocol = "0.10"
-zcash_keys = { version = "0.16", features = ["orchard"] }
-zcash_address = "0.13"
-zcash_note_encryption = "0.4"
-zcash_proofs = { version = "0.30", features = ["bundled-prover", "local-prover"] }
-zip321 = "0.9"
-incrementalmerkletree = "0.8"
-zip32 = "0.2"
+orchard = { version = "0.16", default-features = false, features = ["circuit", "std"] }
+pczt = { version = "=0.10.0-pre.1", features = ["orchard", "prover", "signer", "io-finalizer", "spend-finalizer", "tx-extractor", "transparent"] }
+zcash_client_backend = { version = "=0.25.0-pre.1", features = ["orchard", "pczt", "unstable", "lightwalletd-tonic-tls-webpki-roots", "sync"] }
+zcash_client_sqlite = { version = "=0.23.0-pre.1", features = ["orchard", "unstable", "transparent-inputs"] }
+zcash_primitives = "=0.31.0-pre.1"
+zcash_protocol = "=0.11.0-pre.0"
+zcash_keys = { version = "=0.17.0-pre.1", features = ["orchard"] }
+zcash_address = "=0.14.0-pre.1"
+zcash_note_encryption = "0.5"
+zcash_proofs = { version = "=0.31.0-pre.1", features = ["bundled-prover", "local-prover"] }
+zip321 = "=0.10.0-pre.1"
+incrementalmerkletree = "0.9"
+zip32 = "0.3"
 rusqlite = "0.37"
 uuid = "1"
 
@@ -42,7 +42,7 @@ tonic = { version = "0.14", features = ["tls-ring", "tls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 async-trait = "0.1"
-pasta_curves = "0.5"
+pasta_curves = "0.6"
 
 # general
 anyhow = "1"
@@ -52,9 +52,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hex = "0.4"
 blake2b_simd = "1"
-rand = "0.8"
-rand_core = "0.6"
-rand_chacha = "0.3"
+rand = "0.10"
+rand_core = "0.10"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 

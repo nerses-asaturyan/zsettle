@@ -60,7 +60,10 @@ fn make_builder(f: &Fixture) -> anyhow::Result<Builder<Network, ()>> {
 fn unproven(f: &Fixture) -> (Pczt, usize) {
     let (result, item_idx, _) = build_paired(|| make_builder(f)).unwrap();
     let pczt = Creator::build_from_parts(result.pczt_parts).unwrap();
-    (IoFinalizer::new(pczt).finalize_io().unwrap(), item_idx)
+    (
+        IoFinalizer::new(pczt).finalize_io(rand::rng()).unwrap(),
+        item_idx,
+    )
 }
 
 #[test]
@@ -126,7 +129,7 @@ fn a_proven_seller_copy_verifies_and_a_tampered_one_does_not() {
     let (pczt, item_idx) = unproven(&f);
     let pk = ProvingKey::build(OrchardCircuitVersion::PostNu6_3);
     let proven = Prover::new(pczt)
-        .create_ironwood_proof(&pk)
+        .create_ironwood_proof(rand::rng(), &pk)
         .unwrap()
         .finish();
     let redacted = redact_for_seller(proven, item_idx).unwrap();

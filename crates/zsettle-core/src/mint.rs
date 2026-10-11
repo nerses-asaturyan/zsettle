@@ -7,7 +7,6 @@
 use std::{num::NonZeroUsize, str::FromStr};
 
 use anyhow::{anyhow, Result};
-use rand_core::OsRng;
 use secrecy::SecretVec;
 use zcash_address::ZcashAddress;
 use zcash_client_backend::data_api::{
@@ -22,7 +21,7 @@ use zcash_client_backend::fees::{
     standard::MultiOutputChangeStrategy, DustOutputPolicy, SplitPolicy, StandardFeeRule,
 };
 use zcash_client_backend::wallet::OvkPolicy;
-use zcash_client_sqlite::AccountUuid;
+use zcash_client_sqlite::{util::SystemClock, AccountUuid};
 use zcash_keys::address::UnifiedAddress;
 use zcash_proofs::prover::LocalTxProver;
 use zcash_protocol::{
@@ -174,7 +173,7 @@ pub fn note_state(wallet: &Wallet, db: &Db, note: NoteRef) -> Result<NoteState> 
 /// an Orchard receiver. Each mint gets its own diversifier.
 pub fn item_address(db: &mut Db, network: Network, item_account: AccountUuid) -> Result<String> {
     let addr = next_orchard_address(db, item_account)?;
-    let ua = UnifiedAddress::from_receivers(Some(addr), None, None)
+    let ua = UnifiedAddress::from_receivers(Some(addr), None, None, None, None)
         .ok_or_else(|| anyhow!("cannot build item address"))?;
     Ok(ua.encode(&network))
 }
@@ -263,6 +262,8 @@ pub fn mint(
     >(
         db,
         &wallet.network,
+        &SystemClock,
+        &mut rand::rng(),
         &prover,
         &prover,
         &SpendingKeys::from_unified_spending_key(usk),
@@ -278,6 +279,5 @@ pub fn mint(
         .ok_or_else(|| anyhow!("transaction {txid} not stored"))?;
     let mut bytes = Vec::new();
     tx.write(&mut bytes)?;
-    let _ = OsRng;
     Ok((bytes, txid.to_string()))
 }

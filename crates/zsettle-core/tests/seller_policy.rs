@@ -7,8 +7,6 @@ use common::{fixture, Fixture};
 use orchard::keys::Scope;
 use pczt::roles::{creator::Creator, io_finalizer::IoFinalizer};
 use pczt::Pczt;
-use rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 use zcash_primitives::transaction::builder::{BuildConfig, Builder, BundlePadding};
 use zcash_primitives::transaction::fees::zip317::{FeeError, FeeRule};
 use zcash_protocol::consensus::{BlockHeight, Network};
@@ -73,11 +71,9 @@ fn trade(f: &Fixture, price: u64, expiry_height: u32, spend_extra: bool) -> Pczt
         MemoBytes::empty(),
     )
     .unwrap();
-    let result = b
-        .build_for_pczt(ChaCha20Rng::seed_from_u64(5), &FeeRule::standard())
-        .unwrap();
+    let result = b.build_for_pczt(rand::rng(), &FeeRule::standard()).unwrap();
     let pczt = Creator::build_from_parts(result.pczt_parts).unwrap();
-    IoFinalizer::new(pczt).finalize_io().unwrap()
+    IoFinalizer::new(pczt).finalize_io(rand::rng()).unwrap()
 }
 
 fn policy(price: u64) -> SellerPolicy {

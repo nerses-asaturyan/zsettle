@@ -7,9 +7,9 @@ mod common;
 
 use common::{fixture, Fixture};
 use orchard::keys::{PreparedIncomingViewingKey, Scope};
-use orchard::note_encryption::{CompactAction, IronwoodDomain};
+use orchard::note_encryption::{CompactAction, IronwoodDomain, COMPACT_NOTE_SIZE};
 use pczt::roles::{creator::Creator, io_finalizer::IoFinalizer, verifier::Verifier};
-use zcash_note_encryption::{try_compact_note_decryption, EphemeralKeyBytes, COMPACT_NOTE_SIZE};
+use zcash_note_encryption::{try_compact_note_decryption, EphemeralKeyBytes};
 use zcash_primitives::transaction::builder::{BuildConfig, Builder, BundlePadding};
 use zcash_primitives::transaction::fees::zip317::FeeError;
 use zcash_protocol::consensus::{BlockHeight, Network};
@@ -82,14 +82,14 @@ fn item_spend_and_item_output_share_an_action() {
             // The output of the item action is the buyer's new item note, and its rho is the
             // nullifier of the item note just spent.
             let pczt = Creator::build_from_parts(result.pczt_parts).unwrap();
-            let pczt = IoFinalizer::new(pczt).finalize_io().unwrap();
+            let pczt = IoFinalizer::new(pczt).finalize_io(rand::rng()).unwrap();
             Verifier::new(pczt)
                 .with_ironwood::<anyhow::Error, _>(|bundle| {
                     let action = &bundle.actions()[item_idx];
                     assert_eq!(action.spend().nullifier(), &nf);
                     let enc = action.output().encrypted_note();
                     let mut compact = [0u8; COMPACT_NOTE_SIZE];
-                    compact.copy_from_slice(&enc.enc_ciphertext[..COMPACT_NOTE_SIZE]);
+                    compact.copy_from_slice(&enc.enc_ciphertext.as_ref()[..COMPACT_NOTE_SIZE]);
                     let act = CompactAction::from_parts(
                         *action.spend().nullifier(),
                         *action.output().cmx(),

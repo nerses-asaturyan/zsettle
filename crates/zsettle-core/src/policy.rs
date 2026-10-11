@@ -20,11 +20,11 @@ use std::cell::RefCell;
 use anyhow::{anyhow, Result};
 use orchard::keys::PreparedIncomingViewingKey;
 use orchard::note::Nullifier;
-use orchard::note_encryption::{CompactAction, IronwoodDomain};
+use orchard::note_encryption::{CompactAction, IronwoodDomain, COMPACT_NOTE_SIZE};
 use pczt::roles::verifier::Verifier;
 use pczt::Pczt;
 use thiserror::Error;
-use zcash_note_encryption::{try_compact_note_decryption, EphemeralKeyBytes, COMPACT_NOTE_SIZE};
+use zcash_note_encryption::{try_compact_note_decryption, EphemeralKeyBytes};
 
 /// Why the seller refuses to sign.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -156,7 +156,7 @@ pub fn check(
                 // decryption only succeeds when the plaintext matches the committed note.
                 let enc = action.output().encrypted_note();
                 let mut compact = [0u8; COMPACT_NOTE_SIZE];
-                compact.copy_from_slice(&enc.enc_ciphertext[..COMPACT_NOTE_SIZE]);
+                compact.copy_from_slice(&enc.enc_ciphertext.as_ref()[..COMPACT_NOTE_SIZE]);
                 let act = CompactAction::from_parts(
                     *action.spend().nullifier(),
                     *action.output().cmx(),
