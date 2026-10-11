@@ -90,19 +90,6 @@ pub fn fetch_tree_state_blocking(server: &str, height: u32) -> Result<TreeState>
     runtime()?.block_on(fetch_tree_state(server, height))
 }
 
-/// Fetch the latest block height the server knows.
-pub fn latest_height_blocking(server: &str) -> Result<u32> {
-    runtime()?.block_on(async {
-        let mut client = connect(server).await?;
-        let id = client
-            .get_latest_block(zcash_client_backend::proto::service::ChainSpec {})
-            .await
-            .map_err(|e| anyhow!("get_latest_block: {e}"))?
-            .into_inner();
-        u32::try_from(id.height).map_err(|_| anyhow!("height out of range"))
-    })
-}
-
 /// What a lightwalletd server reports about its chain.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct ServerInfo {

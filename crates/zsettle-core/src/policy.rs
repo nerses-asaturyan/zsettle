@@ -7,8 +7,9 @@
 //! 2. exactly one action spends the listed item note (matched by nullifier) and that
 //!    action carries a spend randomizer, so it can be signed; no other action spends any
 //!    note of the seller's wallet;
-//! 3. the outputs that decrypt under the seller's incoming viewing key pay at least the
-//!    listed price;
+//! 3. the outputs that decrypt under the seller's incoming viewing key and are worth more
+//!    than the ZIP 317 marginal fee (anything smaller is dust no wallet spends) pay at least
+//!    the listed price;
 //! 4. the signer itself enforces `rk == randomize(ak, alpha)` for the action it signs, so the
 //!    seller can never be tricked into authorizing a spend of a different note.
 //!
@@ -26,6 +27,8 @@ use pczt::roles::verifier::Verifier;
 use pczt::Pczt;
 use thiserror::Error;
 use zcash_note_encryption::{try_compact_note_decryption, EphemeralKeyBytes, COMPACT_NOTE_SIZE};
+
+use crate::ZIP317_MARGINAL_FEE;
 
 /// Why the seller refuses to sign.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -71,6 +74,17 @@ pub enum PolicyError {
         /// Policy limit.
         max_delta: u32,
     },
+    /// The transaction is for another consensus branch than the one live at the tip.
+    #[error("the transaction is for consensus branch {got:#010x}, the chain is on {want:#010x}")]
+    WrongBranch {
+        /// Branch id in the PCZT.
+        got: u32,
+        /// Branch id the seller's wallet expects at the next block.
+        want: u32,
+    },
+    /// The item action's randomizer is zero, which would put the bare spend validating key on chain.
+    #[error("item action {0} has a zero spend randomizer")]
+    ZeroRandomizer(usize),
     /// The bundle's anchor is not a recent tree root of the seller's wallet.
     #[error("the anchor is not a recent tree root this wallet knows")]
     UnknownAnchor,
@@ -88,6 +102,8 @@ pub struct SellerPolicy {
     pub max_expiry_delta: u32,
     /// Current chain tip as seen by the seller's wallet.
     pub tip: u32,
+    /// Consensus branch id in force at the next block.
+    pub branch_id: u32,
 }
 
 /// Result of a successful check.
@@ -110,6 +126,13 @@ pub fn check(
     policy: &SellerPolicy,
     known_anchors: &[orchard::Anchor],
 ) -> Result<Approved, PolicyError> {
+    let branch = *pczt.global().consensus_branch_id();
+    if branch != policy.branch_id {
+        return Err(PolicyError::WrongBranch {
+            got: branch,
+            want: policy.branch_id,
+        });
+    }
     let expiry = *pczt.global().expiry_height();
     // ZIP 203: an expiry height of zero means the transaction never expires.
     if expiry == 0 {
@@ -155,9 +178,16 @@ pub fn check(
                         *found.borrow_mut() = Some(Err(PolicyError::DuplicateItemSpend(prev, i)));
                         return Ok(());
                     }
-                    if action.spend().alpha().is_none() {
-                        *found.borrow_mut() = Some(Err(PolicyError::MissingAlpha(i)));
-                        return Ok(());
+                    match action.spend().alpha() {
+                        None => {
+                            *found.borrow_mut() = Some(Err(PolicyError::MissingAlpha(i)));
+                            return Ok(());
+                        }
+                        Some(alpha) if *alpha == pasta_curves::pallas::Scalar::from(0u64) => {
+                            *found.borrow_mut() = Some(Err(PolicyError::ZeroRandomizer(i)));
+                            return Ok(());
+                        }
+                        Some(_) => {}
                     }
                     item_idx = Some(i);
                 }
@@ -175,7 +205,12 @@ pub fn check(
                 let domain = IronwoodDomain::for_compact_action(&act);
                 if let Some((note, _addr)) = try_compact_note_decryption(&domain, seller_ivk, &act)
                 {
-                    paid = paid.saturating_add(note.value().inner());
+                    // Dust never counts: a note at or below the marginal fee costs more to
+                    // spend than it is worth, so it is not a payment.
+                    let value = note.value().inner();
+                    if value > ZIP317_MARGINAL_FEE {
+                        paid = paid.saturating_add(value);
+                    }
                 }
             }
             *found.borrow_mut() = Some(match item_idx {

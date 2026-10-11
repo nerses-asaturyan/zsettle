@@ -26,7 +26,7 @@ use zcash_protocol::memo::MemoBytes;
 use zcash_protocol::value::Zatoshis;
 
 use crate::wallet::{account_ufvk, heights, ironwood_note, next_orchard_address, Db, NoteRef};
-use crate::{zip317_fee, DEFAULT_MAX_EXPIRY_DELTA};
+use crate::zip317_fee;
 
 /// Everything the buyer needs to assemble a trade.
 #[derive(Clone, Debug)]
@@ -54,13 +54,6 @@ pub struct TradeRequest {
     /// Account of the buyer's wallet that receives the item; defaults to `buyer_account`.
     /// A dedicated item account lets the buyer resell later without exposing other funds.
     pub receive_account: Option<AccountUuid>,
-}
-
-impl TradeRequest {
-    /// Policy defaults for the optional fields.
-    pub fn defaults() -> (u32, u32) {
-        (DEFAULT_MAX_EXPIRY_DELTA, 3)
-    }
 }
 
 /// A proven, unsigned trade.
