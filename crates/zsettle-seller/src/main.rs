@@ -22,9 +22,9 @@ use zsettle_core::mint::{note_state, NoteState};
 use zsettle_core::pczt as pczt_ops;
 use zsettle_core::policy::{check, describe, prepared_ivk, Approved, PolicyError, SellerPolicy};
 use zsettle_core::wallet::{
-    account_birthday, account_orchard_fvk, heights, ironwood_note, max_scanned_height,
-    next_orchard_address, parse_account, recent_ironwood_anchors, sync_blocking,
-    unspent_ironwood_nullifiers, Db, NoteRef, Wallet,
+    account_birthday, account_orchard_fvk, create_account, heights, ironwood_note,
+    max_scanned_height, next_orchard_address, parse_account, recent_ironwood_anchors,
+    sync_blocking, unspent_ironwood_nullifiers, Db, NoteRef, Wallet,
 };
 use zsettle_core::DEFAULT_MAX_EXPIRY_DELTA;
 use zsettle_core::{MAX_ENVELOPE_BYTES, MIN_PRICE_ZAT};
@@ -74,6 +74,22 @@ enum Cmd {
         #[arg(long)]
         wallet: PathBuf,
         /// lightwalletd server URL.
+        #[arg(long, default_value = DEFAULT_SERVER)]
+        server: String,
+    },
+    /// Create a new item account in this wallet. One account per item keeps a consignment to
+    /// that item alone: whoever holds its listing sees nothing of your other items.
+    NewItemAccount {
+        /// Wallet directory.
+        #[arg(long)]
+        wallet: PathBuf,
+        /// age identity file that decrypts the wallet's mnemonic.
+        #[arg(long)]
+        identity: PathBuf,
+        /// Account name.
+        #[arg(long)]
+        name: String,
+        /// lightwalletd server URL (for the account birthday).
         #[arg(long, default_value = DEFAULT_SERVER)]
         server: String,
     },
@@ -203,6 +219,22 @@ fn main() -> Result<()> {
             let mut db = wallet.db()?;
             let report = sync_blocking(&wallet, &mut db, &server)?;
             println!("{}", serde_json::to_string(&report)?);
+            Ok(())
+        }
+        Cmd::NewItemAccount {
+            wallet,
+            identity,
+            name,
+            server,
+        } => {
+            let wallet = Wallet::open(&wallet)?;
+            let mut db = wallet.db()?;
+            let seed = wallet.seed(&identity)?;
+            let (id, index) = create_account(&wallet, &mut db, &seed, &name, &server)?;
+            println!(
+                "{}",
+                serde_json::json!({ "account": id.expose_uuid().to_string(), "index": index, "name": name, "next": "mint into it with --item-account and --item-account-index" })
+            );
             Ok(())
         }
         Cmd::Mint {

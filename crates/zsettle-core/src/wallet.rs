@@ -22,7 +22,7 @@ use zcash_client_backend::data_api::{
     locking::LockFilter,
     scanning::ScanRange,
     wallet::TargetHeight,
-    Account as _, AccountBirthday, AccountPurpose, InputSource, NullifierQuery,
+    Account as _, AccountBirthday, AccountPurpose, AccountSource, InputSource, NullifierQuery,
     WalletCommitmentTrees, WalletRead, WalletWrite,
 };
 use zcash_client_backend::proto::compact_formats::CompactBlock;
@@ -356,6 +356,35 @@ pub fn import_viewing_key(
     Ok(account.id())
 }
 
+/// Create a new ZIP 32 account of this wallet from its seed, with a birthday at the wallet's
+/// current scanned height. Returns the account id and its ZIP 32 index. One account per item
+/// keeps a consignment to that item alone.
+pub fn create_account(
+    wallet: &Wallet,
+    db: &mut Db,
+    seed: &SecretVec<u8>,
+    name: &str,
+    server: &str,
+) -> Result<(AccountUuid, u32)> {
+    let tip = max_scanned_height(db)?.ok_or_else(|| anyhow!("sync the wallet first"))?;
+    let tree_state = crate::broadcast::fetch_tree_state_blocking(server, tip)?;
+    let birthday = AccountBirthday::from_treestate(tree_state, None)
+        .map_err(|e| anyhow!("birthday: {e:?}"))?;
+    let (id, _usk) = db
+        .create_account(name, seed, &birthday, None)
+        .map_err(|e| anyhow!("creating account: {e}"))?;
+    let account = db
+        .get_account(id)
+        .map_err(|e| anyhow!("{e}"))?
+        .ok_or_else(|| anyhow!("account {} not found after creation", id.expose_uuid()))?;
+    let index = match account.source() {
+        AccountSource::Derived { derivation, .. } => u32::from(derivation.account_index()),
+        AccountSource::Imported { .. } => return Err(anyhow!("created account has no derivation")),
+    };
+    let _ = wallet;
+    Ok((id, index))
+}
+
 /// Find the account whose Orchard full viewing key is the one inside the given unified
 /// viewing key encoding. Only the Orchard component is compared, so an account imported from
 /// a complete key still matches a listing that publishes the Orchard part alone.
@@ -446,6 +475,23 @@ fn write_reservations(wallet: &Wallet, r: &Reservations) -> Result<()> {
     fs::write(&tmp, serde_json::to_string_pretty(r)?)
         .with_context(|| format!("writing {}", tmp.display()))?;
     fs::rename(&tmp, &path).with_context(|| format!("replacing {}", path.display()))
+}
+
+/// Every reservation on file: note and the height until which its trade can be mined.
+pub fn reservations(wallet: &Wallet) -> Result<Vec<(NoteRef, u32)>> {
+    read_reservations(wallet)?
+        .notes
+        .iter()
+        .map(|x| Ok((x.note.parse()?, x.expiry_height)))
+        .collect()
+}
+
+/// Drop the reservation of a note (its trade settled, or the note was retired).
+pub fn release_note(wallet: &Wallet, note: NoteRef) -> Result<()> {
+    let mut r = read_reservations(wallet)?;
+    let key = note.to_string();
+    r.notes.retain(|x| x.note != key);
+    write_reservations(wallet, &r)
 }
 
 /// Record that a note is committed to a trade that can be mined until `expiry_height`, so

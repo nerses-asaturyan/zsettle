@@ -20,8 +20,8 @@ The buyer builds and proves the whole transaction holding only viewing keys. The
 | Crate | Role |
 |---|---|
 | `zsettle-core` | library: items, signed listings, two-party bundle, PCZT roles, seller policy, proof check, wallet sync, provenance verifier, lightwalletd client |
-| `zsettle` | buyer and verifier CLI: `list`, `sync`, `import-listing`, `buy`, `finish`, `broadcast`, `verify` |
-| `zsettle-seller` | seller service: `sync`, `mint`, `items`, `publish`, `sign`, `serve` (syncs, reconciles listings with the chain, verifies proofs, signs only the item action) |
+| `zsettle` | buyer and verifier CLI: `list`, `sync`, `import-listing`, `buy`, `finish`, `broadcast`, `rotate`, `notes`, `verify` |
+| `zsettle-seller` | seller service: `sync`, `new-item-account`, `mint`, `items`, `publish`, `sign`, `serve` (syncs, reconciles listings with the chain, verifies proofs, signs only the item action) |
 
 ## One minute, no wallet
 
@@ -59,7 +59,7 @@ See [docs/SETUP.md](docs/SETUP.md) for wallets, [docs/TRADE.md](docs/TRADE.md) f
 | Buyer and seller identities | private: shielded Ironwood notes, fresh diversified addresses for every item and for the market payout |
 | Trade amounts | private; only the listed price is public, by choice. The seller's copy of a trade carries no value trapdoors, so the seller cannot solve for the buyer's values |
 | On chain | a trade is a two- or three-action Ironwood transaction with the ecosystem's default expiry and fee; nothing marks it as a trade |
-| What a listings holder learns | the item notes of the listed account and when each is spent; no trade output is encrypted to the published key |
+| What a listings holder learns | the item notes of the listed account and when each is spent; no trade output is encrypted to the published key; one account per item limits this to one item |
 | Settlement | real: four mainnet trades, `e76531b9…6ae2` (block 3514109), `2e0f4af1…9167c` (3514119), `e70f4890…8877` (3514159) and a resale `af09c2cf…5804` (3514174), made before the privacy pass (see docs/TRADE.md) |
 | Items | real shielded notes minted by this tool; no claim about any third-party collection |
 | Provenance | real: `zsettle verify` traces an item through mainnet compact blocks with the listings' viewing keys only, across resales |

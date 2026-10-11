@@ -26,7 +26,7 @@ use zcash_protocol::memo::MemoBytes;
 use zcash_protocol::value::Zatoshis;
 
 use crate::wallet::{account_ufvk, heights, ironwood_note, next_orchard_address, Db, NoteRef};
-use crate::zip317_fee;
+use crate::{zip317_fee, DEFAULT_MAX_EXPIRY_DELTA, ZIP317_MARGINAL_FEE};
 
 /// Everything the buyer needs to assemble a trade.
 #[derive(Clone, Debug)]
@@ -265,6 +265,108 @@ pub fn build_trade(db: &mut Db, network: Network, req: &TradeRequest) -> Result<
         fee,
         change,
         target_height: target.into(),
+        expiry_height: expiry.into(),
+    })
+}
+
+/// A proven one-note transfer to a fresh address of the same account.
+pub struct SelfSpend {
+    /// The full PCZT, ready for the account's signature.
+    pub pczt: Pczt,
+    /// Value of the new note.
+    pub value_out: u64,
+    /// Fee paid.
+    pub fee: u64,
+    /// Height at which the transaction expires.
+    pub expiry_height: u32,
+}
+
+/// Retire a note by moving its value to a fresh address of its own account. Used after an
+/// offer did not settle: the seller holds the note's nullifier from the envelope, and once
+/// the note is gone that nullifier can only ever point at this transfer.
+pub fn build_self_spend(
+    db: &mut Db,
+    network: Network,
+    account: AccountUuid,
+    note: NoteRef,
+    min_confirmations: u32,
+) -> Result<SelfSpend> {
+    let (target_height, anchor_height) = heights(db, min_confirmations)?;
+    let fvk = account_ufvk(db, account)?
+        .orchard()
+        .cloned()
+        .ok_or_else(|| anyhow!("account has no Orchard/Ironwood key"))?;
+    let n = ironwood_note(db, note, target_height)?;
+    if fvk.scope_for_address(&n.note.recipient()).is_none() {
+        return Err(anyhow!("note {note} is not owned by the account"));
+    }
+    let value = n.note.value().inner();
+    let fee = zip317_fee(2);
+    if value <= fee + ZIP317_MARGINAL_FEE {
+        return Err(anyhow!(
+            "note {note} is worth {value} zat, too little to move for a {fee} zat fee"
+        ));
+    }
+    let to = next_orchard_address(db, account)?;
+    let position = n.position;
+    let (anchor, path) = db
+        .with_ironwood_tree_mut::<_, _, anyhow::Error>(|tree| {
+            let root = tree
+                .root_at_checkpoint_id(&anchor_height)
+                .map_err(|e| anyhow!("{e:?}"))?
+                .ok_or_else(|| anyhow!("no Ironwood checkpoint at height {anchor_height}"))?;
+            let w = tree
+                .witness_at_checkpoint_id_caching(position, &anchor_height)
+                .map_err(|e| anyhow!("{e:?}"))?
+                .ok_or_else(|| anyhow!("no witness for the note at height {anchor_height}"))?;
+            Ok((
+                orchard::Anchor::from(root),
+                orchard::tree::MerklePath::from(w),
+            ))
+        })?
+        .ok_or_else(|| anyhow!("wallet has no Ironwood commitment tree"))?;
+    let target: BlockHeight = target_height.into();
+    let expiry = target + DEFAULT_MAX_EXPIRY_DELTA;
+    let mut builder = Builder::new(
+        network,
+        target,
+        BuildConfig::Standard {
+            sapling_anchor: None,
+            orchard_anchor: None,
+            ironwood_anchor: Some(anchor),
+            orchard_padding: BundlePadding::DEFAULT,
+            ironwood_padding: BundlePadding::DEFAULT,
+        },
+    )
+    .with_expiry_height(expiry);
+    builder
+        .add_ironwood_spend::<FeeError>(fvk.clone(), n.note, path)
+        .map_err(|e| anyhow!("adding spend: {e:?}"))?;
+    builder
+        .add_ironwood_output::<FeeError>(
+            Some(fvk.to_ovk(Scope::External)),
+            to,
+            Zatoshis::from_u64(value - fee).map_err(|_| anyhow!("value"))?,
+            MemoBytes::empty(),
+        )
+        .map_err(|e| anyhow!("adding output: {e:?}"))?;
+    let result = builder
+        .build_for_pczt(OsRng, &FeeRule::standard())
+        .map_err(|e| anyhow!("building transaction: {e:?}"))?;
+    let pczt = Creator::build_from_parts(result.pczt_parts)
+        .ok_or_else(|| anyhow!("PCZT creation failed"))?;
+    let pczt = IoFinalizer::new(pczt)
+        .finalize_io()
+        .map_err(|e| anyhow!("IO finalizer: {e:?}"))?;
+    let pk = ProvingKey::build(OrchardCircuitVersion::PostNu6_3);
+    let pczt = Prover::new(pczt)
+        .create_ironwood_proof(&pk)
+        .map_err(|e| anyhow!("prover: {e:?}"))?
+        .finish();
+    Ok(SelfSpend {
+        pczt,
+        value_out: value - fee,
+        fee,
         expiry_height: expiry.into(),
     })
 }

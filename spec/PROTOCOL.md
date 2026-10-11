@@ -8,7 +8,7 @@
 ## Items
 - Ordinary Ironwood v3 notes in a dedicated ZIP 32 account, value >= 1,000 zat (a zero-value note is not bound to the commitment tree by the circuit).
 - Minted by paying the item account from the seller's payout account at a fresh diversified address; the memo `zsettle item: <name>` names the item. That note is the item's genesis.
-- Consignment = the item account's Orchard full viewing key plus the account birthday. It lets a holder see every item note of that account and when each one is spent, and nothing else: the Sapling and transparent components of the account are never published, and no output of a trade is encrypted to this key.
+- Consignment = the item account's Orchard full viewing key plus the account birthday. It lets a holder see every item note of that account and when each one is spent, and nothing else; for an item that should not be seen together with others, give it an account of its own (`new-item-account`). The rest holds: the Sapling and transparent components of the account are never published, and no output of a trade is encrypted to this key.
 - Item transfer MUST happen in the same action as the item spend, so the successor note is always the output of the action that spends the predecessor, and its `rho` is the predecessor's nullifier. The Orchard builder pairs spends and outputs at random, so the trade builder rebuilds the bundle with fresh randomness until the item spend and the item output share an action (one chance in two or three per attempt; proving happens once, afterwards). `verify` relies on this rule and on nothing else: the lineage is the chain of spending actions.
 
 ## Listings
@@ -34,7 +34,7 @@ A JSON file the seller publishes anywhere: `{ version, network, item_ufvk, item_
 Both spends live in one transaction authorized by one binding signature. A transaction with any unsigned action is invalid. A prior spend of the item note makes the trade's nullifier a duplicate, so the whole transaction is rejected by consensus.
 
 ## Offers
-The seller signs every offer that passes. Several signed offers for one item may exist at once; all spend the same nullifier, so at most one is ever mined and the seller is paid exactly once. A buyer who loses the race loses nothing but the time spent proving. Nothing is locked, so nobody can keep an item off the market by sending offers.
+The seller signs every offer that passes. Several signed offers for one item may exist at once; all spend the same nullifier, so at most one is ever mined and the seller is paid exactly once. A buyer who loses the race loses nothing but the time spent proving. Nothing is locked, so nobody can keep an item off the market by sending offers. The seller keeps the envelope of a lost offer, which holds the nullifier of the buyer's paying note; `rotate` moves such notes to a fresh address of the buyer's account once their offers can no longer be mined, so that nullifier never identifies a later payment.
 
 ## Expiry
 The buyer counts from the next block and never uses more than the ecosystem default of 40 blocks even if the listing allows more; the seller sees the chain tip, so the seller allows one block of slack beyond `max_expiry_delta`. An expiry of zero (never expires) or at or below the tip is refused. After the expiry height the seller's signature is worthless. The default of 40 blocks is the librustzcash default for every transaction, so a trade carries no distinguishing expiry; the seller can end the option early by spending the item itself.
