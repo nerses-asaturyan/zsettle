@@ -168,11 +168,11 @@ pub fn build_trade(db: &mut Db, network: Network, req: &TradeRequest) -> Result<
                 .ok_or_else(|| anyhow!("no Ironwood checkpoint at height {anchor_height}"))?;
             let w_item = tree
                 .witness_at_checkpoint_id_caching(item_pos, &anchor_height)
-                .map_err(|e| anyhow!("{e:?}"))?
+                .map_err(|e| witness_error(e, anchor_height))?
                 .ok_or_else(|| anyhow!("no witness for the item note at height {anchor_height}"))?;
             let w_payer = tree
                 .witness_at_checkpoint_id_caching(payer_pos, &anchor_height)
-                .map_err(|e| anyhow!("{e:?}"))?
+                .map_err(|e| witness_error(e, anchor_height))?
                 .ok_or_else(|| {
                     anyhow!("no witness for the buyer note at height {anchor_height}")
                 })?;
@@ -282,6 +282,19 @@ pub struct SelfSpend {
     pub expiry_height: u32,
 }
 
+/// Why a note has no witness at the anchor: nearly always because it is newer than the anchor
+/// height, which sits `min_confirmations` blocks below the tip.
+fn witness_error<E: std::fmt::Debug>(e: E, anchor_height: BlockHeight) -> anyhow::Error {
+    let text = format!("{e:?}");
+    if text.contains("NotContained") {
+        anyhow!(
+            "the note is not yet in the commitment tree at the anchor height {anchor_height}: it is too recent for the confirmations asked for; wait a few blocks, or lower --min-confirmations"
+        )
+    } else {
+        anyhow!("witness at height {anchor_height}: {text}")
+    }
+}
+
 /// One spend of a transfer: the account that owns the note, and the note.
 pub type Input = (AccountUuid, NoteRef);
 /// One output of a transfer: the account that receives it, at a fresh address and under its
@@ -341,7 +354,7 @@ pub fn build_transfer(
             for (_, n) in &spends {
                 let w = tree
                     .witness_at_checkpoint_id_caching(n.position, &anchor_height)
-                    .map_err(|e| anyhow!("{e:?}"))?
+                    .map_err(|e| witness_error(e, anchor_height))?
                     .ok_or_else(|| anyhow!("no witness for a note at height {anchor_height}"))?;
                 paths.push(orchard::tree::MerklePath::from(w));
             }
