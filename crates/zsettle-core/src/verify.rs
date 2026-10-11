@@ -19,9 +19,7 @@ use orchard::keys::{FullViewingKey, PreparedIncomingViewingKey, Scope};
 use orchard::note::{ExtractedNoteCommitment, Nullifier};
 use orchard::note_encryption::{CompactAction, IronwoodDomain, COMPACT_NOTE_SIZE};
 use serde::Serialize;
-use zcash_client_backend::proto::service::{
-    compact_tx_streamer_client::CompactTxStreamerClient, BlockId, BlockRange, TxFilter,
-};
+use zcash_client_backend::proto::service::{BlockId, BlockRange, TxFilter};
 use zcash_note_encryption::{try_compact_note_decryption, try_note_decryption, EphemeralKeyBytes};
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
@@ -206,6 +204,22 @@ async fn trace(
             u32::try_from(id.height)?
         }
     };
+    // The server knows where the genesis transaction is: start there instead of at the
+    // birthday, and keep its bytes for the name.
+    let raw = client
+        .get_transaction(TxFilter {
+            block: None,
+            index: 0,
+            hash: genesis.txid.as_ref().to_vec(),
+        })
+        .await
+        .map_err(|e| anyhow!("the server does not know the genesis transaction: {e}"))?
+        .into_inner();
+    let genesis_height = u32::try_from(raw.height)?;
+    if genesis_height == 0 {
+        return Err(anyhow!("the genesis transaction is not mined yet"));
+    }
+    let from_height = from_height.max(genesis_height);
     let genesis_txid = genesis.txid.to_string();
 
     let mut stream = client
@@ -307,8 +321,7 @@ async fn trace(
         .find(|k| Some(&k.label) == hops[0].holder.as_ref())
         .map(|k| &k.fvk);
     let name = match genesis_key {
-        Some(fvk) => genesis_name(&mut client, network, fvk, genesis, hops[0].height)
-            .await
+        Some(fvk) => genesis_name(network, fvk, genesis, hops[0].height, &raw.data)
             .ok()
             .flatten(),
         None => None,
@@ -324,25 +337,15 @@ async fn trace(
     })
 }
 
-async fn genesis_name(
-    client: &mut CompactTxStreamerClient<tonic::transport::Channel>,
+fn genesis_name(
     network: Network,
     fvk: &FullViewingKey,
     genesis: NoteRef,
     height: u32,
+    raw: &[u8],
 ) -> Result<Option<String>> {
-    let raw = client
-        .get_transaction(TxFilter {
-            block: None,
-            index: 0,
-            hash: genesis.txid.as_ref().to_vec(),
-        })
-        .await
-        .map_err(|e| anyhow!("get_transaction: {e}"))?
-        .into_inner();
     let branch = BranchId::for_height(&network, BlockHeight::from(height));
-    let tx = Transaction::read(raw.data.as_slice(), branch)
-        .map_err(|e| anyhow!("parsing genesis tx: {e}"))?;
+    let tx = Transaction::read(raw, branch).map_err(|e| anyhow!("parsing genesis tx: {e}"))?;
     let bundle = match tx.ironwood_bundle() {
         Some(b) => b,
         None => return Ok(None),

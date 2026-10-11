@@ -18,7 +18,7 @@
 //! - [`policy`]: the seller-side checks that run before a signature is produced.
 //! - [`listing`]: the public listings file (prices, payout address, item viewing key).
 //! - [`mint`]: minting item notes and listing an account's unspent notes.
-//! - [`item`]: anchor, manifest, consignment encodings and item identity.
+//! - [`item`]: what an item is and its minimum value.
 //! - [`verify`]: keyless provenance verification from chain data.
 
 #![forbid(unsafe_code)]
@@ -33,9 +33,6 @@ pub mod policy;
 pub mod trade;
 pub mod verify;
 pub mod wallet;
-
-/// Zcash mainnet coin type (ZIP 32).
-pub const COIN_TYPE_MAINNET: u32 = 133;
 
 /// Default maximum number of blocks a seller signature stays valid. Equal to the librustzcash
 /// default transaction expiry, so a trade carries the same expiry as any wallet transaction

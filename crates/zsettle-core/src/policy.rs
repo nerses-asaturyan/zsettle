@@ -2,7 +2,8 @@
 //!
 //! The checks, in order:
 //! 1. the expiry height is set, lies after the current chain tip and within
-//!    `max_expiry_delta` of it;
+//!    `max_expiry_delta` of it, and the bundle's anchor is one of the seller wallet's own
+//!    recent tree roots (a proof against a synthetic tree is worthless to the seller);
 //! 2. exactly one action spends the listed item note (matched by nullifier) and that
 //!    action carries a spend randomizer, so it can be signed; no other action spends any
 //!    note of the seller's wallet;
@@ -70,6 +71,9 @@ pub enum PolicyError {
         /// Policy limit.
         max_delta: u32,
     },
+    /// The bundle's anchor is not a recent tree root of the seller's wallet.
+    #[error("the anchor is not a recent tree root this wallet knows")]
+    UnknownAnchor,
     /// The PCZT cannot be parsed as an Ironwood bundle.
     #[error("invalid Ironwood bundle: {0}")]
     Invalid(String),
@@ -104,6 +108,7 @@ pub fn check(
     seller_nullifiers: &[Nullifier],
     seller_ivk: &PreparedIncomingViewingKey,
     policy: &SellerPolicy,
+    known_anchors: &[orchard::Anchor],
 ) -> Result<Approved, PolicyError> {
     let expiry = *pczt.global().expiry_height();
     // ZIP 203: an expiry height of zero means the transaction never expires.
@@ -133,6 +138,10 @@ pub fn check(
     let found: RefCell<Option<Result<(usize, u64), PolicyError>>> = RefCell::new(None);
     Verifier::new(pczt.clone())
         .with_ironwood::<anyhow::Error, _>(|bundle| {
+            if !known_anchors.contains(bundle.anchor()) {
+                *found.borrow_mut() = Some(Err(PolicyError::UnknownAnchor));
+                return Ok(());
+            }
             let mut item_idx: Option<usize> = None;
             let mut paid: u64 = 0;
             for (i, action) in bundle.actions().iter().enumerate() {

@@ -1,22 +1,10 @@
-//! Note-sealed items: identity, anchor, manifest and consignment.
+//! What an item is.
 //!
-//! Encodings follow the nscv convention where it is cheap to do so
-//! (`ZBT1` anchor, `ZBM1` manifest, 96-byte per-hop consignment entries), updated for
-//! Ironwood v3 notes. Items MUST carry non-zero value: a zero-value note has no Merkle
-//! binding in the Action circuit.
+//! An item is an ordinary Ironwood (Orchard v3) note in a dedicated ZIP 32 account. Its
+//! identity is its genesis note (`<txid>:<action index>`); its history is the chain of
+//! actions that spend it, each one's output being the next note. Items MUST carry value: a
+//! zero-value note is not bound to the commitment tree by the Action circuit, so nothing
+//! would tie its successor to it.
 
-use serde::{Deserialize, Serialize};
-
-/// Identity of an item: the extracted note commitment of its genesis note.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ItemId(pub [u8; 32]);
-
-impl ItemId {
-    /// Hex form used in listings and CLI output.
-    pub fn to_hex(&self) -> String {
-        hex::encode(self.0)
-    }
-}
-
-/// Minimum item note value in zatoshis. Zero-value notes are not Merkle-bound.
+/// Minimum item note value in zatoshis.
 pub const MIN_ITEM_VALUE: u64 = 1_000;

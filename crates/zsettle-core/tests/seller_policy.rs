@@ -91,7 +91,15 @@ fn approves_a_correct_trade() {
     let nf = f.item_note.nullifier(&f.fvk_item);
     let extra_nf = f.extra_seller_note.nullifier(&f.fvk_item);
     let ivk = prepared_ivk(&f.fvk_seller);
-    let ok = check(&pczt, &nf, &[nf, extra_nf], &ivk, &policy(5_000)).expect("approved");
+    let ok = check(
+        &pczt,
+        &nf,
+        &[nf, extra_nf],
+        &ivk,
+        &policy(5_000),
+        &[f.anchor],
+    )
+    .expect("approved");
     assert_eq!(ok.paid_zat, 5_000);
     assert_eq!(ok.expiry_height, TARGET + 10);
 }
@@ -103,7 +111,7 @@ fn refuses_underpayment() {
     let nf = f.item_note.nullifier(&f.fvk_item);
     let ivk = prepared_ivk(&f.fvk_seller);
     assert_eq!(
-        check(&pczt, &nf, &[nf], &ivk, &policy(5_000)),
+        check(&pczt, &nf, &[nf], &ivk, &policy(5_000), &[f.anchor]),
         Err(PolicyError::Underpaid {
             got: 4_999,
             want: 5_000
@@ -118,7 +126,7 @@ fn refuses_long_expiry() {
     let nf = f.item_note.nullifier(&f.fvk_item);
     let ivk = prepared_ivk(&f.fvk_seller);
     assert!(matches!(
-        check(&pczt, &nf, &[nf], &ivk, &policy(5_000)),
+        check(&pczt, &nf, &[nf], &ivk, &policy(5_000), &[f.anchor]),
         Err(PolicyError::ExpiryTooLong { .. })
     ));
 }
@@ -130,7 +138,14 @@ fn refuses_when_the_item_is_not_spent() {
     let other_nf = f.extra_seller_note.nullifier(&f.fvk_item);
     let ivk = prepared_ivk(&f.fvk_seller);
     assert_eq!(
-        check(&pczt, &other_nf, &[other_nf], &ivk, &policy(5_000)),
+        check(
+            &pczt,
+            &other_nf,
+            &[other_nf],
+            &ivk,
+            &policy(5_000),
+            &[f.anchor]
+        ),
         Err(PolicyError::ItemNotSpent)
     );
 }
@@ -143,7 +158,14 @@ fn refuses_an_extra_seller_spend() {
     let extra_nf = f.extra_seller_note.nullifier(&f.fvk_item);
     let ivk = prepared_ivk(&f.fvk_seller);
     assert!(matches!(
-        check(&pczt, &nf, &[nf, extra_nf], &ivk, &policy(5_000)),
+        check(
+            &pczt,
+            &nf,
+            &[nf, extra_nf],
+            &ivk,
+            &policy(5_000),
+            &[f.anchor]
+        ),
         Err(PolicyError::ExtraSellerSpend(_))
     ));
 }
@@ -156,7 +178,7 @@ fn payment_to_someone_else_does_not_count() {
     // The buyer's own key sees the item and change outputs, not a payment to the seller.
     let ivk = prepared_ivk(&f.fvk_buyer);
     assert!(matches!(
-        check(&pczt, &nf, &[nf], &ivk, &policy(5_000)),
+        check(&pczt, &nf, &[nf], &ivk, &policy(5_000), &[f.anchor]),
         Err(PolicyError::Underpaid { .. })
     ));
 }
@@ -168,7 +190,7 @@ fn refuses_a_transaction_that_never_expires() {
     let nf = f.item_note.nullifier(&f.fvk_item);
     let ivk = prepared_ivk(&f.fvk_seller);
     assert_eq!(
-        check(&pczt, &nf, &[nf], &ivk, &policy(5_000)),
+        check(&pczt, &nf, &[nf], &ivk, &policy(5_000), &[f.anchor]),
         Err(PolicyError::NoExpiry)
     );
 }
@@ -181,11 +203,28 @@ fn refuses_an_expiry_at_or_below_the_tip() {
     for expiry in [TARGET - 5, TARGET - 1] {
         let pczt = trade(&f, 5_000, expiry, false);
         assert!(matches!(
-            check(&pczt, &nf, &[nf], &ivk, &policy(5_000)),
+            check(&pczt, &nf, &[nf], &ivk, &policy(5_000), &[f.anchor]),
             Err(PolicyError::Expired { .. })
         ));
     }
     // One block above the tip is the earliest acceptable expiry.
     let pczt = trade(&f, 5_000, TARGET, false);
-    assert!(check(&pczt, &nf, &[nf], &ivk, &policy(5_000)).is_ok());
+    assert!(check(&pczt, &nf, &[nf], &ivk, &policy(5_000), &[f.anchor]).is_ok());
+}
+
+#[test]
+fn refuses_an_anchor_the_wallet_does_not_know() {
+    let f = fixture();
+    let pczt = trade(&f, 5_000, TARGET + 10, false);
+    let nf = f.item_note.nullifier(&f.fvk_item);
+    let ivk = prepared_ivk(&f.fvk_seller);
+    assert_eq!(
+        check(&pczt, &nf, &[nf], &ivk, &policy(5_000), &[]),
+        Err(PolicyError::UnknownAnchor)
+    );
+    let other = orchard::Anchor::from_bytes([7u8; 32]).unwrap();
+    assert_eq!(
+        check(&pczt, &nf, &[nf], &ivk, &policy(5_000), &[other]),
+        Err(PolicyError::UnknownAnchor)
+    );
 }

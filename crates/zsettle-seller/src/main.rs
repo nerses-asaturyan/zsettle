@@ -21,10 +21,14 @@ use zsettle_core::pczt as pczt_ops;
 use zsettle_core::policy::{check, describe, prepared_ivk, Approved, PolicyError, SellerPolicy};
 use zsettle_core::wallet::{
     account_birthday, account_orchard_fvk, heights, ironwood_note, next_orchard_address,
-    parse_account, sync_blocking, unspent_ironwood_nullifiers, Db, NoteRef, Wallet,
+    parse_account, recent_ironwood_anchors, sync_blocking, unspent_ironwood_nullifiers, Db,
+    NoteRef, Wallet,
 };
 use zsettle_core::{MAX_ENVELOPE_BYTES, MIN_PRICE_ZAT};
 
+/// How many recent blocks' tree roots count as acceptable anchors (the wallet keeps that
+/// many checkpoints).
+const ANCHOR_DEPTH: u32 = 100;
 /// Longest pause between passes after repeated failures.
 const MAX_BACKOFF_SECS: u64 = 300;
 /// Inbox files modified more recently than this are left for the next pass: they may still be
@@ -337,11 +341,12 @@ fn main() -> Result<()> {
             dry_run,
         } => {
             let wallet = Wallet::open(&w.wallet)?;
-            let db = wallet.db()?;
+            let mut db = wallet.db()?;
+            let anchors = recent_ironwood_anchors(&mut db, ANCHOR_DEPTH)?;
             let l = Listings::read(&listings)?;
             let bytes = fs::read(&input).with_context(|| format!("reading {}", input.display()))?;
             let pczt = pczt_ops::from_bytes(&bytes)?;
-            let outcome = process(&db, &w, &l, &pczt)?;
+            let outcome = process(&db, &w, &l, &pczt, &anchors)?;
             println!("{}", describe(&outcome.result));
             let (item, approved) = match outcome.result {
                 Ok(a) => (outcome.item.expect("matched item"), a),
@@ -477,13 +482,14 @@ impl Service<'_> {
         if self.sync_cmd.is_none() && !self.no_sync {
             sync_blocking(&wallet, &mut db, self.server).context("syncing the seller wallet")?;
         }
+        let anchors = recent_ironwood_anchors(&mut db, ANCHOR_DEPTH)?;
         let mut l = Listings::read(self.listings)?;
         if reconcile(&wallet, &db, &mut l)? {
             l.sign(self.ask)?;
             l.write(self.listings)?;
         }
         for path in self.envelopes()? {
-            if let Err(e) = self.handle(&db, &l, &path) {
+            if let Err(e) = self.handle(&db, &l, &anchors, &path) {
                 println!(
                     "{}",
                     serde_json::json!({ "event": "error", "file": path, "error": format!("{e:#}") })
@@ -510,7 +516,13 @@ impl Service<'_> {
     /// Handle one envelope: sign it or reject it, record the outcome, move the file. The
     /// reply is named after the envelope and a tag of its content, so two envelopes with
     /// the same name never collide and the same envelope always gets the same reply.
-    fn handle(&self, db: &Db, l: &Listings, path: &Path) -> Result<()> {
+    fn handle(
+        &self,
+        db: &Db,
+        l: &Listings,
+        anchors: &[orchard::Anchor],
+        path: &Path,
+    ) -> Result<()> {
         let stem = path
             .file_stem()
             .and_then(|s| s.to_str())
@@ -533,7 +545,7 @@ impl Service<'_> {
             );
             return move_into(path, &self.inbox.join("done"));
         }
-        match self.sign_envelope(db, l, &bytes) {
+        match self.sign_envelope(db, l, anchors, &bytes) {
             Ok((item, approved, signed)) => {
                 write_atomic(&out, &signed)?;
                 move_into(path, &self.inbox.join("done"))?;
@@ -568,10 +580,12 @@ impl Service<'_> {
         &self,
         db: &Db,
         l: &Listings,
+        anchors: &[orchard::Anchor],
         bytes: &[u8],
     ) -> std::result::Result<(ListedItem, Approved, Vec<u8>), String> {
         let pczt = pczt_ops::from_bytes(bytes).map_err(|e| format!("unreadable: {e:#}"))?;
-        let outcome = process(db, self.w, l, &pczt).map_err(|e| format!("error: {e:#}"))?;
+        let outcome =
+            process(db, self.w, l, &pczt, anchors).map_err(|e| format!("error: {e:#}"))?;
         let approved = outcome.result.map_err(|e| format!("refused: {e}"))?;
         let item = outcome
             .item
@@ -630,7 +644,13 @@ struct Outcome {
 }
 
 /// Match a trade against the listings and run the policy checks.
-fn process(db: &Db, w: &WalletArgs, l: &Listings, pczt: &pczt::Pczt) -> Result<Outcome> {
+fn process(
+    db: &Db,
+    w: &WalletArgs,
+    l: &Listings,
+    pczt: &pczt::Pczt,
+    anchors: &[orchard::Anchor],
+) -> Result<Outcome> {
     let (target, _) = heights(db, 1)?;
     let tip: u32 =
         u32::from(zcash_protocol::consensus::BlockHeight::from(target)).saturating_sub(1);
@@ -665,7 +685,7 @@ fn process(db: &Db, w: &WalletArgs, l: &Listings, pczt: &pczt::Pczt) -> Result<O
         max_expiry_delta: item.max_expiry_delta,
         tip,
     };
-    let result = check(pczt, &nf, &seller_nfs, &ivk, &policy);
+    let result = check(pczt, &nf, &seller_nfs, &ivk, &policy, anchors);
     Ok(Outcome {
         item: Some(item),
         result,
