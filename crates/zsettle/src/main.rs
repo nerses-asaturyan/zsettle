@@ -7,7 +7,9 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use orchard::keys::SpendAuthorizingKey;
 use zcash_protocol::consensus::Network;
-use zsettle_core::broadcast::{check_consensus_blocking, pick_server, server_info_blocking};
+use zsettle_core::broadcast::{
+    check_consensus_at_tip_blocking, check_consensus_blocking, pick_server,
+};
 use zsettle_core::listing::Listings;
 use zsettle_core::mint::{note_state, NoteState};
 use zsettle_core::pczt as pczt_ops;
@@ -291,8 +293,7 @@ fn parse_network(name: &str) -> Result<Network> {
 
 /// Refuse to send when the server is on a consensus branch this build does not sign for.
 fn check_server_before_sending(server: &str, network: Network) -> Result<()> {
-    let info = server_info_blocking(server)?;
-    check_consensus_blocking(server, network, info.block_height.saturating_add(1))?;
+    check_consensus_at_tip_blocking(server, network)?;
     Ok(())
 }
 
@@ -457,6 +458,12 @@ fn main() -> Result<()> {
                     })
                     .unwrap_or(zsettle_core::DEFAULT_MAX_EXPIRY_DELTA),
             );
+            if expiry == 0 || expiry > zsettle_core::DEFAULT_MAX_EXPIRY_DELTA {
+                return Err(anyhow!(
+                    "--expiry-delta must be between 1 and {} blocks: a longer expiry would mark the trade on chain, and the seller refuses it anyway",
+                    zsettle_core::DEFAULT_MAX_EXPIRY_DELTA
+                ));
+            }
             let item_memo = match listed.as_ref().map(|i| i.name.as_str()) {
                 Some(name) if !name.is_empty() => format!("zsettle item: {name}"),
                 _ => String::new(),

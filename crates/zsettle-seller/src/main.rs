@@ -16,7 +16,7 @@ use orchard::note::Nullifier;
 use zcash_keys::address::Address;
 use zcash_keys::address::UnifiedAddress;
 use zcash_protocol::consensus::{BlockHeight, BranchId};
-use zsettle_core::broadcast::{check_consensus_blocking, pick_server, server_info_blocking};
+use zsettle_core::broadcast::{check_consensus_at_tip_blocking, pick_server};
 use zsettle_core::listing::{ListedItem, Listings};
 use zsettle_core::mint::{note_state, NoteState};
 use zsettle_core::pczt as pczt_ops;
@@ -137,10 +137,14 @@ enum Cmd {
         /// Listings file to create or update.
         #[arg(long)]
         listings: PathBuf,
-        /// Item note to list, as <txid>:<output index>. Without it, the existing file is only
-        /// checked and signed again (after a format change, or a manual edit you do intend).
+        /// Item note to list, as <txid>:<output index>. Without it, the existing file is
+        /// checked and signed again.
         #[arg(long)]
         item_note: Option<NoteRef>,
+        /// Sign a file whose signature does not verify (after a format change, or a manual
+        /// edit you do intend). Every entry is still checked.
+        #[arg(long)]
+        resign_unverified: bool,
         /// Display name.
         #[arg(long, default_value = "")]
         name: String,
@@ -273,8 +277,7 @@ fn main() -> Result<()> {
             let wallet = Wallet::open(&w.wallet)?;
             let server = pick_server(server, wallet.network);
             let mut db = wallet.db()?;
-            let info = server_info_blocking(&server)?;
-            check_consensus_blocking(&server, wallet.network, info.block_height.saturating_add(1))?;
+            check_consensus_at_tip_blocking(&server, wallet.network)?;
             let seed = wallet.seed(&identity)?;
             let req = zsettle_core::mint::MintRequest {
                 from_account: parse_account(&w.payout_account)?,
@@ -319,6 +322,7 @@ fn main() -> Result<()> {
             name,
             price,
             max_expiry_delta,
+            resign_unverified,
         } => {
             let wallet = Wallet::open(&w.wallet)?;
             let mut db = wallet.db()?;
@@ -333,9 +337,14 @@ fn main() -> Result<()> {
                         listings.display()
                     ));
                 }
-                if item_note.is_some() {
+                if resign_unverified {
+                    eprintln!(
+                        "warning: signing {} without verifying its signature",
+                        listings.display()
+                    );
+                } else {
                     l.verify_signature()
-                        .with_context(|| format!("{} is not trustworthy; publish without --item-note to sign it again if you edited it on purpose", listings.display()))?;
+                        .with_context(|| format!("{} is not trustworthy; pass --resign-unverified to sign it again if you edited it on purpose", listings.display()))?;
                 }
                 l
             } else {
@@ -362,20 +371,10 @@ fn main() -> Result<()> {
                 }
             };
             check_payout(&l, &payout_key(&db, &w)?, wallet.network)?;
+            let (target, _) = heights(&db, 1)?;
             if let Some(item_note) = item_note {
                 let price = price.ok_or_else(|| anyhow!("--price is required with --item-note"))?;
-                if price < MIN_PRICE_ZAT {
-                    return Err(anyhow!(
-                        "price must be at least {MIN_PRICE_ZAT} zat: a payment at or below the ZIP 317 marginal fee is dust that no wallet spends"
-                    ));
-                }
-                if max_expiry_delta != DEFAULT_MAX_EXPIRY_DELTA {
-                    eprintln!(
-                        "warning: an expiry limit other than {DEFAULT_MAX_EXPIRY_DELTA} blocks makes every trade of this item recognisable on chain"
-                    );
-                }
-                // Make sure the note exists and is ours before listing it.
-                let (target, _) = heights(&db, 1)?;
+                // A new entry must name a note this wallet can spend.
                 let note = ironwood_note(&db, item_note, target)?;
                 if item_fvk.scope_for_address(&note.note.recipient()).is_none() {
                     return Err(anyhow!("note {item_note} is not owned by the item account"));
@@ -386,6 +385,31 @@ fn main() -> Result<()> {
                     price_zat: price,
                     max_expiry_delta,
                 });
+            }
+            // Every entry is checked, the new one and the ones already in the file.
+            for item in &l.items {
+                if item.price_zat < MIN_PRICE_ZAT {
+                    return Err(anyhow!(
+                        "{}: price must be at least {MIN_PRICE_ZAT} zat: a payment at or below the ZIP 317 marginal fee is dust that no wallet spends",
+                        item.note
+                    ));
+                }
+                if item.max_expiry_delta != DEFAULT_MAX_EXPIRY_DELTA {
+                    eprintln!(
+                        "warning: {}: an expiry limit other than {DEFAULT_MAX_EXPIRY_DELTA} blocks makes every trade of this item recognisable on chain",
+                        item.note
+                    );
+                }
+                if let Ok(r) = item.note_ref() {
+                    if let Ok(n) = ironwood_note(&db, r, target) {
+                        if item_fvk.scope_for_address(&n.note.recipient()).is_none() {
+                            return Err(anyhow!(
+                                "note {} is not owned by the item account",
+                                item.note
+                            ));
+                        }
+                    }
+                }
             }
             l.sign(&ask, max_scanned_height(&db)?.unwrap_or(0))?;
             l.verify_signature()?;
@@ -420,8 +444,14 @@ fn main() -> Result<()> {
             let vk = pczt_ops::verifying_key();
             pczt_ops::verify_proof(&pczt, &vk).context("refused: proof")?;
             println!("proof verified");
-            let outcome = process(&db, &w, &l, &pczt, &anchors)?;
+            let outcome = process(&db, &w, wallet.network, &l, &pczt, &anchors)?;
             println!("{}", describe(&outcome.result));
+            if outcome.item.is_none() && outcome.unavailable > 0 {
+                eprintln!(
+                    "note: {} listed items are not spendable in this wallet right now (sold, unscanned, or too recent); the trade may be for one of them",
+                    outcome.unavailable
+                );
+            }
             let (item, approved) = match outcome.result {
                 Ok(a) => (outcome.item.expect("matched item"), a),
                 Err(e) => return Err(zsettle_core::policy::into_anyhow(e)),
@@ -510,6 +540,7 @@ fn main() -> Result<()> {
             );
             let service = Service {
                 w: &w,
+                network: wallet.network,
                 ask: &ask,
                 vk: &vk,
                 listings: &listings,
@@ -549,6 +580,7 @@ fn main() -> Result<()> {
 /// One running seller service.
 struct Service<'a> {
     w: &'a WalletArgs,
+    network: zcash_protocol::consensus::Network,
     ask: &'a SpendAuthorizingKey,
     vk: &'a VerifyingKey,
     listings: &'a Path,
@@ -622,7 +654,7 @@ impl Service<'_> {
             .with_context(|| format!("reading {}", path.display()))?
             .len();
         if size > MAX_ENVELOPE_BYTES {
-            return self.reject(path, &stem, format!("too large: {size} bytes"));
+            return self.reject(path, format!("too large: {size} bytes"));
         }
         let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         let tag = pczt_ops::envelope_tag(&bytes);
@@ -633,7 +665,8 @@ impl Service<'_> {
                 "{}",
                 serde_json::json!({ "event": "already_signed", "file": path, "out": out })
             );
-            return move_into(path, &self.inbox.join("done"));
+            move_into(path, &self.inbox.join("done"))?;
+            return Ok(());
         }
         match self.sign_envelope(db, l, anchors, &bytes) {
             Ok((item, approved, signed)) => {
@@ -649,18 +682,26 @@ impl Service<'_> {
                 );
                 Ok(())
             }
-            Err(reason) => self.reject(path, &stem, reason),
+            Err(Refusal::Reject(reason)) => self.reject(path, reason),
+            Err(Refusal::Defer(reason)) => {
+                println!(
+                    "{}",
+                    serde_json::json!({ "event": "deferred", "file": path, "reason": reason })
+                );
+                Ok(())
+            }
         }
     }
 
-    fn reject(&self, path: &Path, stem: &str, reason: String) -> Result<()> {
+    fn reject(&self, path: &Path, reason: String) -> Result<()> {
         println!(
             "{}",
             serde_json::json!({ "event": "rejected", "file": path, "reason": reason })
         );
-        let rejected = self.inbox.join("rejected");
-        move_into(path, &rejected)?;
-        fs::write(rejected.join(format!("{stem}.reason.txt")), reason)?;
+        let dest = move_into(path, &self.inbox.join("rejected"))?;
+        let mut why = dest.into_os_string();
+        why.push(".reason.txt");
+        fs::write(why, reason)?;
         Ok(())
     }
 
@@ -672,18 +713,35 @@ impl Service<'_> {
         l: &Listings,
         anchors: &[orchard::Anchor],
         bytes: &[u8],
-    ) -> std::result::Result<(ListedItem, Approved, Vec<u8>), String> {
-        let pczt = pczt_ops::from_bytes(bytes).map_err(|e| format!("unreadable: {e:#}"))?;
-        pczt_ops::verify_proof(&pczt, self.vk).map_err(|e| format!("refused: {e:#}"))?;
-        let outcome =
-            process(db, self.w, l, &pczt, anchors).map_err(|e| format!("error: {e:#}"))?;
-        let approved = outcome.result.map_err(|e| format!("refused: {e}"))?;
-        let item = outcome
-            .item
-            .ok_or_else(|| "error: approved trade without a listed item".to_string())?;
+    ) -> std::result::Result<(ListedItem, Approved, Vec<u8>), Refusal> {
+        let pczt = pczt_ops::from_bytes(bytes)
+            .map_err(|e| Refusal::Reject(format!("unreadable: {e:#}")))?;
+        pczt_ops::verify_proof(&pczt, self.vk)
+            .map_err(|e| Refusal::Reject(format!("refused: {e:#}")))?;
+        let expiry = *pczt.global().expiry_height();
+        let outcome = match process(db, self.w, self.network, l, &pczt, anchors) {
+            Ok(outcome) => outcome,
+            // A failure of this pass rather than of the envelope: keep it while its
+            // transaction can still be mined.
+            Err(e) if expiry != 0 => return Err(Refusal::Defer(format!("error: {e:#}"))),
+            Err(e) => return Err(Refusal::Reject(format!("error: {e:#}"))),
+        };
+        if outcome.item.is_none() && outcome.unavailable > 0 && expiry > outcome.tip {
+            return Err(Refusal::Defer(format!(
+                "spends no listed item this wallet can spend, and {} listed items are not spendable here yet (unscanned or too recent)",
+                outcome.unavailable
+            )));
+        }
+        let approved = outcome
+            .result
+            .map_err(|e| Refusal::Reject(format!("refused: {e}")))?;
+        let item = outcome.item.ok_or_else(|| {
+            Refusal::Reject("error: approved trade without a listed item".to_string())
+        })?;
         let signed = pczt_ops::sign_ironwood_action(pczt, approved.item_action_index, self.ask)
-            .map_err(|e| format!("signing failed: {e:#}"))?;
-        let bytes = pczt_ops::to_bytes(&signed).map_err(|e| format!("signing failed: {e:#}"))?;
+            .map_err(|e| Refusal::Reject(format!("signing failed: {e:#}")))?;
+        let bytes = pczt_ops::to_bytes(&signed)
+            .map_err(|e| Refusal::Reject(format!("signing failed: {e:#}")))?;
         Ok((item, approved, bytes))
     }
 }
@@ -731,12 +789,26 @@ fn reconcile(wallet: &Wallet, db: &Db, l: &mut Listings) -> Result<bool> {
 struct Outcome {
     item: Option<ListedItem>,
     result: std::result::Result<Approved, PolicyError>,
+    /// Listed items this wallet cannot spend right now (unscanned, too recent, sold). A trade
+    /// that spends none of the others may be for one of these.
+    unavailable: usize,
+    /// Chain tip the checks were made against.
+    tip: u32,
+}
+
+/// Why an envelope was not signed in this pass.
+enum Refusal {
+    /// Final: the envelope moves to `rejected/`.
+    Reject(String),
+    /// Try again next pass: the wallet may not have caught up with the chain yet.
+    Defer(String),
 }
 
 /// Match a trade against the listings and run the policy checks.
 fn process(
     db: &Db,
     w: &WalletArgs,
+    network: zcash_protocol::consensus::Network,
     l: &Listings,
     pczt: &pczt::Pczt,
     anchors: &[orchard::Anchor],
@@ -766,18 +838,14 @@ fn process(
         }
     }
     let Some((item, nf)) = matched else {
-        if unavailable > 0 {
-            return Err(anyhow!(
-                "the trade does not spend any listed item that is spendable in this wallet ({unavailable} listed items are not spendable here right now: sold, unscanned, or too recent)"
-            ));
-        }
         return Ok(Outcome {
             item: None,
             result: Err(PolicyError::ItemNotSpent),
+            unavailable,
+            tip,
         });
     };
     let ivk = prepared_ivk(&payout_key(db, w)?);
-    let network = Wallet::open(&w.wallet)?.network;
     let policy = SellerPolicy {
         price_zat: item.price_zat,
         max_expiry_delta: item.max_expiry_delta,
@@ -788,6 +856,8 @@ fn process(
     Ok(Outcome {
         item: Some(item),
         result,
+        unavailable,
+        tip,
     })
 }
 
@@ -853,9 +923,12 @@ fn run_sync_command(cmd: &str) -> Result<()> {
 /// True when the file has not been modified for `SETTLE_SECS`.
 fn settled(entry: &fs::DirEntry, now: SystemTime) -> bool {
     match entry.metadata().and_then(|m| m.modified()) {
-        Ok(modified) => now
-            .duration_since(modified)
-            .is_ok_and(|age| age >= Duration::from_secs(SETTLE_SECS)),
+        // A modification time in the future (clock changes, odd copies) must not keep the
+        // file waiting forever.
+        Ok(modified) => match now.duration_since(modified) {
+            Ok(age) => age >= Duration::from_secs(SETTLE_SECS),
+            Err(_) => true,
+        },
         Err(_) => true,
     }
 }
@@ -867,12 +940,22 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
 }
 
-fn move_into(path: &Path, dir: &Path) -> Result<()> {
+/// Move a file into `dir` without ever replacing a file already there: a later file with
+/// the same name gets a numbered suffix.
+fn move_into(path: &Path, dir: &Path) -> Result<PathBuf> {
     let name = path
         .file_name()
-        .ok_or_else(|| anyhow!("{} has no file name", path.display()))?;
-    fs::rename(path, dir.join(name))
-        .with_context(|| format!("moving {} to {}", path.display(), dir.display()))
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow!("{} has no usable file name", path.display()))?;
+    let mut dest = dir.join(name);
+    let mut n = 1u32;
+    while dest.exists() {
+        dest = dir.join(format!("{name}.{n}"));
+        n += 1;
+    }
+    fs::rename(path, &dest)
+        .with_context(|| format!("moving {} to {}", path.display(), dir.display()))?;
+    Ok(dest)
 }
 
 fn network_name(n: zcash_protocol::consensus::Network) -> &'static str {

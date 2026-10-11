@@ -45,14 +45,31 @@ pub struct ItemNote {
     pub mined_height: Option<u32>,
 }
 
+/// SQL condition that a spend recorded in transaction `tx` still counts: the transaction is
+/// mined, never expires, or is unexpired at `target` (an SQL parameter). A spend whose expiry
+/// the wallet does not know, as happens for one seen only in a compact block, counts for the
+/// default expiry delta after it was first observed, the way the wallet library itself bounds
+/// it. Without that bound a spend undone by a reorg would hide the note for good.
+fn live_spend(tx: &str, target: &str) -> String {
+    format!(
+        "({tx}.mined_height IS NOT NULL
+          OR {tx}.expiry_height = 0
+          OR {tx}.expiry_height >= {target}
+          OR ({tx}.expiry_height IS NULL
+              AND {tx}.min_observed_height + {delta} >= {target}))",
+        delta = crate::DEFAULT_MAX_EXPIRY_DELTA
+    )
+}
+
 /// Every unspent Ironwood note of an account, dust included, oldest first and unmined notes
 /// last. The wallet's own note selection ignores notes at or below the ZIP 317 marginal fee,
 /// which is exactly where item notes live, so this reads the wallet's tables directly.
 pub fn unspent_notes(wallet: &Wallet, db: &Db, account: AccountUuid) -> Result<Vec<ItemNote>> {
-    let tip = crate::wallet::max_scanned_height(db)?.unwrap_or(0);
+    // The next block to be scanned: the height a spend must still be valid at.
+    let target = crate::wallet::max_scanned_height(db)?.unwrap_or(0) + 1;
     let conn = open_read_only(wallet)?;
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT t.txid, n.action_index, n.value, t.mined_height
              FROM ironwood_received_notes n
              JOIN transactions t ON t.id_tx = n.transaction_id
@@ -62,16 +79,14 @@ pub fn unspent_notes(wallet: &Wallet, db: &Db, account: AccountUuid) -> Result<V
                  SELECT 1 FROM ironwood_received_note_spends s
                  JOIN transactions st ON st.id_tx = s.transaction_id
                  WHERE s.ironwood_received_note_id = n.id
-                   AND (st.mined_height IS NOT NULL
-                        OR st.expiry_height IS NULL
-                        OR st.expiry_height = 0
-                        OR st.expiry_height >= ?2))
+                   AND {live})
              ORDER BY t.mined_height IS NULL, t.mined_height, n.action_index",
-        )
+            live = live_spend("st", "?2")
+        ))
         .map_err(|e| anyhow!("{e}"))?;
     let rows = stmt
         .query_map(
-            rusqlite::params![account.expose_uuid().as_bytes().as_slice(), tip],
+            rusqlite::params![account.expose_uuid().as_bytes().as_slice(), target],
             |row| {
                 let txid: Vec<u8> = row.get(0)?;
                 let index: u32 = row.get(1)?;
@@ -130,23 +145,23 @@ fn open_read_only(wallet: &Wallet) -> Result<rusqlite::Connection> {
 /// scanned).
 pub fn note_state(wallet: &Wallet, db: &Db, note: NoteRef) -> Result<NoteState> {
     use rusqlite::OptionalExtension;
-    let tip = crate::wallet::max_scanned_height(db)?.unwrap_or(0);
+    let target = crate::wallet::max_scanned_height(db)?.unwrap_or(0) + 1;
     let conn = open_read_only(wallet)?;
     let row = conn
         .query_row(
-            "SELECT t.mined_height, (
+            &format!(
+                "SELECT t.mined_height, (
                 SELECT st.txid FROM ironwood_received_note_spends s
                 JOIN transactions st ON st.id_tx = s.transaction_id
                 WHERE s.ironwood_received_note_id = n.id
-                  AND (st.mined_height IS NOT NULL
-                       OR st.expiry_height IS NULL
-                       OR st.expiry_height = 0
-                       OR st.expiry_height >= ?3)
+                  AND {live}
                 LIMIT 1)
              FROM ironwood_received_notes n
              JOIN transactions t ON t.id_tx = n.transaction_id
              WHERE t.txid = ?1 AND n.action_index = ?2",
-            rusqlite::params![note.txid.as_ref().to_vec(), note.index, tip],
+                live = live_spend("st", "?3")
+            ),
+            rusqlite::params![note.txid.as_ref().to_vec(), note.index, target],
             |row| {
                 let mined: Option<u32> = row.get(0)?;
                 let spent: Option<Vec<u8>> = row.get(1)?;
