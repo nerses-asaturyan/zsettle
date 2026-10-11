@@ -37,6 +37,8 @@ bip0039 = { version = "0.14", features = ["std"] }
 secrecy = "0.8"
 toml = "0.8"
 rpassword = "7"
+tiny_http = "0.12"
+ureq = { version = "2", default-features = false, features = ["tls"] }
 
 # networking
 tonic = { version = "0.14", features = ["tls-ring", "tls-webpki-roots"] }

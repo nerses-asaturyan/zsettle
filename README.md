@@ -42,12 +42,12 @@ zsettle init        --wallet B --identity B/key.txt     # prints A (buyer) and t
 # seller
 zsettle-seller mint    --wallet S --item-account I --payout-account P --identity S/key.txt --name "Item #1"
 zsettle-seller publish --wallet S --item-account I --payout-account P --identity S/key.txt --listings listings.json --item-note <txid>:<idx> --price 100000
-zsettle-seller serve   --wallet S --item-account I --payout-account P --identity S/key.txt --listings listings.json --inbox inbox --outbox outbox
+zsettle-seller serve   --wallet S --item-account I --payout-account P --identity S/key.txt --listings listings.json --inbox inbox --outbox outbox   # add --listen 0.0.0.0:8900 to take offers over HTTP
 # buyer
 zsettle import-listing --wallet B --listings listings.json
 zsettle sync           --wallet B
 zsettle buy            --wallet B --buyer-account A --listings listings.json --item <txid>:<idx> --out trade.pczt --seller-copy inbox/trade.pczt
-zsettle finish         --wallet B --identity B/key.txt --full trade.pczt --signed outbox/trade.<tag>.signed.pczt --out trade.tx --broadcast
+zsettle finish         --wallet B --identity B/key.txt --full trade.pczt --signed outbox/trade.<tag>.signed.pczt --out trade.tx --broadcast   # or --signed http://seller:8900/reply/<tag> after buy --seller-url
 # anyone
 zsettle verify --listings listings.json --item <txid>:<idx>
 ```
