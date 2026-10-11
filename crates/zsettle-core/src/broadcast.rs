@@ -60,7 +60,8 @@ where
     }
 
     fn call(&mut self, req: http::Request<Body>) -> Self::Future {
-        if req.uri().path() == ADDRESS_UTXOS {
+        // The client prefixes the method path with the server URL's path, if any.
+        if req.uri().path().ends_with(ADDRESS_UTXOS) {
             // A gRPC "trailers-only" response: status OK and no messages.
             let resp = http::Response::builder()
                 .status(200)
@@ -322,6 +323,16 @@ mod tests {
             let mut s = Shielded(Inner);
             let req = http::Request::builder()
                 .uri(ADDRESS_UTXOS)
+                .body(Body::default())
+                .unwrap();
+            let resp = s.call(req).await.unwrap();
+            assert_eq!(resp.headers().get("grpc-status").unwrap(), "0");
+            assert!(resp.headers().get("x-reached-server").is_none());
+
+            // A server behind a path prefix: the method path is appended to it.
+            let prefixed = format!("/lwd{ADDRESS_UTXOS}");
+            let req = http::Request::builder()
+                .uri(prefixed.as_str())
                 .body(Body::default())
                 .unwrap();
             let resp = s.call(req).await.unwrap();

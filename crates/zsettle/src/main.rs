@@ -375,13 +375,28 @@ fn parse_network(name: &str) -> Result<Network> {
 }
 
 /// Refuse to send when the server is on a consensus branch this build does not sign for.
+/// An HTTP client that follows no redirects: an offer must reach the service itself.
+fn http_agent() -> ureq::Agent {
+    ureq::builder()
+        .redirects(0)
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+}
+
 /// Post the redacted copy to the seller service; returns the URL its reply will appear at.
 fn post_offer(seller_url: &str, envelope: &[u8]) -> Result<String> {
     let base = seller_url.trim_end_matches('/');
-    let resp = ureq::post(&format!("{base}/offer"))
+    let resp = http_agent()
+        .post(&format!("{base}/offer"))
         .set("Content-Type", "application/octet-stream")
         .send_bytes(envelope)
         .map_err(|e| anyhow!("posting the offer to {base}: {e}"))?;
+    if resp.status() != 200 {
+        return Err(anyhow!(
+            "the seller answered {} to the offer; redirects are not followed, use the service's final URL",
+            resp.status()
+        ));
+    }
     let text = resp.into_string().context("the seller's answer")?;
     let answer: serde_json::Value = serde_json::from_str(&text).context("the seller's answer")?;
     let tag = answer["tag"]
@@ -401,7 +416,7 @@ fn fetch_reply(url: &str, wait_secs: u64) -> Result<Vec<u8>> {
     use std::io::Read;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
     loop {
-        match ureq::get(url).call() {
+        match http_agent().get(url).call() {
             Ok(resp) if resp.status() == 200 => {
                 let mut bytes = Vec::new();
                 resp.into_reader()
@@ -664,12 +679,34 @@ fn main() -> Result<()> {
                 }
                 (None, None) => return Err(anyhow!("--item-account or --listings is required")),
             };
-            let receive_account = receive_account.as_deref().map(parse_account).transpose()?;
-            if receive_account.is_none() {
-                eprintln!(
-                    "note: the item will be received by the paying account; pass --receive-account <item account> if you may resell it, so that publishing that account's key later reveals nothing about your payments"
-                );
-            }
+            let receive_account = match receive_account.as_deref().map(parse_account).transpose()? {
+                Some(account) => Some(account),
+                // The wallet's own item account, as `init` makes it, keeps items apart from
+                // payments; the paying account only when there is none.
+                None => {
+                    let item = list_accounts(&db)?
+                        .into_iter()
+                        .find(|a| a.name == "item" && a.index.is_some())
+                        .map(|a| parse_account(&a.account))
+                        .transpose()?
+                        .filter(|a| *a != buyer_account);
+                    match item {
+                        Some(account) => {
+                            eprintln!(
+                                "note: the item will be received by the wallet's item account {}; pass --receive-account to choose another",
+                                account.expose_uuid()
+                            );
+                            Some(account)
+                        }
+                        None => {
+                            eprintln!(
+                                "note: the item will be received by the paying account; pass --receive-account <item account> if you may resell it, so that publishing that account's key later reveals nothing about your payments"
+                            );
+                            None
+                        }
+                    }
+                }
+            };
             let (target, _) = heights(&db, min_confirmations)?;
             let target_height = u32::from(zcash_protocol::consensus::BlockHeight::from(target));
             if !offline {
@@ -725,7 +762,16 @@ fn main() -> Result<()> {
                 .unwrap_or("trade");
             let expect_signed = format!("{stem}.{}.signed.pczt", pczt_ops::envelope_tag(&envelope));
             let reply_url = match &seller_url {
-                Some(url) => Some(post_offer(url, &envelope)?),
+                Some(url) => match post_offer(url, &envelope) {
+                    Ok(reply) => Some(reply),
+                    Err(e) => {
+                        eprintln!(
+                            "warning: the offer is written to {} but was not posted: {e:#}; drop the file in the seller's inbox, or post it again",
+                            seller_copy.display()
+                        );
+                        None
+                    }
+                },
                 None => None,
             };
             println!(
@@ -950,6 +996,18 @@ fn main() -> Result<()> {
                 seen.push(n);
                 notes.push(n);
             }
+            // Item notes (memo "zsettle item: …") in this account are kept, whatever their value.
+            let memos: std::collections::HashMap<String, Option<String>> =
+                zsettle_core::mint::unspent_notes(&w, &db, account)?
+                    .into_iter()
+                    .map(|n| (n.note.to_string(), n.memo))
+                    .collect();
+            notes.retain(|n| {
+                !memos
+                    .get(&n.to_string())
+                    .and_then(|m| m.as_deref())
+                    .is_some_and(|m| m.starts_with("zsettle item"))
+            });
             let mut total = 0u64;
             for n in &notes {
                 total += zsettle_core::wallet::ironwood_note(&db, *n, target)?
@@ -995,8 +1053,13 @@ fn main() -> Result<()> {
                 &mut db,
                 w.network,
                 &inputs,
-                &[(account, total - fee)],
+                &[zsettle_core::trade::Output {
+                    account,
+                    value: total - fee,
+                    internal: true,
+                }],
                 min_confirmations,
+                false,
             )?;
             let (pczt, signed_n) = pczt_ops::sign_matching_actions(built.pczt, &ask)?;
             if signed_n != notes.len() {

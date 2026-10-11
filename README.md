@@ -82,7 +82,7 @@ See [docs/SETUP.md](docs/SETUP.md) for wallets, [docs/TRADE.md](docs/TRADE.md) f
 - Network upgrades: build, mint and broadcast stop with a message when the server's consensus branch is not the one this build signs for.
 - Wallets: created by the tools themselves (`init`), in the zcash-devtool layout; no other software is needed.
 - Tests: the proven settlement core, action pairing, redaction and proof checks, twelve seller-policy cases, the rotation transfer, listings signatures.
-- Reviewed for privacy and soundness in several independent passes; every finding is fixed or documented.
+- Reviewed for privacy and soundness in several independent passes; the findings and what was done about each are in the changelog, and what remains by design is in the threat model.
 
 ## License
 
