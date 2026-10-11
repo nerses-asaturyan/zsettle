@@ -22,8 +22,8 @@ use zcash_client_backend::data_api::{
     locking::LockFilter,
     scanning::ScanRange,
     wallet::TargetHeight,
-    Account as _, AccountBirthday, AccountPurpose, InputSource, NullifierQuery, WalletRead,
-    WalletWrite,
+    Account as _, AccountBirthday, AccountPurpose, InputSource, NullifierQuery,
+    WalletCommitmentTrees, WalletRead, WalletWrite,
 };
 use zcash_client_backend::proto::compact_formats::CompactBlock;
 use zcash_client_backend::wallet::Note;
@@ -290,6 +290,29 @@ pub fn max_scanned_height(db: &Db) -> Result<Option<u32>> {
         .block_max_scanned()
         .map_err(|e| anyhow!("{e}"))?
         .map(|m| u32::from(m.block_height())))
+}
+
+/// Ironwood tree roots at the wallet's checkpoints for the last `depth` scanned blocks: the
+/// anchors a trade may legitimately use. An envelope whose anchor is not among them was
+/// proven against a tree the chain does not have.
+pub fn recent_ironwood_anchors(db: &mut Db, depth: u32) -> Result<Vec<orchard::Anchor>> {
+    let Some(tip) = max_scanned_height(db)? else {
+        return Ok(Vec::new());
+    };
+    let first = tip.saturating_sub(depth);
+    let anchors = db.with_ironwood_tree_mut::<_, _, anyhow::Error>(|tree| {
+        let mut anchors = Vec::new();
+        for h in first..=tip {
+            if let Some(root) = tree
+                .root_at_checkpoint_id(&BlockHeight::from(h))
+                .map_err(|e| anyhow!("{e:?}"))?
+            {
+                anchors.push(orchard::Anchor::from(root));
+            }
+        }
+        Ok(anchors)
+    })?;
+    Ok(anchors.unwrap_or_default())
 }
 
 /// Nullifiers of every unspent Ironwood note in this wallet, across all accounts.
