@@ -19,9 +19,11 @@ The buyer builds and proves the whole transaction holding only viewing keys. The
 
 | Crate | Role |
 |---|---|
-| `zsettle-core` | library: items, two-party bundle, PCZT roles, seller policy, keyless verifier |
-| `zsettle` | buyer and verifier CLI: `wallet`, `mint`, `list`, `buy`, `finish`, `verify` |
-| `zsettle-seller` | seller service: validates envelopes against policy, signs the item action only |
+| `zsettle-core` | library: items, listings, two-party bundle, PCZT roles, seller policy, keyless verifier, lightwalletd client |
+| `zsettle` | buyer and verifier CLI: `list`, `import-listing`, `buy`, `finish`, `broadcast`, `verify` |
+| `zsettle-seller` | seller service: `mint`, `items`, `publish`, `sign`, `serve` (inbox/outbox loop that signs only the item action) |
+
+See [docs/SETUP.md](docs/SETUP.md) for wallets and [docs/TRADE.md](docs/TRADE.md) for the full flow, [spec/PROTOCOL.md](spec/PROTOCOL.md) and [spec/THREAT_MODEL.md](spec/THREAT_MODEL.md) for the design.
 
 ## What is private, what is real, what is a mock
 
@@ -29,13 +31,16 @@ The buyer builds and proves the whole transaction holding only viewing keys. The
 |---|---|
 | Buyer and seller identities | private (shielded Ironwood notes) |
 | Trade amounts | private; only the listed price is public, by choice |
-| Settlement | real: mainnet transactions (txids listed in `demo/` once available) |
+| Settlement | real: mainnet transactions `e76531b9…6ae2` (block 3514109) and `2e0f4af1…9167c` (block 3514119) |
 | Items | real shielded notes minted by this tool; no claim about any third-party collection |
+| Provenance | real: `zsettle verify` traces an item through mainnet compact blocks with the listing's viewing key only |
 | Mock | nothing |
 
 ## Status
 
-Workspace and the proven settlement core as an integration test (`crates/zsettle-core/tests/two_party_settlement.rs`). See `spec/PROTOCOL.md` for the trade flow and `spec/THREAT_MODEL.md` for what each party can and cannot do.
+- Two-party trade construction, proving, redaction, seller policy, signing, extraction and broadcast: working on mainnet.
+- Listings, seller service loop, minting, keyless verification: working on mainnet.
+- Tests: the proven settlement core as an integration test, six seller-policy tests on synthetic trades.
 
 ## License
 

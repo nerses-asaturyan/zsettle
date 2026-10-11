@@ -2,6 +2,15 @@
 
 Two machines (or two wallet directories on one machine). Mainnet, Ironwood pool.
 
+## Minting items
+
+```
+zsettle-seller mint --wallet ~/.zsettle/seller --item-account <ITEM_ACCOUNT_UUID> --item-account-index 1   --payout-account <PAYOUT_ACCOUNT_UUID> --identity ~/.zsettle/seller/key.txt --name "Item #3" --value 1000
+zsettle-seller items --wallet ~/.zsettle/seller --item-account <ITEM_ACCOUNT_UUID> --item-account-index 1 --payout-account <PAYOUT_ACCOUNT_UUID>
+```
+
+`mint` pays the item account from the payout account with the name in the memo and broadcasts; the resulting note is the item's genesis note. `items` lists the item account's unspent notes as `<txid>:<index>`, the reference used by `publish`.
+
 ## The market flow
 
 | Step | Who | Command | Produces |
@@ -62,12 +71,20 @@ zsettle finish --wallet ~/.zsettle/buyer --identity ~/.zsettle/buyer/key.txt --a
 
 Combines the two PCZTs, signs the payment action, finalizes spends, extracts the transaction (proof and signatures are verified here) and sends it (`--server` overrides `https://zec.rocks:443`). `zsettle broadcast --tx trade.final.tx` resends a raw transaction.
 
+## Verifying an item without any key
+
+```
+zsettle verify --listings listings.json --item <TXID>:<INDEX>
+```
+
+Streams compact blocks from the listing's birthday, trial-decrypts Ironwood actions with the listing's viewing key to find the genesis note, derives its nullifier, and follows the spend: the action that spends the item is the trade, and that action's output commitment is the item's new note. Output is a JSON report with the item name (from the genesis memo), every hop (txid, height, commitment) and a status: `CurrentlyHeld` by the listing's account, or `TransferredToUnknownHolder` after a sale. Tracing further needs the new holder's consignment. Under a second per item on mainnet today.
+
 ## Mainnet trades so far
 
 | Txid | Block | What moved |
 |---|---|---|
 | `e76531b9e51b8a7cbc88188c71fd2df63f8224b0afe1ef2564fb52df91966ae2` | 3514109 | item `71167c88…b2274c:1` to the buyer, 5,000 zat to the seller, fee 15,000 |
-| `2e0f4af17eddeb80d3ca570dcb4ac5c29a454926e27c79cd0944d232a899167c` | see ledger | item `da9e8f95…1927e7:1` to the buyer, 5,000 zat to the seller, signed by the seller service |
+| `2e0f4af17eddeb80d3ca570dcb4ac5c29a454926e27c79cd0944d232a899167c` | 3514119 | item `da9e8f95…1927e7:1` to the buyer, 5,000 zat to the seller, signed by the seller service |
 
 ## Notes
 

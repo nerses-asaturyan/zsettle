@@ -126,8 +126,21 @@ enum Cmd {
         #[arg(long, default_value = zsettle_core::broadcast::DEFAULT_SERVER)]
         server: String,
     },
-    /// Keyless provenance check of an item against chain data.
-    Verify,
+    /// Keyless provenance check of an item: trace it from its genesis note using only the listing's viewing key.
+    Verify {
+        /// Listings file (provides the item viewing key and birthday).
+        #[arg(long)]
+        listings: PathBuf,
+        /// Genesis note of the item, as <txid>:<output index>.
+        #[arg(long)]
+        item: NoteRef,
+        /// lightwalletd server URL.
+        #[arg(long, default_value = zsettle_core::broadcast::DEFAULT_SERVER)]
+        server: String,
+        /// Stop scanning at this height (default: chain tip).
+        #[arg(long)]
+        to_height: Option<u32>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -316,8 +329,33 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
-        Cmd::Verify => {
-            println!("`verify` is not implemented yet");
+        Cmd::Verify {
+            listings,
+            item,
+            server,
+            to_height,
+        } => {
+            let l = Listings::read(&listings)?;
+            let network = match l.network.as_str() {
+                "main" => zcash_protocol::consensus::Network::MainNetwork,
+                "test" => zcash_protocol::consensus::Network::TestNetwork,
+                other => return Err(anyhow!("unknown network {other}")),
+            };
+            let ufvk = zcash_keys::keys::UnifiedFullViewingKey::decode(&network, &l.item_ufvk)
+                .map_err(|e| anyhow!("decoding item viewing key: {e}"))?;
+            let fvk = ufvk
+                .orchard()
+                .cloned()
+                .ok_or_else(|| anyhow!("listing key has no Orchard/Ironwood component"))?;
+            let report = zsettle_core::verify::trace_blocking(
+                &server,
+                network,
+                &fvk,
+                item,
+                l.item_birthday,
+                to_height,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
     }
