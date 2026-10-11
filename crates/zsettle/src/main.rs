@@ -238,6 +238,11 @@ fn check_server_before_sending(server: &str, network: Network) -> Result<()> {
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
+        .with_max_level(if std::env::var_os("ZSETTLE_LOG").is_some() {
+            tracing::Level::INFO
+        } else {
+            tracing::Level::WARN
+        })
         .init();
     let cli = Cli::parse();
     match cli.cmd {
