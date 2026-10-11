@@ -80,6 +80,18 @@ Every pass (default every 5 seconds):
 
 Every acceptable offer is signed, whether or not another offer for the same item is outstanding: all of them spend the same nullifier, so the chain mines at most one and the seller is paid once. Every event is one JSON line on stdout (`start`, `signed`, `rejected`, `deferred`, `sold`, `not_in_wallet`, `already_signed`, `error`). The service is safe to kill and restart at any point: replies and listings are written atomically, the envelope is moved last, and an envelope whose reply already exists is filed without signing again. `--once` runs a single pass and exits (non-zero if the pass failed); `zsettle-seller sign` does the same for one file, with `--dry-run` to check only.
 
+### Over the network
+
+The inbox and outbox can be directories the parties share, or the service can listen:
+
+```
+zsettle-seller serve ... --listen 0.0.0.0:8900
+zsettle buy    ... --seller-url http://seller.example:8900
+zsettle finish ... --signed http://seller.example:8900/reply/<tag>
+```
+
+`buy` posts the redacted copy to `/offer` (the answer names its content tag, which `buy` checks) and prints the reply URL; `finish` polls that URL until the signed copy is there (202 while pending, 410 with the reason if refused). Each buyer can fetch only the reply to its own envelope; nothing else is served. Plain HTTP carries the redacted envelope and the signed copy, which are safe to see, but it lets an observer link an IP to an offer: put a TLS reverse proxy or a Tor hidden service in front of it for the internet.
+
 ### 5. Buyer finishes and broadcasts
 
 ```

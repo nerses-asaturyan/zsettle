@@ -33,6 +33,8 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+// Command structs are built once and matched once; their sizes do not matter.
+#[allow(clippy::large_enum_variant)]
 enum Cmd {
     /// Show the items in a listings file and whether its signature checks out.
     List {
@@ -188,6 +190,10 @@ enum Cmd {
         /// Where to write the redacted copy for the seller (drop it in the seller's inbox).
         #[arg(long)]
         seller_copy: PathBuf,
+        /// Seller service URL (http://host:port). The redacted copy is also posted to
+        /// `<url>/offer`, and the reply URL to pass to `finish --signed` is printed.
+        #[arg(long)]
+        seller_url: Option<String>,
     },
     /// Combine the seller's signed copy with the full PCZT, sign the payment action, extract the transaction.
     Finish {
@@ -205,9 +211,13 @@ enum Cmd {
         /// The full PCZT written by `buy`.
         #[arg(long)]
         full: PathBuf,
-        /// The seller's signed copy.
+        /// The seller's signed copy: a file, or the reply URL `buy` printed, which is polled
+        /// until the seller has answered.
         #[arg(long)]
-        signed: PathBuf,
+        signed: String,
+        /// How long to wait for a reply URL, in seconds.
+        #[arg(long, default_value_t = 300)]
+        wait: u64,
         /// Where to write the final transaction (raw bytes); the final PCZT goes to `<out>.pczt`.
         #[arg(long)]
         out: PathBuf,
@@ -365,6 +375,60 @@ fn parse_network(name: &str) -> Result<Network> {
 }
 
 /// Refuse to send when the server is on a consensus branch this build does not sign for.
+/// Post the redacted copy to the seller service; returns the URL its reply will appear at.
+fn post_offer(seller_url: &str, envelope: &[u8]) -> Result<String> {
+    let base = seller_url.trim_end_matches('/');
+    let resp = ureq::post(&format!("{base}/offer"))
+        .set("Content-Type", "application/octet-stream")
+        .send_bytes(envelope)
+        .map_err(|e| anyhow!("posting the offer to {base}: {e}"))?;
+    let text = resp.into_string().context("the seller's answer")?;
+    let answer: serde_json::Value = serde_json::from_str(&text).context("the seller's answer")?;
+    let tag = answer["tag"]
+        .as_str()
+        .ok_or_else(|| anyhow!("the seller's answer names no tag: {text}"))?;
+    if tag != pczt_ops::envelope_tag(envelope) {
+        return Err(anyhow!(
+            "the seller tagged the offer differently; it did not receive it as sent"
+        ));
+    }
+    Ok(format!("{base}/reply/{tag}"))
+}
+
+/// Poll the seller's reply URL until the signed copy is there, the offer was refused, or
+/// the wait runs out.
+fn fetch_reply(url: &str, wait_secs: u64) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
+    loop {
+        match ureq::get(url).call() {
+            Ok(resp) if resp.status() == 200 => {
+                let mut bytes = Vec::new();
+                resp.into_reader()
+                    .take(zsettle_core::MAX_ENVELOPE_BYTES + 1)
+                    .read_to_end(&mut bytes)?;
+                return Ok(bytes);
+            }
+            Ok(resp) if resp.status() == 202 => {}
+            Ok(resp) => return Err(anyhow!("unexpected answer {} from {url}", resp.status())),
+            Err(ureq::Error::Status(410, resp)) => {
+                return Err(anyhow!(
+                    "the seller refused the offer: {}",
+                    resp.into_string().unwrap_or_default()
+                ))
+            }
+            Err(e) => return Err(anyhow!("fetching {url}: {e}")),
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(anyhow!(
+                "no answer from the seller within {wait_secs} s; run finish again later with the same --signed URL"
+            ));
+        }
+        eprintln!("waiting for the seller's signature...");
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    }
+}
+
 fn check_server_before_sending(server: &str, network: Network) -> Result<()> {
     check_consensus_at_tip_blocking(server, network)?;
     Ok(())
@@ -548,6 +612,7 @@ fn main() -> Result<()> {
             offline,
             out,
             seller_copy,
+            seller_url,
         } => {
             let w = Wallet::open(&wallet)?;
             let server = pick_server(server, w.network);
@@ -659,6 +724,10 @@ fn main() -> Result<()> {
                 .and_then(|s| s.to_str())
                 .unwrap_or("trade");
             let expect_signed = format!("{stem}.{}.signed.pczt", pczt_ops::envelope_tag(&envelope));
+            let reply_url = match &seller_url {
+                Some(url) => Some(post_offer(url, &envelope)?),
+                None => None,
+            };
             println!(
                 "{}",
                 serde_json::json!({
@@ -675,6 +744,7 @@ fn main() -> Result<()> {
                     "full_pczt": out,
                     "seller_copy": seller_copy,
                     "expect_signed": expect_signed,
+                    "reply_url": reply_url,
                 })
             );
             Ok(())
@@ -688,11 +758,17 @@ fn main() -> Result<()> {
             out,
             broadcast,
             server,
+            wait,
         } => {
             let w = Wallet::open(&wallet)?;
             let server = pick_server(server, w.network);
             let full_pczt = pczt_ops::from_bytes(&fs::read(&full)?)?;
-            let signed_pczt = pczt_ops::from_bytes(&fs::read(&signed)?)?;
+            let signed_bytes = if signed.starts_with("http://") || signed.starts_with("https://") {
+                fetch_reply(&signed, wait)?
+            } else {
+                fs::read(&signed).with_context(|| format!("reading {signed}"))?
+            };
+            let signed_pczt = pczt_ops::from_bytes(&signed_bytes)?;
             let combined = pczt_ops::combine(full_pczt, signed_pczt)?;
             let seed = w.seed(identity.as_deref())?;
             let usk = w.spending_key(&seed, account_index)?;

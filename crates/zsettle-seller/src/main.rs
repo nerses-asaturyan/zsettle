@@ -70,6 +70,8 @@ struct WalletArgs {
 }
 
 #[derive(Subcommand)]
+// Command structs are built once and matched once; their sizes do not matter.
+#[allow(clippy::large_enum_variant)]
 enum Cmd {
     /// Create a seller wallet: a new mnemonic encrypted to an age identity, the database, and
     /// the accounts `payout` (index 0, pays for mints and receives payments) and `item`
@@ -298,6 +300,12 @@ enum Cmd {
         /// Shell command to run instead of the built-in sync.
         #[arg(long)]
         sync_cmd: Option<String>,
+        /// Also take offers over HTTP at this address (for example 127.0.0.1:8900): `POST /offer`
+        /// with the envelope as the body answers `{"tag": …}`; `GET /reply/<tag>` returns the
+        /// signed copy once it exists (202 while pending, 410 with the reason if refused). Put
+        /// a TLS reverse proxy or a Tor hidden service in front of it for the internet.
+        #[arg(long)]
+        listen: Option<String>,
         /// Run one pass and exit; a failed pass exits with an error.
         #[arg(long)]
         once: bool,
@@ -743,6 +751,7 @@ fn main() -> Result<()> {
             no_sync,
             sync_cmd,
             once,
+            listen,
         } => {
             for dir in [
                 inbox.clone(),
@@ -801,6 +810,16 @@ fn main() -> Result<()> {
                 no_sync,
                 sync_cmd: sync_cmd.as_deref(),
             };
+            if let Some(addr) = listen {
+                let http = tiny_http::Server::http(&addr)
+                    .map_err(|e| anyhow!("listening on {addr}: {e}"))?;
+                println!(
+                    "{}",
+                    serde_json::json!({ "event": "listening", "address": addr })
+                );
+                let (inbox, outbox) = (inbox.clone(), outbox.clone());
+                thread::spawn(move || serve_http(http, &inbox, &outbox));
+            }
             let poll = poll_secs.max(1);
             let mut delay = poll;
             loop {
@@ -1205,6 +1224,82 @@ fn settled(entry: &fs::DirEntry, now: SystemTime) -> bool {
 }
 
 /// Write a file through a temporary name so readers never see a partial file.
+/// The HTTP face of the service: offers in, replies out. An envelope lands in the inbox under
+/// its content tag, so the directory loop handles it exactly like a dropped file, and each
+/// buyer can fetch only the reply to its own envelope.
+fn serve_http(server: tiny_http::Server, inbox: &Path, outbox: &Path) {
+    use std::io::Read;
+    use tiny_http::{Header, Method, Response};
+    for mut request in server.incoming_requests() {
+        let url = request.url().to_string();
+        let response = match (request.method(), url.as_str()) {
+            (Method::Post, "/offer") => {
+                let declared = request.body_length().unwrap_or(0) as u64;
+                let mut body = Vec::new();
+                let read = if declared > MAX_ENVELOPE_BYTES {
+                    Err(())
+                } else {
+                    request
+                        .as_reader()
+                        .take(MAX_ENVELOPE_BYTES + 1)
+                        .read_to_end(&mut body)
+                        .map_err(|_| ())
+                };
+                match read {
+                    Ok(_) if !body.is_empty() && body.len() as u64 <= MAX_ENVELOPE_BYTES => {
+                        let tag = pczt_ops::envelope_tag(&body);
+                        let path = inbox.join(format!("{tag}.pczt"));
+                        let stored = if path.exists() {
+                            Ok(())
+                        } else {
+                            write_atomic(&path, &body)
+                        };
+                        match stored {
+                            Ok(()) => Response::from_string(
+                                serde_json::json!({ "tag": tag, "reply": format!("/reply/{tag}") })
+                                    .to_string(),
+                            )
+                            .with_status_code(200),
+                            Err(e) => {
+                                Response::from_string(format!("cannot store the offer: {e:#}"))
+                                    .with_status_code(500)
+                            }
+                        }
+                    }
+                    _ => Response::from_string("the envelope must be between 1 byte and 1 MiB")
+                        .with_status_code(413),
+                }
+            }
+            (Method::Get, path) if path.starts_with("/reply/") => {
+                let tag = &path["/reply/".len()..];
+                if tag.len() != 32 || !tag.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    Response::from_string("bad tag").with_status_code(400)
+                } else {
+                    let signed = outbox.join(format!("{tag}.{tag}.signed.pczt"));
+                    let reason = inbox
+                        .join("rejected")
+                        .join(format!("{tag}.pczt.reason.txt"));
+                    if let Ok(bytes) = fs::read(&signed) {
+                        Response::from_data(bytes)
+                            .with_status_code(200)
+                            .with_header(
+                                Header::from_bytes("Content-Type", "application/octet-stream")
+                                    .expect("header"),
+                            )
+                    } else if let Ok(why) = fs::read_to_string(&reason) {
+                        Response::from_string(why).with_status_code(410)
+                    } else {
+                        Response::from_string("pending").with_status_code(202)
+                    }
+                }
+            }
+            _ => Response::from_string("zsettle seller: POST /offer, GET /reply/<tag>")
+                .with_status_code(404),
+        };
+        let _ = request.respond(response);
+    }
+}
+
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = path.with_extension("tmp");
     fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
