@@ -1,6 +1,6 @@
 [package]
 name = "zsettle-core"
-description = "Atomic item-for-ZEC settlement on Zcash: two-party Ironwood transactions, note-sealed items, seller policy, keyless verifier"
+description = "Atomic item-for-ZEC settlement on Zcash: two-party Ironwood transactions, note-sealed items, seller policy, provenance verifier with viewing keys only"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
