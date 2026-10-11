@@ -20,8 +20,8 @@ The buyer builds and proves the whole transaction holding only viewing keys. The
 | Crate | Role |
 |---|---|
 | `zsettle-core` | library: items, signed listings, two-party bundle, PCZT roles, seller policy, proof check, wallet sync, provenance verifier, lightwalletd client |
-| `zsettle` | buyer and verifier CLI: `list`, `sync`, `import-listing`, `buy`, `finish`, `broadcast`, `rotate`, `notes`, `verify` |
-| `zsettle-seller` | seller service: `sync`, `new-item-account`, `mint`, `items`, `publish`, `sign`, `serve` (syncs, reconciles listings with the chain, verifies proofs, signs only the item action) |
+| `zsettle` | buyer and verifier CLI: `init`, `accounts`, `address`, `list`, `sync`, `import-listing`, `buy`, `finish`, `broadcast`, `rotate`, `notes`, `verify` |
+| `zsettle-seller` | seller service: `init`, `accounts`, `address`, `sync`, `new-item-account`, `mint`, `items`, `publish`, `sign`, `serve` (syncs, reconciles listings with the chain, verifies proofs, signs only the item action) |
 
 This branch targets the Zcash testnet (NU7) with the pre-release crates; see [docs/TESTNET.md](docs/TESTNET.md). The `main` branch targets mainnet.
 
@@ -37,6 +37,10 @@ The two signed listings files from the mainnet trades are in `examples/`; the tr
 ## Ten minutes, two terminals
 
 ```
+# once
+zsettle-seller init --wallet S --identity S/key.txt     # prints P (payout) and I (item) and an address to fund
+zsettle init        --wallet B --identity B/key.txt     # prints A (buyer) and the item account, and an address to fund
+#   (omit --identity on either to protect the mnemonic with a passphrase instead of a key file)
 # seller
 zsettle-seller mint    --wallet S --item-account I --payout-account P --identity S/key.txt --name "Item #1"
 zsettle-seller publish --wallet S --item-account I --payout-account P --identity S/key.txt --listings listings.json --item-note <txid>:<idx> --price 100000
@@ -50,7 +54,7 @@ zsettle finish         --wallet B --identity B/key.txt --full trade.pczt --signe
 zsettle verify --listings listings.json --item <txid>:<idx>
 ```
 
-`S`, `B` are wallet directories, `I`, `P`, `A` account UUIDs from `zcash-devtool wallet list-accounts`. Every command prints one JSON line; `zsettle notes --wallet B --account A` shows what a wallet holds.
+`S`, `B` are wallet directories, `I`, `P`, `A` the account UUIDs `init` prints (`accounts` lists them again). No other tool is needed. Every command prints one JSON line; `zsettle notes --wallet B --account A` shows what a wallet holds.
 
 See [docs/SETUP.md](docs/SETUP.md) for wallets, [docs/TRADE.md](docs/TRADE.md) for the full flow including resale, [spec/PROTOCOL.md](spec/PROTOCOL.md) and [spec/THREAT_MODEL.md](spec/THREAT_MODEL.md) for the design.
 
@@ -75,7 +79,8 @@ See [docs/SETUP.md](docs/SETUP.md) for wallets, [docs/TRADE.md](docs/TRADE.md) f
 - Seller service: syncs before every pass, removes sold items by itself, signs every acceptable offer (nothing to lock, nothing to grief), survives restarts, hostile inboxes and server outages.
 - Resale: items can be received into a dedicated item account and relisted; provenance follows them across holders.
 - Network upgrades: build, mint and broadcast stop with a message when the server's consensus branch is not the one this build signs for.
-- Tests: the proven settlement core, action pairing, redaction and proof checks, eleven seller-policy cases, listings signatures.
+- Wallets: created by the tools themselves (`init`), in the zcash-devtool layout; no other software is needed.
+- Tests: the proven settlement core, action pairing, redaction and proof checks, twelve seller-policy cases, the rotation transfer, listings signatures.
 - Reviewed for privacy and soundness in several independent passes; every finding is fixed or documented.
 
 ## License
