@@ -16,6 +16,7 @@
 //! - [`trade`]: two-party bundle construction and proving.
 //! - [`pczt`]: PCZT role helpers (redact, sign, combine, extract).
 //! - [`policy`]: the seller-side checks that run before a signature is produced.
+//! - [`listing`]: the public listings file (prices, payout address, item viewing key).
 //! - [`item`]: anchor, manifest, consignment encodings and item identity.
 //! - [`verify`]: keyless provenance verification from chain data.
 
@@ -24,6 +25,7 @@
 
 pub mod broadcast;
 pub mod item;
+pub mod listing;
 pub mod pczt;
 pub mod policy;
 pub mod trade;

@@ -40,6 +40,22 @@ pub fn action_count(pczt: &Pczt) -> Result<usize> {
     Ok(n)
 }
 
+/// Nullifiers of every action's spend, in action order.
+pub fn action_nullifiers(pczt: &Pczt) -> Result<Vec<orchard::note::Nullifier>> {
+    let mut out = Vec::new();
+    Verifier::new(pczt.clone())
+        .with_ironwood::<anyhow::Error, _>(|bundle| {
+            out = bundle
+                .actions()
+                .iter()
+                .map(|a| *a.spend().nullifier())
+                .collect();
+            Ok(())
+        })
+        .map_err(|e| anyhow!("invalid Ironwood bundle: {e:?}"))?;
+    Ok(out)
+}
+
 /// Strip everything the seller does not need to check and sign the trade.
 ///
 /// Kept: the fields that determine the sighash (nullifiers, rk, cmx, ciphertexts, cv_net,

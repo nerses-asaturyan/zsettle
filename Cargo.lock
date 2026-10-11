@@ -4377,9 +4377,11 @@ dependencies = [
  "anyhow",
  "clap",
  "orchard",
+ "pczt",
  "serde_json",
  "tracing",
  "tracing-subscriber",
+ "zcash_keys",
  "zcash_protocol",
  "zsettle-core",
 ]

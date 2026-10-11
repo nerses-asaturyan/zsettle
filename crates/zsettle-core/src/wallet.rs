@@ -17,7 +17,8 @@ use rand_core::OsRng;
 use secrecy::{ExposeSecret, SecretVec, Zeroize};
 use serde::Deserialize;
 use zcash_client_backend::data_api::{
-    locking::LockFilter, wallet::TargetHeight, Account as _, InputSource, WalletRead,
+    locking::LockFilter, wallet::TargetHeight, Account as _, AccountBirthday, AccountPurpose,
+    InputSource, NullifierQuery, WalletRead, WalletWrite,
 };
 use zcash_client_backend::wallet::{Note, ReceivedNote};
 use zcash_client_sqlite::{util::SystemClock, AccountUuid, ReceivedNoteId, WalletDb};
@@ -70,6 +71,7 @@ pub fn parse_account(s: &str) -> Result<AccountUuid> {
 struct KeysToml {
     mnemonic: Option<String>,
     network: Option<String>,
+    birthday: Option<u32>,
 }
 
 /// A devtool-layout wallet directory.
@@ -78,6 +80,8 @@ pub struct Wallet {
     pub dir: PathBuf,
     /// Network the wallet was created for.
     pub network: Network,
+    /// Height the wallet started scanning from.
+    pub birthday: u32,
     mnemonic_ciphertext: Option<String>,
 }
 
@@ -97,6 +101,7 @@ impl Wallet {
         Ok(Wallet {
             dir,
             network,
+            birthday: keys.birthday.unwrap_or(0),
             mnemonic_ciphertext: keys.mnemonic,
         })
     }
@@ -215,4 +220,87 @@ pub fn ironwood_note(db: &Db, r: NoteRef, target_height: TargetHeight) -> Result
         note,
         position: received.note_commitment_tree_position(),
     })
+}
+
+/// Nullifiers of every unspent Ironwood note in this wallet, across all accounts.
+pub fn unspent_ironwood_nullifiers(db: &Db) -> Result<Vec<orchard::note::Nullifier>> {
+    Ok(db
+        .get_ironwood_nullifiers(NullifierQuery::Unspent)
+        .map_err(|e| anyhow!("{e}"))?
+        .into_iter()
+        .map(|(_, nf)| nf)
+        .collect())
+}
+
+/// Import a unified full viewing key as a view-only account, scanning from `birthday`.
+pub fn import_viewing_key(
+    db: &mut Db,
+    network: Network,
+    name: &str,
+    ufvk_str: &str,
+    birthday: u32,
+    server: &str,
+) -> Result<AccountUuid> {
+    let ufvk = UnifiedFullViewingKey::decode(&network, ufvk_str)
+        .map_err(|e| anyhow!("decoding viewing key: {e}"))?;
+    // The tree state one block before the birthday lets the scanner start exactly there.
+    let tree_state =
+        crate::broadcast::fetch_tree_state_blocking(server, birthday.saturating_sub(1))?;
+    let account_birthday = AccountBirthday::from_treestate(tree_state, None)
+        .map_err(|e| anyhow!("birthday: {e:?}"))?;
+    let account = db
+        .import_account_ufvk(
+            name,
+            &ufvk,
+            &account_birthday,
+            AccountPurpose::ViewOnly,
+            None,
+        )
+        .map_err(|e| anyhow!("importing viewing key: {e}"))?;
+    Ok(account.id())
+}
+
+/// Find the account whose unified full viewing key matches the given encoding.
+pub fn find_account_by_ufvk(
+    db: &Db,
+    network: Network,
+    ufvk_str: &str,
+) -> Result<Option<AccountUuid>> {
+    for id in db.get_account_ids().map_err(|e| anyhow!("{e}"))? {
+        if let Ok(ufvk) = account_ufvk(db, id) {
+            if ufvk.encode(&network) == ufvk_str {
+                return Ok(Some(id));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// The largest spendable Ironwood note of an account, if any.
+pub fn largest_spendable_note(
+    db: &Db,
+    account: AccountUuid,
+    target_height: TargetHeight,
+) -> Result<Option<NoteRef>> {
+    use zcash_client_backend::data_api::{wallet::ConfirmationsPolicy, MaxSpendMode, TargetValue};
+    let notes = db
+        .select_spendable_notes(
+            account,
+            TargetValue::AllFunds(MaxSpendMode::MaxSpendable),
+            &[ShieldedPool::Ironwood],
+            target_height,
+            ConfirmationsPolicy::default(),
+            &[],
+            LockFilter::Unfiltered,
+        )
+        .map_err(|e| anyhow!("{e}"))?;
+    let best = notes
+        .ironwood()
+        .iter()
+        .max_by_key(|n| n.note().value().inner())
+        .map(|n| NoteRef {
+            txid: *n.txid(),
+            index: u32::from(n.output_index()),
+        });
+    Ok(best)
 }

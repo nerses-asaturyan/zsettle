@@ -3,7 +3,8 @@
 //! The checks, in order:
 //! 1. expiry height is within `max_expiry_delta` of the current chain tip;
 //! 2. exactly one action spends the listed item note (matched by nullifier) and that
-//!    action carries a spend randomizer, so it can be signed;
+//!    action carries a spend randomizer, so it can be signed; no other action spends any
+//!    note of the seller's wallet;
 //! 3. the outputs that decrypt under the seller's incoming viewing key pay at least the
 //!    listed price;
 //! 4. the signer itself enforces `rk == randomize(ak, alpha)` for the action it signs, so the
@@ -32,6 +33,9 @@ pub enum PolicyError {
     /// The item action has no spend randomizer, so it cannot be signed.
     #[error("item action {0} has no spend randomizer")]
     MissingAlpha(usize),
+    /// An action spends another note of the seller's wallet.
+    #[error("action {0} spends another note of this wallet")]
+    ExtraSellerSpend(usize),
     /// Payment output missing or below the listed price.
     #[error("payment {got} zat below price {want} zat")]
     Underpaid {
@@ -81,6 +85,7 @@ pub struct Approved {
 pub fn check(
     pczt: &Pczt,
     item_nullifier: &Nullifier,
+    seller_nullifiers: &[Nullifier],
     seller_ivk: &PreparedIncomingViewingKey,
     policy: &SellerPolicy,
 ) -> Result<Approved, PolicyError> {
@@ -105,7 +110,12 @@ pub fn check(
             let mut item_idx: Option<usize> = None;
             let mut paid: u64 = 0;
             for (i, action) in bundle.actions().iter().enumerate() {
-                if action.spend().nullifier() == item_nullifier {
+                let nf = action.spend().nullifier();
+                if nf != item_nullifier && seller_nullifiers.contains(nf) {
+                    *found.borrow_mut() = Some(Err(PolicyError::ExtraSellerSpend(i)));
+                    return Ok(());
+                }
+                if nf == item_nullifier {
                     if let Some(prev) = item_idx {
                         *found.borrow_mut() = Some(Err(PolicyError::DuplicateItemSpend(prev, i)));
                         return Ok(());

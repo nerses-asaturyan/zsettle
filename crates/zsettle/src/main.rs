@@ -3,12 +3,16 @@
 use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use orchard::keys::SpendAuthorizingKey;
+use zsettle_core::listing::Listings;
 use zsettle_core::pczt as pczt_ops;
 use zsettle_core::trade::{build_trade, TradeRequest};
-use zsettle_core::wallet::{parse_account, NoteRef, Wallet};
+use zsettle_core::wallet::{
+    account_ufvk, find_account_by_ufvk, heights, import_viewing_key, largest_spendable_note,
+    parse_account, NoteRef, Wallet,
+};
 
 #[derive(Parser)]
 #[command(
@@ -23,7 +27,28 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Build, prove and redact a trade for a listing; writes the full PCZT and the seller's copy.
+    /// Show the items in a listings file.
+    List {
+        /// Listings file published by a seller.
+        #[arg(long)]
+        listings: PathBuf,
+    },
+    /// Import the item viewing key from a listings file into the buyer wallet (the consignment).
+    ImportListing {
+        /// Buyer wallet directory.
+        #[arg(long)]
+        wallet: PathBuf,
+        /// Listings file published by a seller.
+        #[arg(long)]
+        listings: PathBuf,
+        /// Name for the imported view-only account.
+        #[arg(long, default_value = "item-view")]
+        name: String,
+        /// lightwalletd server URL (for the account birthday).
+        #[arg(long, default_value = zsettle_core::broadcast::DEFAULT_SERVER)]
+        server: String,
+    },
+    /// Build, prove and redact a trade; writes the full PCZT and the seller's copy.
     Buy {
         /// Buyer wallet directory (devtool layout).
         #[arg(long)]
@@ -31,24 +56,27 @@ enum Cmd {
         /// UUID of the buyer's spending account.
         #[arg(long)]
         buyer_account: String,
-        /// UUID of the imported, view-only account that holds the item note.
+        /// Listings file; fills in the seller address, price and expiry for `--item`.
         #[arg(long)]
-        item_account: String,
+        listings: Option<PathBuf>,
         /// The item note, as <txid>:<output index>.
         #[arg(long)]
-        item_note: NoteRef,
-        /// The buyer's note that pays, as <txid>:<output index>.
+        item: NoteRef,
+        /// UUID of the imported, view-only account that holds the item note (auto-detected from the listings).
         #[arg(long)]
-        buyer_note: NoteRef,
-        /// Seller's unified address.
+        item_account: Option<String>,
+        /// The buyer's note that pays, as <txid>:<output index> (default: the largest spendable note).
         #[arg(long)]
-        seller: String,
-        /// Price in zatoshis.
+        buyer_note: Option<NoteRef>,
+        /// Seller's unified address (taken from the listings when omitted).
         #[arg(long)]
-        price: u64,
-        /// Blocks until the transaction expires.
-        #[arg(long, default_value_t = zsettle_core::DEFAULT_MAX_EXPIRY_DELTA)]
-        expiry_delta: u32,
+        seller: Option<String>,
+        /// Price in zatoshis (taken from the listings when omitted).
+        #[arg(long)]
+        price: Option<u64>,
+        /// Blocks until the transaction expires (taken from the listings when omitted).
+        #[arg(long)]
+        expiry_delta: Option<u32>,
         /// Confirmations required on the inputs.
         #[arg(long, default_value_t = 3)]
         min_confirmations: u32,
@@ -82,7 +110,7 @@ enum Cmd {
         /// Where to write the final transaction (raw bytes) and `<out>.pczt`.
         #[arg(long)]
         out: PathBuf,
-        /// Broadcast through this lightwalletd server after extraction.
+        /// Broadcast through the lightwalletd server after extraction.
         #[arg(long)]
         broadcast: bool,
         /// lightwalletd server URL.
@@ -106,11 +134,58 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
     match cli.cmd {
+        Cmd::List { listings } => {
+            let l = Listings::read(&listings)?;
+            println!(
+                "network: {}  payout: {}…{}",
+                l.network,
+                &l.payout_address[..12],
+                &l.payout_address[l.payout_address.len() - 6..]
+            );
+            for i in &l.items {
+                println!(
+                    "{}  {:>10} zat  expiry<= {:>3} blocks  {}",
+                    i.note, i.price_zat, i.max_expiry_delta, i.name
+                );
+            }
+            Ok(())
+        }
+        Cmd::ImportListing {
+            wallet,
+            listings,
+            name,
+            server,
+        } => {
+            let w = Wallet::open(&wallet)?;
+            let l = Listings::read(&listings)?;
+            let mut db = w.db()?;
+            if let Some(existing) = find_account_by_ufvk(&db, w.network, &l.item_ufvk)? {
+                println!(
+                    "{}",
+                    serde_json::json!({ "account": existing.expose_uuid().to_string(), "status": "already imported" })
+                );
+                return Ok(());
+            }
+            let id = import_viewing_key(
+                &mut db,
+                w.network,
+                &name,
+                &l.item_ufvk,
+                l.item_birthday,
+                &server,
+            )?;
+            println!(
+                "{}",
+                serde_json::json!({ "account": id.expose_uuid().to_string(), "birthday": l.item_birthday, "next": "sync the wallet" })
+            );
+            Ok(())
+        }
         Cmd::Buy {
             wallet,
             buyer_account,
+            listings,
+            item,
             item_account,
-            item_note,
             buyer_note,
             seller,
             price,
@@ -122,14 +197,46 @@ fn main() -> Result<()> {
         } => {
             let w = Wallet::open(&wallet)?;
             let mut db = w.db()?;
+            let l = listings.as_ref().map(|p| Listings::read(p)).transpose()?;
+            let listed = l
+                .as_ref()
+                .and_then(|l| l.find(&format!("{}:{}", item.txid, item.index)).cloned());
+            let seller_address = seller
+                .or_else(|| l.as_ref().map(|l| l.payout_address.clone()))
+                .ok_or_else(|| anyhow!("--seller or --listings is required"))?;
+            let price_zat = price
+                .or_else(|| listed.as_ref().map(|i| i.price_zat))
+                .ok_or_else(|| anyhow!("--price is required (item not found in listings)"))?;
+            let expiry = expiry_delta
+                .or_else(|| listed.as_ref().map(|i| i.max_expiry_delta))
+                .unwrap_or(zsettle_core::DEFAULT_MAX_EXPIRY_DELTA);
+            let buyer_account = parse_account(&buyer_account)?;
+            let item_account = match (item_account, &l) {
+                (Some(s), _) => parse_account(&s)?,
+                (None, Some(l)) => {
+                    find_account_by_ufvk(&db, w.network, &l.item_ufvk)?.ok_or_else(|| {
+                        anyhow!("item viewing key not imported yet; run import-listing")
+                    })?
+                }
+                (None, None) => return Err(anyhow!("--item-account or --listings is required")),
+            };
+            let buyer_note = match buyer_note {
+                Some(n) => n,
+                None => {
+                    let (target, _) = heights(&db, min_confirmations)?;
+                    largest_spendable_note(&db, buyer_account, target)?
+                        .ok_or_else(|| anyhow!("no spendable note in the buyer account"))?
+                }
+            };
+            let _ = account_ufvk(&db, buyer_account)?;
             let req = TradeRequest {
-                buyer_account: parse_account(&buyer_account)?,
-                item_account: parse_account(&item_account)?,
-                item_note,
+                buyer_account,
+                item_account,
+                item_note: item,
                 buyer_note,
-                seller_address: seller,
-                price_zat: price,
-                expiry_delta,
+                seller_address,
+                price_zat,
+                expiry_delta: expiry,
                 min_confirmations,
                 memo,
             };
@@ -143,6 +250,9 @@ fn main() -> Result<()> {
             println!(
                 "{}",
                 serde_json::json!({
+                    "item": format!("{}:{}", item.txid, item.index),
+                    "buyer_note": format!("{}:{}", buyer_note.txid, buyer_note.index),
+                    "price_zat": price_zat,
                     "item_action_index": built.item_action_index,
                     "payment_action_index": built.payment_action_index,
                     "fee_zat": built.fee,

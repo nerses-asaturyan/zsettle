@@ -1,61 +1,76 @@
 # Running a trade
 
-Three commands, two machines (or two wallet directories on one machine). Mainnet, Ironwood pool.
+Two machines (or two wallet directories on one machine). Mainnet, Ironwood pool.
 
-## Roles and files
+## The market flow
 
-| Who | Command | Reads | Writes |
+| Step | Who | Command | Produces |
 |---|---|---|---|
-| buyer | `zsettle buy` | buyer wallet (own account + the item account's imported viewing key) | `trade.pczt` (private, keep), `trade.seller.pczt` (redacted, send to seller) |
-| seller | `zsettle-seller sign` | seller wallet (item account + payout account) | `trade.seller.signed.pczt` (send back) |
-| buyer | `zsettle finish` | buyer wallet, both PCZTs | `trade.final.tx` (raw transaction), `trade.final.pczt`; optionally broadcasts |
+| 1 | seller | `zsettle-seller publish` | `listings.json`: item viewing key, payout address, items with prices |
+| 2 | buyer | `zsettle list`, `zsettle import-listing` | the item account imported as a view-only account; then sync |
+| 3 | buyer | `zsettle buy --listings … --item …` | `trade.pczt` (private), `trade.seller.pczt` (send to the seller's inbox) |
+| 4 | seller | `zsettle-seller serve` | checks every inbox file, signs the item action, writes `*.signed.pczt` to the outbox, delists the item |
+| 5 | buyer | `zsettle finish --broadcast` | the settled transaction, sent through lightwalletd |
 
-## 1. Buyer builds and proves
-
-```
-zsettle buy \
-  --wallet ~/.zsettle/buyer \
-  --buyer-account <BUYER_ACCOUNT_UUID> \
-  --item-account <IMPORTED_ITEM_ACCOUNT_UUID> \
-  --item-note <TXID>:<INDEX> \
-  --buyer-note <TXID>:<INDEX> \
-  --seller <SELLER_UNIFIED_ADDRESS> \
-  --price 5000 --expiry-delta 10 --min-confirmations 3 \
-  --out trade.pczt --seller-copy trade.seller.pczt
-```
-
-What happens: both notes are looked up in the buyer's wallet database, their witnesses are taken at one anchor, a two-spend Ironwood bundle is built (item note to the buyer, price to the seller, change to the buyer), proven with the two full viewing keys, and redacted for the seller. The seller's copy keeps only what fixes the sighash plus the seller's own note data on the item action; the buyer's viewing key, witnesses, note randomness and randomizers are removed.
-
-## 2. Seller checks and signs
+### 1. Seller publishes
 
 ```
-zsettle-seller sign \
-  --wallet ~/.zsettle/seller --identity ~/.zsettle/seller/key.txt \
-  --item-account <ITEM_ACCOUNT_UUID> --item-account-index 1 \
+zsettle-seller publish \
+  --wallet ~/.zsettle/seller --item-account <ITEM_ACCOUNT_UUID> --item-account-index 1 \
   --payout-account <PAYOUT_ACCOUNT_UUID> \
-  --item-note <TXID>:<INDEX> --price 5000 --max-expiry-delta 10 \
-  --input trade.seller.pczt --out trade.seller.signed.pczt
+  --listings listings.json --item-note <TXID>:<INDEX> --name "Item #2" --price 5000 --max-expiry-delta 10
 ```
 
-Checks before signing: expiry within the limit (one block of slack for the buyer measuring from the next block), exactly one action spends the listed item note, that action carries a randomizer, and the outputs that decrypt under the seller's incoming viewing key add up to at least the price. The signer itself then verifies the nullifier and `rk` of the item action against the seller's key. Add `--dry-run` to check without signing.
+The item account is a separate ZIP 32 account of the seller's wallet, so publishing its viewing key reveals nothing about the seller's other funds. Items must carry at least 1,000 zat; a zero-value note is not bound to the tree by the circuit.
 
-## 3. Buyer finishes and broadcasts
+### 2. Buyer imports the listing
 
 ```
-zsettle finish \
-  --wallet ~/.zsettle/buyer --identity ~/.zsettle/buyer/key.txt --account-index 0 \
-  --full trade.pczt --signed trade.seller.signed.pczt \
-  --out trade.final.tx --broadcast
+zsettle list --listings listings.json
+zsettle import-listing --wallet ~/.zsettle/buyer --listings listings.json
+zcash-devtool wallet -w ~/.zsettle/buyer sync -s zecrocks
 ```
 
-Combines the two PCZTs, signs the payment action, finalizes spends, extracts the transaction (proof and signatures are verified here) and sends it through lightwalletd (`--server` to override `https://zec.rocks:443`). `zsettle broadcast --tx trade.final.tx` resends a raw transaction.
+### 3. Buyer builds and proves
 
-## First mainnet trade
+```
+zsettle buy --wallet ~/.zsettle/buyer --buyer-account <BUYER_ACCOUNT_UUID> \
+  --listings listings.json --item <TXID>:<INDEX> \
+  --out trade.pczt --seller-copy inbox/trade.pczt
+```
 
-`e76531b9e51b8a7cbc88188c71fd2df63f8224b0afe1ef2564fb52df91966ae2`: item note `71167c88…b2274c:1` (1,000 zat) moved from the seller's item account to the buyer; 5,000 zat moved from the buyer to the seller; fee 15,000 zat; three actions.
+The item note and the buyer's largest spendable note are looked up in the buyer's wallet database, their witnesses are taken at one anchor, a two-spend Ironwood bundle is built (item note to the buyer, price to the seller, change to the buyer) and proven with the two full viewing keys. The seller's copy keeps only what fixes the sighash plus the seller's own note data on the item action; the buyer's viewing key, witnesses, note randomness and randomizers are removed. Price, payout address and expiry come from the listing; `--seller`, `--price`, `--expiry-delta`, `--buyer-note` and `--item-account` override them.
+
+### 4. Seller service signs
+
+```
+zsettle-seller serve \
+  --wallet ~/.zsettle/seller --identity ~/.zsettle/seller/key.txt \
+  --item-account <ITEM_ACCOUNT_UUID> --item-account-index 1 --payout-account <PAYOUT_ACCOUNT_UUID> \
+  --listings listings.json --inbox inbox --outbox outbox \
+  --sync-cmd "zcash-devtool wallet -w ~/.zsettle/seller sync -s zecrocks"
+```
+
+For every `*.pczt` in the inbox the service finds which listed item the trade spends, then checks: expiry within the listing's limit (one block of slack, since the buyer measures from the next block); exactly one action spends that item note and it carries a randomizer; no other action spends any note of the seller's wallet; the outputs that decrypt under the seller's incoming viewing key add up to at least the price. The signer then verifies the nullifier and `rk` of the item action against the seller's key and signs that action only. Accepted files move to `inbox/done`, refused ones to `inbox/rejected` with a reason file. `--once` processes the inbox and exits; `zsettle-seller sign` does the same for a single file, with `--dry-run` to check only.
+
+### 5. Buyer finishes and broadcasts
+
+```
+zsettle finish --wallet ~/.zsettle/buyer --identity ~/.zsettle/buyer/key.txt --account-index 0 \
+  --full trade.pczt --signed outbox/trade.signed.pczt --out trade.final.tx --broadcast
+```
+
+Combines the two PCZTs, signs the payment action, finalizes spends, extracts the transaction (proof and signatures are verified here) and sends it (`--server` overrides `https://zec.rocks:443`). `zsettle broadcast --tx trade.final.tx` resends a raw transaction.
+
+## Mainnet trades so far
+
+| Txid | Block | What moved |
+|---|---|---|
+| `e76531b9e51b8a7cbc88188c71fd2df63f8224b0afe1ef2564fb52df91966ae2` | 3514109 | item `71167c88…b2274c:1` to the buyer, 5,000 zat to the seller, fee 15,000 |
+| `2e0f4af17eddeb80d3ca570dcb4ac5c29a454926e27c79cd0944d232a899167c` | see ledger | item `da9e8f95…1927e7:1` to the buyer, 5,000 zat to the seller, signed by the seller service |
 
 ## Notes
 
-- Item notes must carry at least 1,000 zat. A zero-value note is not bound to the tree by the circuit.
-- Expiry defaults to 10 blocks. A longer expiry gives the buyer a free option on the seller's signature.
-- The item account is a separate ZIP 32 account in the seller's wallet (index 1 here) so that handing out its viewing key reveals nothing about the seller's other funds.
+- Expiry defaults to 10 blocks. A longer expiry gives the buyer a free option on the seller's signature; the seller can cancel only by spending the item note itself.
+- The seller service reads nullifiers and heights from its wallet database, so keep the wallet synced (`--sync-cmd`).
+- Anyone holding the item viewing key learns when the item sells. That is inherent to consignment-style items.

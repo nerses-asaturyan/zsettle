@@ -16,7 +16,6 @@ use orchard::keys::Scope;
 use pczt::roles::{creator::Creator, io_finalizer::IoFinalizer, prover::Prover};
 use pczt::Pczt;
 use rand_core::OsRng;
-use serde::{Deserialize, Serialize};
 use zcash_client_backend::data_api::WalletCommitmentTrees;
 use zcash_client_sqlite::AccountUuid;
 use zcash_keys::address::Address;
@@ -28,17 +27,6 @@ use zcash_protocol::value::Zatoshis;
 
 use crate::wallet::{account_ufvk, heights, ironwood_note, Db, NoteRef};
 use crate::{zip317_fee, DEFAULT_MAX_EXPIRY_DELTA};
-
-/// A public listing: what is for sale and at what price. Participants stay shielded.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Listing {
-    /// The item being sold.
-    pub item: crate::item::ItemId,
-    /// Price in zatoshis, paid to the seller's shielded address.
-    pub price_zat: u64,
-    /// Maximum blocks the seller's signature may stay valid.
-    pub max_expiry_delta: u32,
-}
 
 /// Everything the buyer needs to assemble a trade.
 #[derive(Clone, Debug)]
