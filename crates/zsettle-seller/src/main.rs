@@ -51,6 +51,31 @@ struct WalletArgs {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Mint an item: pay a small amount from the payout account to the item account, memo = name.
+    Mint {
+        #[command(flatten)]
+        w: WalletArgs,
+        /// age identity file that decrypts the seller wallet's mnemonic.
+        #[arg(long)]
+        identity: PathBuf,
+        /// ZIP 32 account index of the payout account.
+        #[arg(long, default_value_t = 0)]
+        payout_account_index: u32,
+        /// Item name (goes into the memo).
+        #[arg(long)]
+        name: String,
+        /// Item note value in zatoshis.
+        #[arg(long, default_value_t = zsettle_core::item::MIN_ITEM_VALUE)]
+        value: u64,
+        /// lightwalletd server URL.
+        #[arg(long, default_value = zsettle_core::broadcast::DEFAULT_SERVER)]
+        server: String,
+    },
+    /// List the item account's unspent notes (the references to publish).
+    Items {
+        #[command(flatten)]
+        w: WalletArgs,
+    },
     /// Create or update the public listings file for this wallet's item account.
     Publish {
         #[command(flatten)]
@@ -123,6 +148,54 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
     match cli.cmd {
+        Cmd::Mint {
+            w,
+            identity,
+            payout_account_index,
+            name,
+            value,
+            server,
+        } => {
+            let wallet = Wallet::open(&w.wallet)?;
+            let mut db = wallet.db()?;
+            let seed = wallet.seed(&identity)?;
+            let req = zsettle_core::mint::MintRequest {
+                from_account: parse_account(&w.payout_account)?,
+                from_account_index: payout_account_index,
+                item_account: parse_account(&w.item_account)?,
+                value_zat: value,
+                name: name.clone(),
+            };
+            let (bytes, txid) = zsettle_core::mint::mint(&wallet, &mut db, &seed, &req)?;
+            let response = zsettle_core::broadcast::send_raw_transaction_blocking(&server, bytes)?;
+            println!(
+                "{}",
+                serde_json::json!({ "txid": txid, "name": name, "value_zat": value, "broadcast": response })
+            );
+            Ok(())
+        }
+        Cmd::Items { w } => {
+            let wallet = Wallet::open(&w.wallet)?;
+            let db = wallet.db()?;
+            let (target, _) = heights(&db, 1)?;
+            let notes =
+                zsettle_core::mint::unspent_notes(&db, parse_account(&w.item_account)?, target)?;
+            for n in &notes {
+                println!(
+                    "{}:{}  {:>8} zat  mined {}",
+                    n.note.txid,
+                    n.note.index,
+                    n.value_zat,
+                    n.mined_height
+                        .map(|h| h.to_string())
+                        .unwrap_or_else(|| "pending".into())
+                );
+            }
+            if notes.is_empty() {
+                println!("(no unspent notes in the item account)");
+            }
+            Ok(())
+        }
         Cmd::Publish {
             w,
             listings,

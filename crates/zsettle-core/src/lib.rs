@@ -17,6 +17,7 @@
 //! - [`pczt`]: PCZT role helpers (redact, sign, combine, extract).
 //! - [`policy`]: the seller-side checks that run before a signature is produced.
 //! - [`listing`]: the public listings file (prices, payout address, item viewing key).
+//! - [`mint`]: minting item notes and listing an account's unspent notes.
 //! - [`item`]: anchor, manifest, consignment encodings and item identity.
 //! - [`verify`]: keyless provenance verification from chain data.
 
@@ -26,6 +27,7 @@
 pub mod broadcast;
 pub mod item;
 pub mod listing;
+pub mod mint;
 pub mod pczt;
 pub mod policy;
 pub mod trade;

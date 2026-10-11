@@ -17,6 +17,8 @@ zcash_protocol = { workspace = true }
 zcash_keys = { workspace = true }
 zcash_address = { workspace = true }
 zcash_note_encryption = { workspace = true }
+zcash_proofs = { workspace = true }
+zip321 = { workspace = true }
 incrementalmerkletree = { workspace = true }
 zip32 = { workspace = true }
 rusqlite = { workspace = true }
@@ -39,3 +41,4 @@ rustls = { workspace = true }
 
 [dev-dependencies]
 rand_chacha = { workspace = true }
+zcash_primitives = { workspace = true }

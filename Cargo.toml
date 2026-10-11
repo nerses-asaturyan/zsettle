@@ -24,6 +24,8 @@ zcash_protocol = "0.10"
 zcash_keys = { version = "0.16", features = ["orchard"] }
 zcash_address = "0.13"
 zcash_note_encryption = "0.4"
+zcash_proofs = { version = "0.30", features = ["bundled-prover", "local-prover"] }
+zip321 = "0.9"
 incrementalmerkletree = "0.8"
 zip32 = "0.2"
 rusqlite = "0.37"
