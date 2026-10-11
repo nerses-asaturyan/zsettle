@@ -12,22 +12,23 @@ Binaries: `target/release/zsettle` (buyer and verifier) and `target/release/zset
 
 ## Wallets
 
-zsettle reads and writes the wallet layout of [zcash-devtool](https://github.com/zcash/zcash-devtool): `data.sqlite`, and `keys.toml` with the network, birthday and an age-encrypted mnemonic. Creating wallets and accounts is the one step that still uses devtool; syncing, minting, trading and verifying are zsettle commands.
-
 ```
-git clone https://github.com/zcash/zcash-devtool ~/code/tools/zcash-devtool
-cd ~/code/tools/zcash-devtool && git checkout 5a26ee8 && cargo build --release
-D=~/code/tools/zcash-devtool/target/release/zcash-devtool
-
-$D wallet -w ~/.zsettle/seller init --name seller -i ~/.zsettle/seller/key.txt -n main -s zecrocks
-$D wallet -w ~/.zsettle/seller generate-account --name item -i ~/.zsettle/seller/key.txt -s zecrocks
-$D wallet -w ~/.zsettle/buyer  init --name buyer  -i ~/.zsettle/buyer/key.txt  -n main -s zecrocks
-$D wallet -w ~/.zsettle/buyer  generate-account --name item -i ~/.zsettle/buyer/key.txt -s zecrocks
+zsettle-seller init --wallet ~/.zsettle/seller --identity ~/.zsettle/seller/key.txt
+zsettle        init --wallet ~/.zsettle/buyer  --identity ~/.zsettle/buyer/key.txt
 ```
 
-Each wallet gets two accounts: index 0 pays and receives payments, index 1 holds items. Items live in their own ZIP 32 account so that publishing its viewing key reveals nothing about the rest of the wallet. The buyer's item account is only needed to resell.
+Each command makes a 24-word mnemonic, encrypts it to a new age identity written to `key.txt`, creates the database, and derives two accounts: index 0 pays and receives payments (`payout` in the seller wallet, `buyer` in the buyer wallet), index 1 holds items (`item`). Items live in their own ZIP 32 account so that publishing its viewing key reveals nothing about the rest of the wallet. The output lists the account UUIDs the other commands take and a fresh address to fund. Keep `key.txt`: it is the only way to decrypt the mnemonic, and the mnemonic is the only backup of the funds.
 
-`$D wallet -w <dir> list-accounts` prints the account UUIDs the commands take. `-s zecrocks` is `https://zec.rocks:443`, the default server of every zsettle command; `--server` overrides it. The first connection to it occasionally stalls; a retry connects in under a second.
+```
+zsettle accounts --wallet ~/.zsettle/buyer
+zsettle address  --wallet ~/.zsettle/buyer --account <UUID>
+```
+
+Prefer a passphrase to a key file? Omit `--identity`: `init` asks for a passphrase twice and protects the mnemonic with it (age's scrypt recipient), and every later command that needs the mnemonic asks for it, or reads `ZSETTLE_PASSPHRASE` for scripts. There is then no file to lose, only a passphrase to remember. zcash-devtool cannot open passphrase-protected wallets.
+
+`accounts` lists the accounts again; `address` prints a fresh Orchard-only receiving address (a new one each call). `zsettle-seller` has the same two commands, and `new-item-account` adds another item account when an item should have a consignment of its own.
+
+The wallet layout is the one of [zcash-devtool](https://github.com/zcash/zcash-devtool) (`data.sqlite`, `keys.toml` with an age-encrypted mnemonic), so devtool can open these wallets too, and wallets made with devtool work here. The default server of every command is `https://zec.rocks:443`; `--server` overrides it. The first connection to it occasionally stalls; a retry connects in under a second.
 
 ## Syncing
 
@@ -40,7 +41,7 @@ This is the `zcash_client_backend` synchronizer with an in-memory block cache: i
 
 ## Funding
 
-Send ZEC to the buyer account's unified address (`$D wallet -w ~/.zsettle/buyer list-addresses`). A trade costs the price plus the ZIP 317 fee: 15,000 zat with a change output, 10,000 when the paying note is exact. A mint costs 10,000 zat plus 5,000 for every input beyond the first. Prices must be above 5,000 zat, since a smaller payment is dust that wallets refuse to spend. Everything in [TRADE.md](TRADE.md) was funded with 161,000 zat.
+Send ZEC to the address `init` printed, or to a fresh one from `zsettle address`. A trade costs the price plus the ZIP 317 fee: 15,000 zat with a change output, 10,000 when the paying note is exact. A mint costs 10,000 zat plus 5,000 for every input beyond the first. Prices must be above 5,000 zat, since a smaller payment is dust that wallets refuse to spend. Everything in [TRADE.md](TRADE.md) was funded with 161,000 zat.
 
 ## Files the tools write
 

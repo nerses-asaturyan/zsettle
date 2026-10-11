@@ -17,8 +17,8 @@ use zsettle_core::trade::{build_self_spend, build_trade, TradeRequest};
 use zsettle_core::verify::Consignment;
 use zsettle_core::wallet::{
     account_orchard_fvk, account_ufvk, find_account_by_ufvk, heights, import_viewing_key,
-    largest_spendable_note, parse_account, release_note, reservations, reserve_note,
-    reserved_notes, sync_blocking, NoteRef, Wallet,
+    init_wallet, largest_spendable_note, list_accounts, parse_account, release_note, reservations,
+    reserve_note, reserved_notes, sync_blocking, NoteRef, Wallet,
 };
 
 #[derive(Parser)]
@@ -39,6 +39,42 @@ enum Cmd {
         /// Listings file published by a seller.
         #[arg(long)]
         listings: PathBuf,
+    },
+    /// Create a wallet: a new mnemonic encrypted to an age identity, the database, and the
+    /// accounts `buyer` (index 0, pays and receives payments) and `item` (index 1, holds
+    /// items for resale). Prints the account UUIDs and an address to fund.
+    Init {
+        /// Directory to create.
+        #[arg(long)]
+        wallet: PathBuf,
+        /// age identity file to encrypt the mnemonic to, generated when it does not exist;
+        /// keep it, it is the only way to decrypt the mnemonic. Omit it to protect the
+        /// mnemonic with a passphrase instead (asked for twice, or taken from
+        /// ZSETTLE_PASSPHRASE).
+        #[arg(long)]
+        identity: Option<PathBuf>,
+        /// `main` or `test`.
+        #[arg(long, default_value = "main")]
+        network: String,
+        /// lightwalletd server URL (for the birthday).
+        #[arg(long, default_value = DEFAULT_SERVER)]
+        server: String,
+    },
+    /// List the wallet's accounts: name, UUID, ZIP 32 index, birthday.
+    Accounts {
+        /// Wallet directory.
+        #[arg(long)]
+        wallet: PathBuf,
+    },
+    /// Print a fresh receiving address of an account (Orchard only). Each call gives a new
+    /// one; reuse links payments.
+    Address {
+        /// Wallet directory.
+        #[arg(long)]
+        wallet: PathBuf,
+        /// Account UUID.
+        #[arg(long)]
+        account: String,
     },
     /// Sync a wallet with a lightwalletd server (no other tool needed).
     Sync {
@@ -122,9 +158,11 @@ enum Cmd {
         /// Buyer wallet directory.
         #[arg(long)]
         wallet: PathBuf,
-        /// age identity file that decrypts the buyer wallet's mnemonic.
+        /// age identity file that decrypts the wallet's mnemonic. Omit it for a
+        /// passphrase-protected wallet: the passphrase is asked for, or taken from
+        /// ZSETTLE_PASSPHRASE.
         #[arg(long)]
-        identity: PathBuf,
+        identity: Option<PathBuf>,
         /// ZIP 32 account index of the buyer's spending account.
         #[arg(long, default_value_t = 0)]
         account_index: u32,
@@ -191,9 +229,11 @@ enum Cmd {
         /// ZIP 32 account index of that account.
         #[arg(long, default_value_t = 0)]
         account_index: u32,
-        /// age identity file that decrypts the wallet's mnemonic.
+        /// age identity file that decrypts the wallet's mnemonic. Omit it for a
+        /// passphrase-protected wallet: the passphrase is asked for, or taken from
+        /// ZSETTLE_PASSPHRASE.
         #[arg(long)]
-        identity: PathBuf,
+        identity: Option<PathBuf>,
         /// Confirmations required on the note.
         #[arg(long, default_value_t = 3)]
         min_confirmations: u32,
@@ -250,8 +290,14 @@ fn check_server_before_sending(server: &str, network: Network) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    // Quiet by default; `ZSETTLE_LOG=1` shows the wallet library's progress lines.
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
+        .with_max_level(if std::env::var_os("ZSETTLE_LOG").is_some() {
+            tracing::Level::INFO
+        } else {
+            tracing::Level::WARN
+        })
         .init();
     let cli = Cli::parse();
     match cli.cmd {
@@ -274,6 +320,51 @@ fn main() -> Result<()> {
                     i.note, i.price_zat, i.max_expiry_delta, i.name
                 );
             }
+            Ok(())
+        }
+        Cmd::Init {
+            wallet,
+            identity,
+            network,
+            server,
+        } => {
+            let created = init_wallet(
+                &wallet,
+                parse_network(&network)?,
+                &server,
+                identity.as_deref(),
+                &["buyer", "item"],
+            )?;
+            let w = Wallet::open(&wallet)?;
+            let mut db = w.db()?;
+            let fund = parse_account(&created.accounts[0].account)?;
+            let address = zsettle_core::mint::item_address(&mut db, w.network, fund)?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "wallet": created.dir, "network": created.network, "birthday": created.birthday,
+                    "identity": identity, "protection": created.protection, "identity_created": created.identity_created,
+                    "accounts": created.accounts, "fund": address,
+                    "next": "send ZEC to `fund`, then `zsettle sync`; `--buyer-account` is the first UUID, `--receive-account` the second",
+                })
+            );
+            Ok(())
+        }
+        Cmd::Accounts { wallet } => {
+            let w = Wallet::open(&wallet)?;
+            let db = w.db()?;
+            println!("{}", serde_json::to_string(&list_accounts(&db)?)?);
+            Ok(())
+        }
+        Cmd::Address { wallet, account } => {
+            let w = Wallet::open(&wallet)?;
+            let mut db = w.db()?;
+            let address =
+                zsettle_core::mint::item_address(&mut db, w.network, parse_account(&account)?)?;
+            println!(
+                "{}",
+                serde_json::json!({ "account": account, "address": address })
+            );
             Ok(())
         }
         Cmd::Sync { wallet, server } => {
@@ -472,7 +563,7 @@ fn main() -> Result<()> {
             let full_pczt = pczt_ops::from_bytes(&fs::read(&full)?)?;
             let signed_pczt = pczt_ops::from_bytes(&fs::read(&signed)?)?;
             let combined = pczt_ops::combine(full_pczt, signed_pczt)?;
-            let seed = w.seed(&identity)?;
+            let seed = w.seed(identity.as_deref())?;
             let usk = w.spending_key(&seed, account_index)?;
             let ask = SpendAuthorizingKey::from(usk.orchard());
             let (pczt, signed_n) = pczt_ops::sign_matching_actions(combined, &ask)?;
@@ -538,7 +629,7 @@ fn main() -> Result<()> {
             let ask = if dry_run {
                 None
             } else {
-                let seed = w.seed(&identity)?;
+                let seed = w.seed(identity.as_deref())?;
                 let usk = w.spending_key(&seed, account_index)?;
                 if orchard::keys::FullViewingKey::from(usk.orchard())
                     != account_orchard_fvk(&db, account)?

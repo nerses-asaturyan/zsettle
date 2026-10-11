@@ -7,13 +7,14 @@
 use std::{
     fs,
     io::Read,
+    io::Write,
     num::NonZeroU32,
     path::{Path, PathBuf},
     sync::Mutex,
 };
 
 use anyhow::{anyhow, Context, Result};
-use bip0039::{English, Mnemonic};
+use bip0039::{Count, English, Mnemonic};
 use rand_core::OsRng;
 use secrecy::{ExposeSecret, SecretVec, Zeroize};
 use serde::{Deserialize, Serialize};
@@ -27,7 +28,7 @@ use zcash_client_backend::data_api::{
 };
 use zcash_client_backend::proto::compact_formats::CompactBlock;
 use zcash_client_backend::wallet::Note;
-use zcash_client_sqlite::{util::SystemClock, AccountUuid, WalletDb};
+use zcash_client_sqlite::{util::SystemClock, wallet::init::init_wallet_db, AccountUuid, WalletDb};
 use zcash_keys::keys::{UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedSpendingKey};
 use zcash_protocol::{
     consensus::{BlockHeight, Network},
@@ -137,22 +138,36 @@ impl Wallet {
         .context("opening wallet database")
     }
 
-    /// Decrypt the mnemonic with the given age identity file and derive the BIP 39 seed.
-    pub fn seed(&self, identity_file: &Path) -> Result<SecretVec<u8>> {
+    /// Decrypt the mnemonic and derive the BIP 39 seed. With an age identity file the
+    /// mnemonic must be encrypted to one of its identities; without one it must be
+    /// passphrase-protected, and the passphrase comes from `ZSETTLE_PASSPHRASE` or a prompt.
+    pub fn seed(&self, identity_file: Option<&Path>) -> Result<SecretVec<u8>> {
         let ciphertext = self
             .mnemonic_ciphertext
             .as_deref()
             .ok_or_else(|| anyhow!("wallet has no encrypted mnemonic (view-only wallet?)"))?;
-        let identities = age::IdentityFile::from_file(identity_file.to_string_lossy().into_owned())
-            .context("reading age identity file")?
-            .into_identities()
-            .map_err(|e| anyhow!("age identity file: {e}"))?;
+        let identities: Vec<Box<dyn age::Identity + Send + Sync>> = match identity_file {
+            Some(path) => age::IdentityFile::from_file(path.to_string_lossy().into_owned())
+                .context("reading age identity file")?
+                .into_identities()
+                .map_err(|e| anyhow!("age identity file: {e}"))?,
+            None => vec![Box::new(age::scrypt::Identity::new(passphrase(false)?))],
+        };
         let decryptor = age::Decryptor::new(age::armor::ArmoredReader::new(ciphertext.as_bytes()))
             .map_err(|e| anyhow!("age decryptor: {e}"))?;
         let mut buf = vec![];
         let read = decryptor
             .decrypt(identities.iter().map(|i| i.as_ref() as &dyn age::Identity))
-            .map_err(|e| anyhow!("age decrypt: {e}"))?
+            .map_err(|e| match (identity_file, e) {
+                (None, age::DecryptError::NoMatchingKeys) => anyhow!(
+                    "this wallet's mnemonic is encrypted to an age identity, not a passphrase: pass --identity"
+                ),
+                (None, age::DecryptError::DecryptionFailed) => anyhow!("wrong passphrase"),
+                (Some(_), age::DecryptError::NoMatchingKeys) => anyhow!(
+                    "the identity file does not decrypt this wallet's mnemonic (a passphrase-protected wallet? omit --identity)"
+                ),
+                (_, e) => anyhow!("age decrypt: {e}"),
+            })?
             .read_to_end(&mut buf);
         let mnemonic_bytes = SecretVec::new(buf);
         read?;
@@ -354,6 +369,230 @@ pub fn import_viewing_key(
         )
         .map_err(|e| anyhow!("importing viewing key: {e}"))?;
     Ok(account.id())
+}
+
+/// The wallet passphrase: `ZSETTLE_PASSPHRASE` when set, otherwise asked for on the terminal
+/// (twice when `confirm`), otherwise one line of standard input.
+fn passphrase(confirm: bool) -> Result<age::secrecy::SecretString> {
+    use std::io::IsTerminal;
+    let text = if let Ok(p) = std::env::var("ZSETTLE_PASSPHRASE") {
+        p
+    } else if std::io::stdin().is_terminal() {
+        let p = rpassword::prompt_password("Wallet passphrase: ")?;
+        if confirm && rpassword::prompt_password("Repeat passphrase: ")? != p {
+            return Err(anyhow!("the passphrases differ"));
+        }
+        p
+    } else {
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        line.trim_end_matches(['\r', '\n']).to_string()
+    };
+    if text.is_empty() {
+        return Err(anyhow!(
+            "empty passphrase (set ZSETTLE_PASSPHRASE, or run on a terminal to be asked)"
+        ));
+    }
+    Ok(age::secrecy::SecretString::new(text.into_boxed_str()))
+}
+
+/// A wallet directory just created by [`init_wallet`].
+#[derive(Serialize)]
+pub struct Created {
+    /// The wallet directory.
+    pub dir: PathBuf,
+    /// `main` or `test`.
+    pub network: String,
+    /// Height the wallet scans from.
+    pub birthday: u32,
+    /// `identity-file` or `passphrase`.
+    pub protection: &'static str,
+    /// Whether the age identity file was generated by this call.
+    pub identity_created: bool,
+    /// The derived accounts, in the order they were asked for.
+    pub accounts: Vec<AccountInfo>,
+}
+
+/// One account of a wallet, as `accounts` lists them.
+#[derive(Serialize)]
+pub struct AccountInfo {
+    /// Name given at creation.
+    pub name: String,
+    /// Account UUID, as the commands take it.
+    pub account: String,
+    /// ZIP 32 account index; absent for an account imported from a viewing key.
+    pub index: Option<u32>,
+    /// Height the account scans from.
+    pub birthday: u32,
+}
+
+#[derive(Serialize)]
+struct KeysOut<'a> {
+    mnemonic: &'a str,
+    network: &'a str,
+    birthday: u32,
+}
+
+/// Create a wallet in the devtool layout: a fresh 24-word mnemonic encrypted to the age
+/// identity in `identity` (generated there when the file does not exist) or, without one, to
+/// a passphrase; `keys.toml`; the database; and one derived account per name. The birthday is a little below the server's
+/// tip, so the first sync is seconds. Refuses to touch a directory that already holds a
+/// wallet.
+pub fn init_wallet(
+    dir: &Path,
+    network: Network,
+    server: &str,
+    identity: Option<&Path>,
+    account_names: &[&str],
+) -> Result<Created> {
+    let keys_path = dir.join("keys.toml");
+    let db_path = dir.join("data.sqlite");
+    if keys_path.exists() || db_path.exists() {
+        return Err(anyhow!(
+            "{} already holds a wallet; refusing to overwrite it",
+            dir.display()
+        ));
+    }
+    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+
+    let (recipients, protection, identity_created): (
+        Vec<Box<dyn age::Recipient + Send>>,
+        &'static str,
+        bool,
+    ) = match identity {
+        Some(identity) if identity.exists() => {
+            let file = age::IdentityFile::from_file(identity.to_string_lossy().into_owned())
+                .context("reading age identity file")?;
+            let recipients = file
+                .to_recipients()
+                .map_err(|e| anyhow!("age identity file: {e}"))?;
+            (recipients, "identity-file", false)
+        }
+        Some(identity) => {
+            let id = age::x25519::Identity::generate();
+            let public = id.to_public();
+            let secret = id.to_string();
+            let text = format!(
+                "# public key: {public}\n{}\n",
+                age::secrecy::ExposeSecret::expose_secret(&secret)
+            );
+            write_private(identity, text.as_bytes())?;
+            (vec![Box::new(public)], "identity-file", true)
+        }
+        None => (
+            vec![Box::new(age::scrypt::Recipient::new(passphrase(true)?))],
+            "passphrase",
+            false,
+        ),
+    };
+
+    let mnemonic = <Mnemonic<English>>::generate(Count::Words24);
+    let mut armored = Vec::new();
+    {
+        let encryptor = age::Encryptor::with_recipients(
+            recipients.iter().map(|r| r.as_ref() as &dyn age::Recipient),
+        )
+        .map_err(|e| anyhow!("age: {e}"))?;
+        let armor =
+            age::armor::ArmoredWriter::wrap_output(&mut armored, age::armor::Format::AsciiArmor)?;
+        let mut w = encryptor.wrap_output(armor)?;
+        w.write_all(mnemonic.phrase().as_bytes())?;
+        w.finish()?.finish()?;
+    }
+    let ciphertext = String::from_utf8(armored).context("age armor")?;
+
+    let info = crate::broadcast::server_info_blocking(server)?;
+    let chain = match network {
+        Network::MainNetwork => "main",
+        Network::TestNetwork => "test",
+    };
+    if info.chain_name != chain {
+        return Err(anyhow!(
+            "the server {server} is on chain {:?}, not {chain:?}",
+            info.chain_name
+        ));
+    }
+    let birthday_height = info.block_height.saturating_sub(100);
+    let tree_state =
+        crate::broadcast::fetch_tree_state_blocking(server, birthday_height.saturating_sub(1))?;
+    let birthday = AccountBirthday::from_treestate(tree_state, None)
+        .map_err(|e| anyhow!("birthday: {e:?}"))?;
+
+    let keys = KeysOut {
+        mnemonic: &ciphertext,
+        network: chain,
+        birthday: birthday_height,
+    };
+    fs::write(&keys_path, toml::to_string(&keys)?)
+        .with_context(|| format!("writing {}", keys_path.display()))?;
+
+    let wallet = Wallet::open(dir)?;
+    let mut db = wallet.db()?;
+    init_wallet_db(&mut db, None).map_err(|e| anyhow!("initialising the wallet database: {e}"))?;
+    let seed = {
+        let mut bytes = mnemonic.to_seed("");
+        let seed = SecretVec::new(bytes.to_vec());
+        bytes.zeroize();
+        seed
+    };
+    let mut accounts = Vec::new();
+    for name in account_names {
+        let (id, _usk) = db
+            .create_account(name, &seed, &birthday, None)
+            .map_err(|e| anyhow!("creating account {name}: {e}"))?;
+        accounts.push(account_info(&db, id)?);
+    }
+    Ok(Created {
+        dir: dir.to_path_buf(),
+        network: chain.into(),
+        birthday: birthday_height,
+        protection,
+        identity_created,
+        accounts,
+    })
+}
+
+/// Write a secret file readable by its owner only (on Unix) and never over an existing one.
+fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut f = options
+        .open(path)
+        .with_context(|| format!("creating {}", path.display()))?;
+    f.write_all(bytes)?;
+    Ok(())
+}
+
+/// Name, UUID, ZIP 32 index and birthday of one account.
+pub fn account_info(db: &Db, id: AccountUuid) -> Result<AccountInfo> {
+    let account = db
+        .get_account(id)
+        .map_err(|e| anyhow!("{e}"))?
+        .ok_or_else(|| anyhow!("account {} not found", id.expose_uuid()))?;
+    let index = match account.source() {
+        AccountSource::Derived { derivation, .. } => Some(u32::from(derivation.account_index())),
+        AccountSource::Imported { .. } => None,
+    };
+    Ok(AccountInfo {
+        name: account.name().unwrap_or("").to_string(),
+        account: id.expose_uuid().to_string(),
+        index,
+        birthday: u32::from(account.birthday_height()),
+    })
+}
+
+/// Every account of the wallet, in database order.
+pub fn list_accounts(db: &Db) -> Result<Vec<AccountInfo>> {
+    db.get_account_ids()
+        .map_err(|e| anyhow!("{e}"))?
+        .into_iter()
+        .map(|id| account_info(db, id))
+        .collect()
 }
 
 /// Create a new ZIP 32 account of this wallet from its seed, with a birthday at the wallet's

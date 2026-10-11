@@ -22,9 +22,9 @@ use zsettle_core::mint::{note_state, NoteState};
 use zsettle_core::pczt as pczt_ops;
 use zsettle_core::policy::{check, describe, prepared_ivk, Approved, PolicyError, SellerPolicy};
 use zsettle_core::wallet::{
-    account_birthday, account_orchard_fvk, create_account, heights, ironwood_note,
-    max_scanned_height, next_orchard_address, parse_account, recent_ironwood_anchors,
-    sync_blocking, unspent_ironwood_nullifiers, Db, NoteRef, Wallet,
+    account_birthday, account_orchard_fvk, create_account, heights, init_wallet, ironwood_note,
+    list_accounts, max_scanned_height, next_orchard_address, parse_account,
+    recent_ironwood_anchors, sync_blocking, unspent_ironwood_nullifiers, Db, NoteRef, Wallet,
 };
 use zsettle_core::DEFAULT_MAX_EXPIRY_DELTA;
 use zsettle_core::{MAX_ENVELOPE_BYTES, MIN_PRICE_ZAT};
@@ -68,6 +68,42 @@ struct WalletArgs {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Create a seller wallet: a new mnemonic encrypted to an age identity, the database, and
+    /// the accounts `payout` (index 0, pays for mints and receives payments) and `item`
+    /// (index 1, holds the items). Prints the account UUIDs and an address to fund.
+    Init {
+        /// Directory to create.
+        #[arg(long)]
+        wallet: PathBuf,
+        /// age identity file to encrypt the mnemonic to, generated when it does not exist;
+        /// keep it, it is the only way to decrypt the mnemonic. Omit it to protect the
+        /// mnemonic with a passphrase instead (asked for twice, or taken from
+        /// ZSETTLE_PASSPHRASE).
+        #[arg(long)]
+        identity: Option<PathBuf>,
+        /// `main` or `test`.
+        #[arg(long, default_value = "main")]
+        network: String,
+        /// lightwalletd server URL (for the birthday).
+        #[arg(long, default_value = DEFAULT_SERVER)]
+        server: String,
+    },
+    /// List the wallet's accounts: name, UUID, ZIP 32 index, birthday.
+    Accounts {
+        /// Wallet directory.
+        #[arg(long)]
+        wallet: PathBuf,
+    },
+    /// Print a fresh receiving address of an account (Orchard only). Each call gives a new
+    /// one; reuse links payments.
+    Address {
+        /// Wallet directory.
+        #[arg(long)]
+        wallet: PathBuf,
+        /// Account UUID.
+        #[arg(long)]
+        account: String,
+    },
     /// Sync the wallet with a lightwalletd server (no other tool needed).
     Sync {
         /// Wallet directory.
@@ -83,9 +119,11 @@ enum Cmd {
         /// Wallet directory.
         #[arg(long)]
         wallet: PathBuf,
-        /// age identity file that decrypts the wallet's mnemonic.
+        /// age identity file that decrypts the wallet's mnemonic. Omit it for a
+        /// passphrase-protected wallet: the passphrase is asked for, or taken from
+        /// ZSETTLE_PASSPHRASE.
         #[arg(long)]
-        identity: PathBuf,
+        identity: Option<PathBuf>,
         /// Account name.
         #[arg(long)]
         name: String,
@@ -97,9 +135,11 @@ enum Cmd {
     Mint {
         #[command(flatten)]
         w: WalletArgs,
-        /// age identity file that decrypts the seller wallet's mnemonic.
+        /// age identity file that decrypts the wallet's mnemonic. Omit it for a
+        /// passphrase-protected wallet: the passphrase is asked for, or taken from
+        /// ZSETTLE_PASSPHRASE.
         #[arg(long)]
-        identity: PathBuf,
+        identity: Option<PathBuf>,
         /// ZIP 32 account index of the payout account.
         #[arg(long, default_value_t = 0)]
         payout_account_index: u32,
@@ -122,9 +162,11 @@ enum Cmd {
     Publish {
         #[command(flatten)]
         w: WalletArgs,
-        /// age identity file that decrypts the seller wallet's mnemonic (signs the file).
+        /// age identity file that decrypts the wallet's mnemonic. Omit it for a
+        /// passphrase-protected wallet: the passphrase is asked for, or taken from
+        /// ZSETTLE_PASSPHRASE.
         #[arg(long)]
-        identity: PathBuf,
+        identity: Option<PathBuf>,
         /// Listings file to create or update.
         #[arg(long)]
         listings: PathBuf,
@@ -150,9 +192,11 @@ enum Cmd {
     Sign {
         #[command(flatten)]
         w: WalletArgs,
-        /// age identity file that decrypts the seller wallet's mnemonic.
+        /// age identity file that decrypts the wallet's mnemonic. Omit it for a
+        /// passphrase-protected wallet: the passphrase is asked for, or taken from
+        /// ZSETTLE_PASSPHRASE.
         #[arg(long)]
-        identity: PathBuf,
+        identity: Option<PathBuf>,
         /// Listings file.
         #[arg(long)]
         listings: PathBuf,
@@ -182,9 +226,11 @@ enum Cmd {
     Serve {
         #[command(flatten)]
         w: WalletArgs,
-        /// age identity file that decrypts the seller wallet's mnemonic.
+        /// age identity file that decrypts the wallet's mnemonic. Omit it for a
+        /// passphrase-protected wallet: the passphrase is asked for, or taken from
+        /// ZSETTLE_PASSPHRASE.
         #[arg(long)]
-        identity: PathBuf,
+        identity: Option<PathBuf>,
         /// Listings file (kept in sync with the chain: sold items removed).
         #[arg(long)]
         listings: PathBuf,
@@ -213,11 +259,62 @@ enum Cmd {
 }
 
 fn main() -> Result<()> {
+    // Quiet by default; `ZSETTLE_LOG=1` shows the wallet library's progress lines.
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
+        .with_max_level(if std::env::var_os("ZSETTLE_LOG").is_some() {
+            tracing::Level::INFO
+        } else {
+            tracing::Level::WARN
+        })
         .init();
     let cli = Cli::parse();
     match cli.cmd {
+        Cmd::Init {
+            wallet,
+            identity,
+            network,
+            server,
+        } => {
+            let created = init_wallet(
+                &wallet,
+                parse_network(&network)?,
+                &server,
+                identity.as_deref(),
+                &["payout", "item"],
+            )?;
+            let w = Wallet::open(&wallet)?;
+            let mut db = w.db()?;
+            let fund = parse_account(&created.accounts[0].account)?;
+            let address = zsettle_core::mint::item_address(&mut db, w.network, fund)?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "wallet": created.dir, "network": created.network, "birthday": created.birthday,
+                    "identity": identity, "protection": created.protection, "identity_created": created.identity_created,
+                    "accounts": created.accounts, "fund": address,
+                    "next": "send ZEC to `fund`, then `zsettle-seller sync`; `--payout-account` is the first UUID, `--item-account` the second (index 1)",
+                })
+            );
+            Ok(())
+        }
+        Cmd::Accounts { wallet } => {
+            let w = Wallet::open(&wallet)?;
+            let db = w.db()?;
+            println!("{}", serde_json::to_string(&list_accounts(&db)?)?);
+            Ok(())
+        }
+        Cmd::Address { wallet, account } => {
+            let w = Wallet::open(&wallet)?;
+            let mut db = w.db()?;
+            let address =
+                zsettle_core::mint::item_address(&mut db, w.network, parse_account(&account)?)?;
+            println!(
+                "{}",
+                serde_json::json!({ "account": account, "address": address })
+            );
+            Ok(())
+        }
         Cmd::Sync { wallet, server } => {
             let wallet = Wallet::open(&wallet)?;
             let mut db = wallet.db()?;
@@ -233,7 +330,7 @@ fn main() -> Result<()> {
         } => {
             let wallet = Wallet::open(&wallet)?;
             let mut db = wallet.db()?;
-            let seed = wallet.seed(&identity)?;
+            let seed = wallet.seed(identity.as_deref())?;
             let (id, index) = create_account(&wallet, &mut db, &seed, &name, &server)?;
             println!(
                 "{}",
@@ -252,7 +349,7 @@ fn main() -> Result<()> {
             let wallet = Wallet::open(&w.wallet)?;
             let mut db = wallet.db()?;
             check_consensus_at_tip_blocking(&server, wallet.network)?;
-            let seed = wallet.seed(&identity)?;
+            let seed = wallet.seed(identity.as_deref())?;
             let req = zsettle_core::mint::MintRequest {
                 from_account: parse_account(&w.payout_account)?,
                 from_account_index: payout_account_index,
@@ -302,7 +399,13 @@ fn main() -> Result<()> {
             let mut db = wallet.db()?;
             let item_account = parse_account(&w.item_account)?;
             let item_fvk = account_orchard_fvk(&db, item_account)?;
-            let ask = item_ask(&wallet, &db, &identity, item_account, w.item_account_index)?;
+            let ask = item_ask(
+                &wallet,
+                &db,
+                identity.as_deref(),
+                item_account,
+                w.item_account_index,
+            )?;
             let mut l = if listings.exists() {
                 let l = Listings::read(&listings)?;
                 if l.item_fvk()? != item_fvk {
@@ -434,7 +537,7 @@ fn main() -> Result<()> {
             let ask = item_ask(
                 &wallet,
                 &db,
-                &identity,
+                identity.as_deref(),
                 parse_account(&w.item_account)?,
                 w.item_account_index,
             )?;
@@ -485,7 +588,7 @@ fn main() -> Result<()> {
                 item_ask(
                     &wallet,
                     &db,
-                    &identity,
+                    identity.as_deref(),
                     parse_account(&w.item_account)?,
                     w.item_account_index,
                 )
@@ -837,7 +940,7 @@ fn process(
 fn item_ask(
     wallet: &Wallet,
     db: &Db,
-    identity: &Path,
+    identity: Option<&Path>,
     item_account: zsettle_core::wallet::WalletAccount,
     item_account_index: u32,
 ) -> Result<SpendAuthorizingKey> {
@@ -927,6 +1030,14 @@ fn move_into(path: &Path, dir: &Path) -> Result<PathBuf> {
     fs::rename(path, &dest)
         .with_context(|| format!("moving {} to {}", path.display(), dir.display()))?;
     Ok(dest)
+}
+
+fn parse_network(name: &str) -> Result<zcash_protocol::consensus::Network> {
+    match name {
+        "main" => Ok(zcash_protocol::consensus::Network::MainNetwork),
+        "test" => Ok(zcash_protocol::consensus::Network::TestNetwork),
+        other => Err(anyhow!("unknown network {other:?}: use main or test")),
+    }
 }
 
 fn network_name(n: zcash_protocol::consensus::Network) -> &'static str {
