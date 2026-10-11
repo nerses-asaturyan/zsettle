@@ -12,4 +12,5 @@
 - Resale: items can be received into a dedicated item account and relisted; `verify` follows an item across holders when given each holder's listings.
 - Consensus guard: build, mint and broadcast stop when the server is on a branch this build does not sign for.
 - Provenance verification from compact blocks with viewing keys only, starting at the genesis block; `--private` scans from the birthday instead.
+- `rotate` retires the paying notes of offers that did not settle; `new-item-account` gives an item its own consignment.
 - Second review pass: anchor must be a recent wallet root, dust outputs do not count as payment, envelope branch id checked, zero randomizers refused, account index checked against the account key, seller-side listings verified before re-signing, issued-at height in the signed listings, lineage-broken status in verify, examples for a wallet-free run.

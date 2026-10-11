@@ -9,12 +9,14 @@ use orchard::keys::SpendAuthorizingKey;
 use zcash_protocol::consensus::Network;
 use zsettle_core::broadcast::{check_consensus_blocking, pick_server, server_info_blocking};
 use zsettle_core::listing::Listings;
+use zsettle_core::mint::{note_state, NoteState};
 use zsettle_core::pczt as pczt_ops;
-use zsettle_core::trade::{build_trade, TradeRequest};
+use zsettle_core::trade::{build_self_spend, build_trade, TradeRequest};
 use zsettle_core::verify::Consignment;
 use zsettle_core::wallet::{
-    account_ufvk, find_account_by_ufvk, heights, import_viewing_key, largest_spendable_note,
-    parse_account, reserve_note, reserved_notes, sync_blocking, NoteRef, Wallet,
+    account_orchard_fvk, account_ufvk, find_account_by_ufvk, heights, import_viewing_key,
+    largest_spendable_note, parse_account, release_note, reservations, reserve_note,
+    reserved_notes, sync_blocking, NoteRef, Wallet,
 };
 
 #[derive(Parser)]
@@ -221,6 +223,32 @@ enum Cmd {
         /// look at): scan from the listings' birthdays instead, and skip the item name.
         #[arg(long)]
         private: bool,
+    },
+    /// Retire the paying notes of offers that did not settle: each one is moved to a fresh
+    /// address of its account in a plain two-action transaction, so the nullifier the seller
+    /// learned from the envelope can never point at a later payment of yours.
+    Rotate {
+        /// Buyer wallet directory.
+        #[arg(long)]
+        wallet: PathBuf,
+        /// UUID of the paying account the reservations belong to.
+        #[arg(long)]
+        account: String,
+        /// ZIP 32 account index of that account.
+        #[arg(long, default_value_t = 0)]
+        account_index: u32,
+        /// age identity file that decrypts the wallet's mnemonic.
+        #[arg(long)]
+        identity: PathBuf,
+        /// Confirmations required on the note.
+        #[arg(long, default_value_t = 3)]
+        min_confirmations: u32,
+        /// lightwalletd server URL (defaults to the wallet's network).
+        #[arg(long)]
+        server: Option<String>,
+        /// Report what would be done without building or sending anything.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// List the unspent Ironwood notes of an account of a wallet, dust included.
     Notes {
@@ -595,6 +623,89 @@ fn main() -> Result<()> {
             println!(
                 "{}",
                 serde_json::json!({ "txid": id.to_string(), "status": status, "server": server })
+            );
+            Ok(())
+        }
+        Cmd::Rotate {
+            wallet,
+            account,
+            account_index,
+            identity,
+            min_confirmations,
+            server,
+            dry_run,
+        } => {
+            let w = Wallet::open(&wallet)?;
+            let mut db = w.db()?;
+            let server = pick_server(server, w.network);
+            let account = parse_account(&account)?;
+            let (target, _) = heights(&db, 1)?;
+            let tip =
+                u32::from(zcash_protocol::consensus::BlockHeight::from(target)).saturating_sub(1);
+            let ask = if dry_run {
+                None
+            } else {
+                let seed = w.seed(&identity)?;
+                let usk = w.spending_key(&seed, account_index)?;
+                if orchard::keys::FullViewingKey::from(usk.orchard())
+                    != account_orchard_fvk(&db, account)?
+                {
+                    return Err(anyhow!(
+                        "account index {account_index} does not derive account {}",
+                        account.expose_uuid()
+                    ));
+                }
+                Some(SpendAuthorizingKey::from(usk.orchard()))
+            };
+            let mut rotated = 0usize;
+            for (note, expiry) in reservations(&w)? {
+                let state = note_state(&w, &db, note)?;
+                let action = match state {
+                    NoteState::Spent { .. } => {
+                        release_note(&w, note)?;
+                        "released: already spent"
+                    }
+                    NoteState::Unknown => "kept: not in this wallet",
+                    NoteState::Unspent { .. } if expiry >= tip => {
+                        "kept: its offer can still be mined"
+                    }
+                    NoteState::Unspent { .. } => match &ask {
+                        None => "would rotate",
+                        Some(ask) => {
+                            check_server_before_sending(&server, w.network)?;
+                            let built = build_self_spend(
+                                &mut db,
+                                w.network,
+                                account,
+                                note,
+                                min_confirmations,
+                            )?;
+                            let (pczt, signed_n) =
+                                pczt_ops::sign_matching_actions(built.pczt, ask)?;
+                            if signed_n == 0 {
+                                return Err(anyhow!("the key signs no action of the rotation"));
+                            }
+                            let tx = pczt_ops::extract(pczt)?;
+                            let bytes = pczt_ops::tx_bytes(&tx)?;
+                            zsettle_core::broadcast::send_raw_transaction_blocking(&server, bytes)?;
+                            reserve_note(&w, note, built.expiry_height)?;
+                            rotated += 1;
+                            println!(
+                                "{}",
+                                serde_json::json!({ "note": note.to_string(), "rotated_in": tx.txid().to_string(), "value_out": built.value_out, "fee": built.fee })
+                            );
+                            continue;
+                        }
+                    },
+                };
+                println!(
+                    "{}",
+                    serde_json::json!({ "note": note.to_string(), "offer_expiry": expiry, "action": action })
+                );
+            }
+            println!(
+                "{}",
+                serde_json::json!({ "tip": tip, "rotated": rotated, "dry_run": dry_run })
             );
             Ok(())
         }

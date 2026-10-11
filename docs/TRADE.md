@@ -4,6 +4,14 @@ Two machines (or two wallet directories on one machine). Mainnet, Ironwood pool.
 
 ## Minting items
 
+An item account can hold many items or exactly one. Whoever holds a listing sees every note of its account, so give an item its own account when that matters:
+
+```
+zsettle-seller new-item-account --wallet ~/.zsettle/seller --identity ~/.zsettle/seller/key.txt --name "Item #4"
+```
+
+It prints the account UUID and ZIP 32 index to use as `--item-account` and `--item-account-index` below.
+
 ```
 zsettle-seller mint --wallet ~/.zsettle/seller --item-account <ITEM_ACCOUNT_UUID> --item-account-index 1 \
   --payout-account <PAYOUT_ACCOUNT_UUID> --identity ~/.zsettle/seller/key.txt --name "Item #3" --value 1000
@@ -81,6 +89,16 @@ zsettle finish --wallet ~/.zsettle/buyer --identity ~/.zsettle/buyer/key.txt --a
 
 Combines the two PCZTs (fields that differ fail the merge, so the seller cannot alter the trade), signs the payment action, finalizes spends, extracts the transaction (proof and signatures are verified here), checks the server's consensus branch and sends it. `zsettle broadcast --tx trade.final.tx` resends a raw transaction.
 
+## After an offer that did not settle
+
+The seller keeps your envelope, and with it the nullifier of the note you paid with. If the trade was mined that nullifier is public anyway; if it was not (you lost the race, the offer expired, you gave up), retire the note:
+
+```
+zsettle rotate --wallet ~/.zsettle/buyer --account <BUYER_ACCOUNT_UUID> --identity ~/.zsettle/buyer/key.txt
+```
+
+It walks the reservations `buy` recorded, drops the ones whose notes are already spent, keeps the ones whose offers can still be mined, and moves every other note to a fresh address of the same account in an ordinary two-action transaction. `--dry-run` only reports.
+
 ## Resale
 
 A buyer who may resell receives the item into a dedicated item account of its own wallet, so that publishing that account's viewing key later reveals nothing about the account that paid:
@@ -111,7 +129,7 @@ Asks the server which block holds the genesis transaction, streams compact block
 
 The two listings files are in `examples/` (`market.json`, `market2.json`); `zsettle verify --listings examples/market.json --listings examples/market2.json --item af09c2cf525d2bb6e553b61a1d3cc2674ebdf09726be1e3959ee36f5143f5804:0` needs no wallet and no funds. `zsettle verify --listings market/listings.json --listings market2/listings.json --item 6f1c8e26…:1` follows item #3 from its genesis (first seller's key) into the buyer's item account (second key) in under a second. It reports the resale as a transfer to an unknown holder: that transaction was built before the action-pairing rule was enforced (see [PROTOCOL.md](../spec/PROTOCOL.md), Items), so the new item note ended up in a different action from the item spend and the lineage, as the protocol defines it, stops there.
 
-These four trades also predate the privacy review: their item outputs were encrypted to the seller's published outgoing key and sent to the buyer's default address, and their expiry was ten blocks. Anyone holding the listings files of that day can read those four item notes. Trades built since do none of this, which is why the old transactions are listed here rather than quietly dropped.
+These four trades also predate the privacy review: their item outputs were encrypted to the seller's published outgoing key and sent to the buyer's default address, and their expiry was ten blocks. The Orchard key in `examples/market.json` is that seller item account's key, so anyone with the file can read those four item notes and the demo buyer's default address. Both wallets are throwaway demo wallets. Trades built since do none of this, which is why the old transactions are listed here rather than quietly dropped.
 
 ## Notes
 

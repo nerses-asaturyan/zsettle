@@ -25,7 +25,7 @@
 | Reorg or incomplete sync hides an item note | Item wrongly delisted | an item is removed only when the wallet has recorded a spend of its note |
 | Network upgrade this build does not know | Transactions silently rejected | the tools compare the server's consensus branch with their own before building or sending and stop with a message |
 | On-chain fingerprinting of trades | Trades identifiable without keys | standard expiry delta, standard ZIP 317 fees, standard anchor depth, two or three actions like any wallet transaction |
-| Window-shoppers hold the item FVK | They learn when and that the item sold | inherent to consignment; documented |
+| Window-shoppers hold the item FVK | They learn when and that the item sold, and see every other item of that account | inherent to consignment; limit it to one item per consignment with `new-item-account` |
 | Fee or change manipulation | Seller underpaid | policy decrypts the payment outputs under the seller's incoming viewing key and checks `>= price` |
 | Envelope for another consensus branch | Signature on a transaction the chain cannot accept | policy compares the envelope's branch id with the one live at the next block |
 
@@ -33,5 +33,5 @@
 - The listed price and payout address, by the seller's choice.
 - To anyone holding a consignment: the item notes of that account, their values and names, and the block in which each one was spent.
 - To the light server: the IP that syncs an imported viewing key, broadcasts a trade or fetches an item's genesis transaction. Route through Tor or run your own lightwalletd if that matters.
-- To the seller: the nullifier of the buyer's paying note, from the envelope. If the offer settles, the chain reveals it anyway. If the offer does not settle (lost race, expiry, abandoned), the seller can later recognise the transaction in which that note is finally spent. `buy` says so; spend the note to yourself before reusing it if that matters. With an exact-value two-action offer the seller also learns that note's value (price plus fee).
+- To the seller: the nullifier of the buyer's paying note, from the envelope. If the offer settles, the chain reveals it anyway. If the offer does not settle (lost race, expiry, abandoned), the seller could later recognise the transaction in which that note is finally spent; `zsettle rotate` retires such notes in a plain two-action transfer to the buyer's own account, after which the nullifier points at that transfer and nothing else. With an exact-value two-action offer the seller also learns that note's value (price plus fee).
 - Nothing else links the buyer's paying note, the buyer's address, the seller's other notes or either party's balance to the trade.
