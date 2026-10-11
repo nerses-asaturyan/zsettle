@@ -472,6 +472,13 @@ pub fn init_wallet(
         ));
     }
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    // The database holds viewing keys and the whole history: owner-only on Unix.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("restricting {}", dir.display()))?;
+    }
 
     let (recipients, protection, identity_created): (
         Vec<Box<dyn age::Recipient + Send>>,
