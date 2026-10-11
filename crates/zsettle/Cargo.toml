@@ -1,6 +1,6 @@
 [package]
 name = "zsettle"
-description = "zsettle buyer and verifier CLI: wallet, mint, list, buy, finish, verify"
+description = "zsettle buyer and verifier CLI: buy, finish, verify"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 zsettle-core = { path = "../zsettle-core" }
+orchard = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }

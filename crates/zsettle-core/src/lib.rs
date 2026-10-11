@@ -11,20 +11,24 @@
 //! through the duplicate nullifier.
 //!
 //! Modules:
-//! - [`item`]: anchor, manifest, consignment encodings and item identity.
-//! - [`trade`]: two-party bundle construction and the shared-anchor witness rules.
+//! - [`wallet`]: light-wallet database access, note lookup, encrypted seed handling.
+//! - [`broadcast`]: sending a finished transaction through lightwalletd.
+//! - [`trade`]: two-party bundle construction and proving.
+//! - [`pczt`]: PCZT role helpers (redact, sign, combine, extract).
 //! - [`policy`]: the seller-side checks that run before a signature is produced.
+//! - [`item`]: anchor, manifest, consignment encodings and item identity.
 //! - [`verify`]: keyless provenance verification from chain data.
-//! - [`pczt`]: PCZT role helpers (create, prove, redact, sign, extract).
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod broadcast;
 pub mod item;
 pub mod pczt;
 pub mod policy;
 pub mod trade;
 pub mod verify;
+pub mod wallet;
 
 /// Zcash mainnet coin type (ZIP 32).
 pub const COIN_TYPE_MAINNET: u32 = 133;
