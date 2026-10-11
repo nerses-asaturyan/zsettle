@@ -23,7 +23,25 @@ The buyer builds and proves the whole transaction holding only viewing keys. The
 | `zsettle` | buyer and verifier CLI: `list`, `sync`, `import-listing`, `buy`, `finish`, `broadcast`, `verify` |
 | `zsettle-seller` | seller service: `sync`, `mint`, `items`, `publish`, `sign`, `serve` (syncs, reconciles listings with the chain, verifies proofs, signs only the item action) |
 
-This branch targets the Zcash testnet (NU7) with the pre-release crates; see [docs/TESTNET.md](docs/TESTNET.md). The  branch targets mainnet.
+This branch targets the Zcash testnet (NU7) with the pre-release crates; see [docs/TESTNET.md](docs/TESTNET.md). The `main` branch targets mainnet.
+
+## Ten minutes, two terminals
+
+```
+# seller
+zsettle-seller mint    --wallet S --item-account I --payout-account P --identity S/key.txt --name "Item #1"
+zsettle-seller publish --wallet S --item-account I --payout-account P --identity S/key.txt --listings listings.json --item-note <txid>:<idx> --price 100000
+zsettle-seller serve   --wallet S --item-account I --payout-account P --identity S/key.txt --listings listings.json --inbox inbox --outbox outbox
+# buyer
+zsettle import-listing --wallet B --listings listings.json
+zsettle sync           --wallet B
+zsettle buy            --wallet B --buyer-account A --listings listings.json --item <txid>:<idx> --out trade.pczt --seller-copy inbox/trade.pczt
+zsettle finish         --wallet B --identity B/key.txt --full trade.pczt --signed outbox/trade.<tag>.signed.pczt --out trade.tx --broadcast
+# anyone
+zsettle verify --listings listings.json --item <txid>:<idx>
+```
+
+`S`, `B` are wallet directories, `I`, `P`, `A` account UUIDs from `zcash-devtool wallet list-accounts`. Every command prints one JSON line; `zsettle notes --wallet B --account A` shows what a wallet holds.
 
 See [docs/SETUP.md](docs/SETUP.md) for wallets, [docs/TRADE.md](docs/TRADE.md) for the full flow including resale, [spec/PROTOCOL.md](spec/PROTOCOL.md) and [spec/THREAT_MODEL.md](spec/THREAT_MODEL.md) for the design.
 

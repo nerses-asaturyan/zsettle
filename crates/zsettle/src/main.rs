@@ -217,6 +217,19 @@ enum Cmd {
         /// Stop scanning at this height (default: chain tip).
         #[arg(long)]
         to_height: Option<u32>,
+        /// Do not ask the server where the genesis transaction is (that reveals which item you
+        /// look at): scan from the listings' birthdays instead, and skip the item name.
+        #[arg(long)]
+        private: bool,
+    },
+    /// List the unspent Ironwood notes of an account of a wallet, dust included.
+    Notes {
+        /// Wallet directory.
+        #[arg(long)]
+        wallet: PathBuf,
+        /// Account UUID.
+        #[arg(long)]
+        account: String,
     },
 }
 
@@ -538,11 +551,31 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
+        Cmd::Notes { wallet, account } => {
+            let w = Wallet::open(&wallet)?;
+            let db = w.db()?;
+            let notes = zsettle_core::mint::unspent_notes(&w, &db, parse_account(&account)?)?;
+            for n in &notes {
+                println!(
+                    "{}  {:>10} zat  mined {}",
+                    n.note,
+                    n.value_zat,
+                    n.mined_height
+                        .map(|h| h.to_string())
+                        .unwrap_or_else(|| "pending".into())
+                );
+            }
+            if notes.is_empty() {
+                println!("(no unspent notes)");
+            }
+            Ok(())
+        }
         Cmd::Verify {
             listings,
             item,
             server,
             to_height,
+            private,
         } => {
             let mut network: Option<Network> = None;
             let mut consignments = Vec::with_capacity(listings.len());
@@ -571,6 +604,7 @@ fn main() -> Result<()> {
                 &consignments,
                 item,
                 to_height,
+                private,
             )?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())

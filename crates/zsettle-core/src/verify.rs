@@ -119,20 +119,31 @@ impl Keyring {
     }
 }
 
-/// Trace an item from its genesis note with the supplied consignments. Scanning starts at
-/// the earliest birthday; `to_height` defaults to the server's tip.
+/// Trace an item from its genesis note with the supplied consignments. By default the
+/// server is asked where the genesis transaction is, so scanning starts at that block and
+/// the item name can be read from the transaction; with `private` the server learns nothing
+/// about the item, scanning starts at the earliest birthday and the name is left out.
+/// `to_height` defaults to the server's tip.
 pub fn trace_blocking(
     server: &str,
     network: Network,
     consignments: &[Consignment],
     genesis: NoteRef,
     to_height: Option<u32>,
+    private: bool,
 ) -> Result<Provenance> {
     install_crypto_provider();
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(trace(server, network, consignments, genesis, to_height))
+        .block_on(trace(
+            server,
+            network,
+            consignments,
+            genesis,
+            to_height,
+            private,
+        ))
 }
 
 fn compact_action(
@@ -183,6 +194,7 @@ async fn trace(
     consignments: &[Consignment],
     genesis: NoteRef,
     to_height: Option<u32>,
+    private: bool,
 ) -> Result<Provenance> {
     if consignments.is_empty() {
         return Err(anyhow!(
@@ -204,22 +216,26 @@ async fn trace(
             u32::try_from(id.height)?
         }
     };
-    // The server knows where the genesis transaction is: start there instead of at the
-    // birthday, and keep its bytes for the name.
-    let raw = client
-        .get_transaction(TxFilter {
-            block: None,
-            index: 0,
-            hash: genesis.txid.as_ref().to_vec(),
-        })
-        .await
-        .map_err(|e| anyhow!("the server does not know the genesis transaction: {e}"))?
-        .into_inner();
-    let genesis_height = u32::try_from(raw.height)?;
-    if genesis_height == 0 {
-        return Err(anyhow!("the genesis transaction is not mined yet"));
-    }
-    let from_height = from_height.max(genesis_height);
+    // Unless privacy from the server matters, ask it where the genesis transaction is: start
+    // there instead of at the birthday, and keep the bytes for the name.
+    let (from_height, raw) = if private {
+        (from_height, None)
+    } else {
+        let raw = client
+            .get_transaction(TxFilter {
+                block: None,
+                index: 0,
+                hash: genesis.txid.as_ref().to_vec(),
+            })
+            .await
+            .map_err(|e| anyhow!("the server does not know the genesis transaction: {e}"))?
+            .into_inner();
+        let genesis_height = u32::try_from(raw.height)?;
+        if genesis_height == 0 {
+            return Err(anyhow!("the genesis transaction is not mined yet"));
+        }
+        (from_height.max(genesis_height), Some(raw.data))
+    };
     let genesis_txid = genesis.txid.to_string();
 
     let mut stream = client
@@ -320,11 +336,11 @@ async fn trace(
         .iter()
         .find(|k| Some(&k.label) == hops[0].holder.as_ref())
         .map(|k| &k.fvk);
-    let name = match genesis_key {
-        Some(fvk) => genesis_name(network, fvk, genesis, hops[0].height, &raw.data)
+    let name = match (genesis_key, raw.as_deref()) {
+        (Some(fvk), Some(raw)) => genesis_name(network, fvk, genesis, hops[0].height, raw)
             .ok()
             .flatten(),
-        None => None,
+        _ => None,
     };
 
     Ok(Provenance {

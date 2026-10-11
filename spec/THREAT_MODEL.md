@@ -6,7 +6,7 @@
 | Buyer withholds broadcast after seller signs | Seller's signature is a free option until expiry | expiry bounded by `max_expiry_delta` (default 40 blocks, the ecosystem default); the seller may cancel earlier by self-spending the item (one fee) |
 | Buyer submits a transaction with no expiry, or one already expired | Perpetual option, or a signature on a dead transaction | policy refuses expiry 0 and expiry at or below the tip |
 | Buyer alters the payment after seller signs | Impossible: ZIP 244 sighash commits every action's cv, nullifier, rk, cmx and ciphertext | protocol |
-| Buyer forges an envelope without owning any note | Seller signs for nothing; items could be tied up | the seller verifies the proof against the public inputs before signing, and no offer locks an item |
+| Buyer forges an envelope without owning any note | Seller signs for nothing; items could be tied up | the anchor must be one of the seller wallet's own recent tree roots and the proof is verified against it, so a proof over a synthetic tree is refused; no offer locks an item in any case |
 | Unredacted PCZT sent to seller | Seller learns buyer's full viewing key, witnesses and values | prove, then redact; the seller copy carries no buyer key material and no value trapdoors |
 | Seller solves the buyer's values from the value commitments | Seller learns the paying note's value and the change | `rcv` is removed from the seller copy; `cv_net` alone is hiding |
 | Seller asked to sign an extra spend | Theft of other seller notes | policy: exactly one seller-controlled spend, and it must be the listed item |
