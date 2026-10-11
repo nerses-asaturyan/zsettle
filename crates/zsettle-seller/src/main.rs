@@ -40,6 +40,9 @@ const MAX_BACKOFF_SECS: u64 = 300;
 /// Inbox files modified more recently than this are left for the next pass: they may still be
 /// in the middle of being written.
 const SETTLE_SECS: u64 = 2;
+/// Offers waiting in the inbox before the HTTP endpoint answers 503: bounds the disk a
+/// flood can fill to this many envelopes of at most 1 MiB.
+const MAX_PENDING_OFFERS: usize = 1_000;
 
 #[derive(Parser)]
 #[command(
@@ -1208,8 +1211,22 @@ fn serve_http(server: tiny_http::Server, inbox: &Path, outbox: &Path) {
         let response = match (request.method(), url.as_str()) {
             (Method::Post, "/offer") => {
                 let declared = request.body_length().unwrap_or(0) as u64;
+                let pending = fs::read_dir(inbox)
+                    .map(|d| {
+                        d.filter_map(|e| e.ok())
+                            .filter(|e| e.path().extension().is_some_and(|x| x == "pczt"))
+                            .count()
+                    })
+                    .unwrap_or(0);
                 let mut body = Vec::new();
-                let read = if declared > MAX_ENVELOPE_BYTES {
+                let read = if pending >= MAX_PENDING_OFFERS {
+                    let _ = request.respond(
+                        Response::from_string("too many offers waiting; try again later")
+                            .with_status_code(503)
+                            .with_header(server_header()),
+                    );
+                    continue;
+                } else if declared > MAX_ENVELOPE_BYTES {
                     Err(())
                 } else {
                     request
@@ -1269,8 +1286,13 @@ fn serve_http(server: tiny_http::Server, inbox: &Path, outbox: &Path) {
             _ => Response::from_string("zsettle seller: POST /offer, GET /reply/<tag>")
                 .with_status_code(404),
         };
-        let _ = request.respond(response);
+        let _ = request.respond(response.with_header(server_header()));
     }
+}
+
+/// A neutral `Server` header instead of the library's name and version.
+fn server_header() -> tiny_http::Header {
+    tiny_http::Header::from_bytes("Server", "zsettle").expect("header")
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
