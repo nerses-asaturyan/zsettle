@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/zsettle-core",
+    "crates/zsettle",
+    "crates/zsettle-seller",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/nerses-asaturyan/zsettle"
+authors = ["Nerses Asaturyan"]
+
+[workspace.dependencies]
+# Zcash stack (mainnet = NU6.3 Ironwood; keep on published crates)
+orchard = { version = "0.15", default-features = false, features = ["circuit", "std"] }
+pczt = { version = "0.9", features = ["orchard", "prover", "signer", "tx-extractor", "io-finalizer"] }
+incrementalmerkletree = "0.8"
+zip32 = "0.2"
+
+# general
+anyhow = "1"
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+blake2b_simd = "1"
+rand = "0.8"
+rand_chacha = "0.3"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[profile.release]
+debug = 1

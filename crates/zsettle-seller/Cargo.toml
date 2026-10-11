@@ -1,0 +1,20 @@
+[package]
+name = "zsettle-seller"
+description = "zsettle seller service: validates incoming trade envelopes against policy and signs only the item action"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "zsettle-seller"
+path = "src/main.rs"
+
+[dependencies]
+zsettle-core = { path = "../zsettle-core" }
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
