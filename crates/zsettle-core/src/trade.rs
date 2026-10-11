@@ -298,19 +298,32 @@ fn witness_error<E: std::fmt::Debug>(e: E, anchor_height: BlockHeight) -> anyhow
 
 /// One spend of a transfer: the account that owns the note, and the note.
 pub type Input = (AccountUuid, NoteRef);
-/// One output of a transfer: the account that receives it, at a fresh address and under its
-/// own outgoing key, and the value.
-pub type Output = (AccountUuid, u64);
+/// One output of a transfer. An internal output goes to the account's change address, which
+/// the wallet treats as its own (spendable after the confirmations it asks of change); an
+/// external one goes to a fresh diversified address and is visible to whoever holds the
+/// account's viewing key, as an item note must be.
+#[derive(Clone, Copy, Debug)]
+pub struct Output {
+    /// The receiving account.
+    pub account: AccountUuid,
+    /// Value in zatoshis.
+    pub value: u64,
+    /// Change address (internal scope) rather than a fresh external address.
+    pub internal: bool,
+}
 
 /// A proven transfer between accounts of one wallet. Every input is spent, every output goes
-/// to a fresh address of its account, and the inputs must exceed the outputs by exactly the
-/// ZIP 317 fee for the resulting number of actions. Outputs may be small: an item note is.
+/// to its account, and the inputs must exceed the outputs by exactly the ZIP 317 fee for the
+/// resulting number of actions. Outputs may be small: an item note is. With `pair_first` the
+/// first input and the first output must share an action (the item rule), so the bundle is
+/// rebuilt until the builder's shuffle puts them together.
 pub fn build_transfer(
     db: &mut Db,
     network: Network,
     inputs: &[Input],
     outputs: &[Output],
     min_confirmations: u32,
+    pair_first: bool,
 ) -> Result<SelfSpend> {
     if inputs.is_empty() || outputs.is_empty() {
         return Err(anyhow!(
@@ -333,17 +346,27 @@ pub fn build_transfer(
         total_in += n.note.value().inner();
         spends.push((fvk, n));
     }
-    let total_out: u64 = outputs.iter().map(|(_, v)| v).sum();
+    let total_out: u64 = outputs.iter().map(|o| o.value).sum();
     if total_in != total_out.saturating_add(fee) {
         return Err(anyhow!(
             "inputs ({total_in} zat) must equal outputs ({total_out} zat) plus the fee ({fee} zat)"
         ));
     }
     let mut outs = Vec::with_capacity(outputs.len());
-    for (account, value) in outputs {
-        let fvk = account_orchard_fvk(db, *account)?;
-        let to = next_orchard_address(db, *account)?;
-        outs.push((fvk.to_ovk(Scope::External), to, *value));
+    for o in outputs {
+        let fvk = account_orchard_fvk(db, o.account)?;
+        let (to, ovk) = if o.internal {
+            (
+                fvk.address_at(0u32, Scope::Internal),
+                fvk.to_ovk(Scope::Internal),
+            )
+        } else {
+            (
+                next_orchard_address(db, o.account)?,
+                fvk.to_ovk(Scope::External),
+            )
+        };
+        outs.push((ovk, to, o.value));
     }
     let (anchor, paths) = db
         .with_ironwood_tree_mut::<_, _, anyhow::Error>(|tree| {
@@ -364,36 +387,58 @@ pub fn build_transfer(
         .ok_or_else(|| anyhow!("wallet has no Ironwood commitment tree"))?;
     let target: BlockHeight = target_height.into();
     let expiry = target + DEFAULT_MAX_EXPIRY_DELTA;
-    let mut builder = Builder::new(
-        network,
-        target,
-        BuildConfig::Standard {
-            sapling_anchor: None,
-            orchard_anchor: None,
-            ironwood_anchor: Some(anchor),
-            orchard_padding: BundlePadding::DEFAULT,
-            ironwood_padding: BundlePadding::DEFAULT,
-        },
-    )
-    .with_expiry_height(expiry);
-    for ((fvk, n), path) in spends.into_iter().zip(paths) {
-        builder
-            .add_ironwood_spend::<FeeError>(fvk, n.note, path)
-            .map_err(|e| anyhow!("adding spend: {e:?}"))?;
-    }
-    for (ovk, to, value) in outs {
-        builder
-            .add_ironwood_output::<FeeError>(
-                Some(ovk),
-                to,
-                Zatoshis::from_u64(value).map_err(|_| anyhow!("value"))?,
-                MemoBytes::empty(),
-            )
-            .map_err(|e| anyhow!("adding output: {e:?}"))?;
-    }
-    let result = builder
-        .build_for_pczt(OsRng, &FeeRule::standard())
-        .map_err(|e| anyhow!("building transaction: {e:?}"))?;
+    let mut attempts = 0;
+    let result = loop {
+        attempts += 1;
+        let mut builder = Builder::new(
+            network,
+            target,
+            BuildConfig::Standard {
+                sapling_anchor: None,
+                orchard_anchor: None,
+                ironwood_anchor: Some(anchor),
+                orchard_padding: BundlePadding::DEFAULT,
+                ironwood_padding: BundlePadding::DEFAULT,
+            },
+        )
+        .with_expiry_height(expiry);
+        for ((fvk, n), path) in spends.iter().zip(&paths) {
+            builder
+                .add_ironwood_spend::<FeeError>(fvk.clone(), n.note, path.clone())
+                .map_err(|e| anyhow!("adding spend: {e:?}"))?;
+        }
+        for (ovk, to, value) in &outs {
+            builder
+                .add_ironwood_output::<FeeError>(
+                    Some(ovk.clone()),
+                    *to,
+                    Zatoshis::from_u64(*value).map_err(|_| anyhow!("value"))?,
+                    MemoBytes::empty(),
+                )
+                .map_err(|e| anyhow!("adding output: {e:?}"))?;
+        }
+        let result = builder
+            .build_for_pczt(OsRng, &FeeRule::standard())
+            .map_err(|e| anyhow!("building transaction: {e:?}"))?;
+        if !pair_first {
+            break result;
+        }
+        let meta = &result.ironwood_meta;
+        let first_spend = meta
+            .spend_action_index(0)
+            .ok_or_else(|| anyhow!("no action for the first spend"))?;
+        let first_output = meta
+            .output_action_index(0)
+            .ok_or_else(|| anyhow!("no action for the first output"))?;
+        if first_spend == first_output {
+            break result;
+        }
+        if attempts >= MAX_PAIRING_ATTEMPTS {
+            return Err(anyhow!(
+                "could not pair the first spend with the first output in {MAX_PAIRING_ATTEMPTS} attempts"
+            ));
+        }
+    };
     let pczt = Creator::build_from_parts(result.pczt_parts)
         .ok_or_else(|| anyhow!("PCZT creation failed"))?;
     let pczt = IoFinalizer::new(pczt)
@@ -434,8 +479,13 @@ pub fn build_self_spend(
         db,
         network,
         &[(account, note)],
-        &[(account, value - fee)],
+        &[Output {
+            account,
+            value: value - fee,
+            internal: true,
+        }],
         min_confirmations,
+        false,
     )
 }
 

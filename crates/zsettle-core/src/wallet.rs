@@ -375,25 +375,26 @@ pub fn import_viewing_key(
 /// (twice when `confirm`), otherwise one line of standard input.
 fn passphrase(confirm: bool) -> Result<age::secrecy::SecretString> {
     use std::io::IsTerminal;
-    let text = if let Ok(p) = std::env::var("ZSETTLE_PASSPHRASE") {
-        p
+    use zeroize::Zeroizing;
+    let text: Zeroizing<String> = if let Ok(p) = std::env::var("ZSETTLE_PASSPHRASE") {
+        Zeroizing::new(p)
     } else if std::io::stdin().is_terminal() {
-        let p = rpassword::prompt_password("Wallet passphrase: ")?;
-        if confirm && rpassword::prompt_password("Repeat passphrase: ")? != p {
+        let p = Zeroizing::new(rpassword::prompt_password("Wallet passphrase: ")?);
+        if confirm && Zeroizing::new(rpassword::prompt_password("Repeat passphrase: ")?) != p {
             return Err(anyhow!("the passphrases differ"));
         }
         p
     } else {
-        let mut line = String::new();
+        let mut line = Zeroizing::new(String::new());
         std::io::stdin().read_line(&mut line)?;
-        line.trim_end_matches(['\r', '\n']).to_string()
+        Zeroizing::new(line.trim_end_matches(['\r', '\n']).to_string())
     };
     if text.is_empty() {
         return Err(anyhow!(
             "empty passphrase (set ZSETTLE_PASSPHRASE, or run on a terminal to be asked)"
         ));
     }
-    Ok(age::secrecy::SecretString::new(text.into_boxed_str()))
+    Ok(age::secrecy::SecretString::new(text.as_str().into()))
 }
 
 /// A wallet directory just created by [`init_wallet`].
@@ -530,8 +531,7 @@ pub fn init_wallet(
         network: chain,
         birthday: birthday_height,
     };
-    fs::write(&keys_path, toml::to_string(&keys)?)
-        .with_context(|| format!("writing {}", keys_path.display()))?;
+    write_private(&keys_path, toml::to_string(&keys)?.as_bytes())?;
 
     let wallet = Wallet::open(dir)?;
     let mut db = wallet.db()?;
@@ -557,6 +557,22 @@ pub fn init_wallet(
         identity_created,
         accounts,
     })
+}
+
+/// Write a file readable by its owner only (on Unix), replacing any previous content.
+fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut f = options
+        .open(path)
+        .with_context(|| format!("writing {}", path.display()))?;
+    f.write_all(bytes)?;
+    Ok(())
 }
 
 /// Write a secret file readable by its owner only (on Unix) and never over an existing one.
@@ -718,8 +734,7 @@ fn read_reservations(wallet: &Wallet) -> Result<Reservations> {
 fn write_reservations(wallet: &Wallet, r: &Reservations) -> Result<()> {
     let path = wallet.dir.join(RESERVED_FILE);
     let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, serde_json::to_string_pretty(r)?)
-        .with_context(|| format!("writing {}", tmp.display()))?;
+    write_owner_only(&tmp, serde_json::to_string_pretty(r)?.as_bytes())?;
     fs::rename(&tmp, &path).with_context(|| format!("replacing {}", path.display()))
 }
 

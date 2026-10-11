@@ -43,6 +43,8 @@ pub struct ItemNote {
     pub value_zat: u64,
     /// Height the note was mined at, if known.
     pub mined_height: Option<u32>,
+    /// The memo, when it is text.
+    pub memo: Option<String>,
 }
 
 /// SQL condition that a spend recorded in transaction `tx` still counts: the transaction is
@@ -70,7 +72,7 @@ pub fn unspent_notes(wallet: &Wallet, db: &Db, account: AccountUuid) -> Result<V
     let conn = open_read_only(wallet)?;
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT t.txid, n.action_index, n.value, t.mined_height
+            "SELECT t.txid, n.action_index, n.value, t.mined_height, n.memo
              FROM ironwood_received_notes n
              JOIN transactions t ON t.id_tx = n.transaction_id
              JOIN accounts a ON a.id = n.account_id
@@ -92,13 +94,21 @@ pub fn unspent_notes(wallet: &Wallet, db: &Db, account: AccountUuid) -> Result<V
                 let index: u32 = row.get(1)?;
                 let value: i64 = row.get(2)?;
                 let mined: Option<u32> = row.get(3)?;
-                Ok((txid, index, value, mined))
+                let memo: Option<Vec<u8>> = row.get(4)?;
+                Ok((txid, index, value, mined, memo))
             },
         )
         .map_err(|e| anyhow!("{e}"))?;
     let mut out = Vec::new();
     for row in rows {
-        let (txid, index, value, mined_height) = row.map_err(|e| anyhow!("{e}"))?;
+        let (txid, index, value, mined_height, memo) = row.map_err(|e| anyhow!("{e}"))?;
+        let memo = memo
+            .and_then(|bytes| MemoBytes::from_bytes(&bytes).ok())
+            .and_then(|m| Memo::try_from(m).ok())
+            .and_then(|m| match m {
+                Memo::Text(t) => Some(t.to_string()),
+                _ => None,
+            });
         let txid: [u8; 32] = txid
             .try_into()
             .map_err(|_| anyhow!("bad txid in the wallet database"))?;
@@ -109,6 +119,7 @@ pub fn unspent_notes(wallet: &Wallet, db: &Db, account: AccountUuid) -> Result<V
             },
             value_zat: u64::try_from(value).unwrap_or(0),
             mined_height,
+            memo,
         });
     }
     Ok(out)

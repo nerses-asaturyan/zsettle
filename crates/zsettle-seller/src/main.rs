@@ -2,6 +2,8 @@
 //! envelopes against policy, verifies their proofs, and signs only the item action.
 
 use std::{
+    cell::RefCell,
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
     thread,
@@ -43,6 +45,16 @@ const SETTLE_SECS: u64 = 2;
 /// Offers waiting in the inbox before the HTTP endpoint answers 503: bounds the disk a
 /// flood can fill to this many envelopes of at most 1 MiB.
 const MAX_PENDING_OFFERS: usize = 1_000;
+/// Reason files kept under `rejected/`; beyond this, refusals are only logged.
+const MAX_REASON_FILES: usize = 10_000;
+/// Actions a trade can have: the item action, the payment, perhaps the buyer's change.
+const MAX_TRADE_ACTIONS: usize = 3;
+/// Connections the HTTP endpoint serves at once.
+const MAX_HTTP_CONNECTIONS: usize = 32;
+/// Request head the HTTP endpoint reads at most.
+const MAX_HTTP_HEAD: usize = 8 * 1024;
+/// Read and write timeout of one HTTP connection.
+const HTTP_TIMEOUT_SECS: u64 = 10;
 
 #[derive(Parser)]
 #[command(
@@ -581,24 +593,33 @@ fn main() -> Result<()> {
             let (target, _) = heights(&db, min_confirmations)?;
             let item_value = ironwood_note(&db, item_note, target)?.note.value().inner();
             let fee = zsettle_core::zip317_fee(2);
-            // A payout note that covers the fee exactly or leaves change above dust.
+            // The smallest payout note that covers the fee exactly or leaves change above dust.
             let mut exclude = Vec::new();
-            let (payout_note, payout_value) = loop {
-                let Some(n) = largest_spendable_note(&db, payout_account, target, &exclude)? else {
-                    return Err(anyhow!(
-                        "no payout note can pay the {fee} zat fee: it needs exactly {fee} zat or more than {} zat",
-                        fee + ZIP317_MARGINAL_FEE
-                    ));
-                };
+            let mut fitting = Vec::new();
+            while let Some(n) = largest_spendable_note(&db, payout_account, target, &exclude)? {
+                exclude.push(n);
                 let v = ironwood_note(&db, n, target)?.note.value().inner();
                 if v == fee || v > fee + ZIP317_MARGINAL_FEE {
-                    break (n, v);
+                    fitting.push((v, n));
                 }
-                exclude.push(n);
+            }
+            let Some(&(payout_value, payout_note)) = fitting.iter().min_by_key(|(v, _)| *v) else {
+                return Err(anyhow!(
+                    "no payout note can pay the {fee} zat fee: it needs exactly {fee} zat or more than {} zat",
+                    fee + ZIP317_MARGINAL_FEE
+                ));
             };
-            let mut outputs = vec![(item_account, item_value)];
+            let mut outputs = vec![zsettle_core::trade::Output {
+                account: item_account,
+                value: item_value,
+                internal: false,
+            }];
             if payout_value > fee {
-                outputs.push((payout_account, payout_value - fee));
+                outputs.push(zsettle_core::trade::Output {
+                    account: payout_account,
+                    value: payout_value - fee,
+                    internal: true,
+                });
             }
             let seed = wallet.seed(identity.as_deref())?;
             let usk_item = wallet.spending_key(&seed, w.item_account_index)?;
@@ -623,6 +644,7 @@ fn main() -> Result<()> {
                 &[(item_account, item_note), (payout_account, payout_note)],
                 &outputs,
                 min_confirmations,
+                true,
             )?;
             let item_ask = SpendAuthorizingKey::from(usk_item.orchard());
             let (pczt, n1) = pczt_ops::sign_matching_actions(built.pczt, &item_ask)?;
@@ -681,7 +703,7 @@ fn main() -> Result<()> {
             pczt_ops::verify_proof(&pczt, &vk).context("refused: proof")?;
             eprintln!("proof verified");
             let outcome = process(&db, &w, wallet.network, &l, &pczt, &anchors)?;
-            println!("{}", describe(&outcome.result));
+            eprintln!("{}", describe(&outcome.result));
             if outcome.item.is_none() && outcome.unavailable > 0 {
                 eprintln!(
                     "note: {} listed items are not spendable in this wallet right now (sold, unscanned, or too recent); the trade may be for one of them",
@@ -785,16 +807,17 @@ fn main() -> Result<()> {
                 server: &server,
                 no_sync,
                 sync_cmd: sync_cmd.as_deref(),
+                verified: RefCell::new(HashSet::new()),
             };
             if let Some(addr) = listen {
-                let http = tiny_http::Server::http(&addr)
-                    .map_err(|e| anyhow!("listening on {addr}: {e}"))?;
+                let listener = std::net::TcpListener::bind(&addr)
+                    .with_context(|| format!("listening on {addr}"))?;
                 println!(
                     "{}",
                     serde_json::json!({ "event": "listening", "address": addr })
                 );
                 let (inbox, outbox) = (inbox.clone(), outbox.clone());
-                thread::spawn(move || serve_http(http, &inbox, &outbox));
+                thread::spawn(move || serve_http(listener, inbox, outbox));
             }
             let poll = poll_secs.max(1);
             let mut delay = poll;
@@ -835,6 +858,9 @@ struct Service<'a> {
     server: &'a str,
     no_sync: bool,
     sync_cmd: Option<&'a str>,
+    /// Content tags whose proof this process has verified: a deferred envelope is not
+    /// verified again.
+    verified: RefCell<HashSet<String>>,
 }
 
 impl Service<'_> {
@@ -946,10 +972,25 @@ impl Service<'_> {
             "{}",
             serde_json::json!({ "event": "rejected", "file": path, "reason": reason })
         );
-        let dest = move_into(path, &self.inbox.join("rejected"))?;
-        let mut why = dest.into_os_string();
-        why.push(".reason.txt");
-        fs::write(why, reason)?;
+        // The buyer keeps the original; only the reason is kept here, and never more than
+        // MAX_REASON_FILES of them.
+        let rejected = self.inbox.join("rejected");
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("envelope")
+            .to_string();
+        let kept = fs::read_dir(&rejected).map(|d| d.count()).unwrap_or(0);
+        if kept < MAX_REASON_FILES {
+            let mut why = rejected.join(format!("{name}.reason.txt"));
+            let mut n = 1u32;
+            while why.exists() {
+                why = rejected.join(format!("{name}.{n}.reason.txt"));
+                n += 1;
+            }
+            fs::write(&why, &reason).with_context(|| format!("writing {}", why.display()))?;
+        }
+        fs::remove_file(path).with_context(|| format!("removing {}", path.display()))?;
         Ok(())
     }
 
@@ -964,14 +1005,23 @@ impl Service<'_> {
     ) -> std::result::Result<(ListedItem, Approved, Vec<u8>), Refusal> {
         let pczt = pczt_ops::from_bytes(bytes)
             .map_err(|e| Refusal::Reject(format!("unreadable: {e:#}")))?;
-        pczt_ops::verify_proof(&pczt, self.vk)
-            .map_err(|e| Refusal::Reject(format!("refused: {e:#}")))?;
+        // Cheap checks first. The proof is verified last and once per envelope, so an offer
+        // that fails anything else, or waits, costs this service nothing.
+        let actions = pczt_ops::action_count(&pczt)
+            .map_err(|e| Refusal::Reject(format!("unreadable: {e:#}")))?;
+        if actions > MAX_TRADE_ACTIONS {
+            return Err(Refusal::Reject(format!(
+                "refused: {actions} actions; a trade has two or three"
+            )));
+        }
         let expiry = *pczt.global().expiry_height();
         let outcome = match process(db, self.w, self.network, l, &pczt, anchors) {
             Ok(outcome) => outcome,
             // A failure of this pass rather than of the envelope: keep it while its
             // transaction can still be mined.
-            Err(e) if expiry != 0 => return Err(Refusal::Defer(format!("error: {e:#}"))),
+            Err(e) if expiry != 0 && expiry > last_tip(db) => {
+                return Err(Refusal::Defer(format!("error: {e:#}")))
+            }
             Err(e) => return Err(Refusal::Reject(format!("error: {e:#}"))),
         };
         if outcome.item.is_none() && outcome.unavailable > 0 && expiry > outcome.tip {
@@ -1004,12 +1054,23 @@ impl Service<'_> {
         let item = outcome.item.ok_or_else(|| {
             Refusal::Reject("error: approved trade without a listed item".to_string())
         })?;
+        let tag = pczt_ops::envelope_tag(bytes);
+        if !self.verified.borrow().contains(&tag) {
+            pczt_ops::verify_proof(&pczt, self.vk)
+                .map_err(|e| Refusal::Reject(format!("refused: {e:#}")))?;
+            self.verified.borrow_mut().insert(tag);
+        }
         let signed = pczt_ops::sign_ironwood_action(pczt, approved.item_action_index, self.ask)
             .map_err(|e| Refusal::Reject(format!("signing failed: {e:#}")))?;
         let bytes = pczt_ops::to_bytes(&signed)
             .map_err(|e| Refusal::Reject(format!("signing failed: {e:#}")))?;
         Ok((item, approved, bytes))
     }
+}
+
+/// The last height this wallet scanned, or zero.
+fn last_tip(db: &Db) -> u32 {
+    max_scanned_height(db).ok().flatten().unwrap_or(0)
 }
 
 /// Remove from the listings every item whose note the wallet has recorded as spent. A
@@ -1178,6 +1239,8 @@ fn run_sync_command(cmd: &str) -> Result<()> {
     let status = std::process::Command::new("sh")
         .arg("-c")
         .arg(cmd)
+        // A child must not inherit the wallet passphrase.
+        .env_remove("ZSETTLE_PASSPHRASE")
         .status()
         .context("starting the sync command")?;
     if !status.success() {
@@ -1200,99 +1263,206 @@ fn settled(entry: &fs::DirEntry, now: SystemTime) -> bool {
 }
 
 /// Write a file through a temporary name so readers never see a partial file.
-/// The HTTP face of the service: offers in, replies out. An envelope lands in the inbox under
-/// its content tag, so the directory loop handles it exactly like a dropped file, and each
-/// buyer can fetch only the reply to its own envelope.
-fn serve_http(server: tiny_http::Server, inbox: &Path, outbox: &Path) {
-    use std::io::Read;
-    use tiny_http::{Header, Method, Response};
-    for mut request in server.incoming_requests() {
-        let url = request.url().to_string();
-        let response = match (request.method(), url.as_str()) {
-            (Method::Post, "/offer") => {
-                let declared = request.body_length().unwrap_or(0) as u64;
-                let pending = fs::read_dir(inbox)
-                    .map(|d| {
-                        d.filter_map(|e| e.ok())
-                            .filter(|e| e.path().extension().is_some_and(|x| x == "pczt"))
-                            .count()
-                    })
-                    .unwrap_or(0);
-                let mut body = Vec::new();
-                let read = if pending >= MAX_PENDING_OFFERS {
-                    let _ = request.respond(
-                        Response::from_string("too many offers waiting; try again later")
-                            .with_status_code(503)
-                            .with_header(server_header()),
-                    );
-                    continue;
-                } else if declared > MAX_ENVELOPE_BYTES {
-                    Err(())
-                } else {
-                    request
-                        .as_reader()
-                        .take(MAX_ENVELOPE_BYTES + 1)
-                        .read_to_end(&mut body)
-                        .map_err(|_| ())
-                };
-                match read {
-                    Ok(_) if !body.is_empty() && body.len() as u64 <= MAX_ENVELOPE_BYTES => {
-                        let tag = pczt_ops::envelope_tag(&body);
-                        let path = inbox.join(format!("{tag}.pczt"));
-                        let stored = if path.exists() {
-                            Ok(())
-                        } else {
-                            write_atomic(&path, &body)
-                        };
-                        match stored {
-                            Ok(()) => Response::from_string(
-                                serde_json::json!({ "tag": tag, "reply": format!("/reply/{tag}") })
-                                    .to_string(),
-                            )
-                            .with_status_code(200),
-                            Err(e) => {
-                                Response::from_string(format!("cannot store the offer: {e:#}"))
-                                    .with_status_code(500)
-                            }
-                        }
-                    }
-                    _ => Response::from_string("the envelope must be between 1 byte and 1 MiB")
-                        .with_status_code(413),
-                }
-            }
-            (Method::Get, path) if path.starts_with("/reply/") => {
-                let tag = &path["/reply/".len()..];
-                if tag.len() != 32 || !tag.bytes().all(|b| b.is_ascii_hexdigit()) {
-                    Response::from_string("bad tag").with_status_code(400)
-                } else {
-                    let signed = outbox.join(format!("{tag}.{tag}.signed.pczt"));
-                    let reason = inbox
-                        .join("rejected")
-                        .join(format!("{tag}.pczt.reason.txt"));
-                    if let Ok(bytes) = fs::read(&signed) {
-                        Response::from_data(bytes)
-                            .with_status_code(200)
-                            .with_header(
-                                Header::from_bytes("Content-Type", "application/octet-stream")
-                                    .expect("header"),
-                            )
-                    } else if let Ok(why) = fs::read_to_string(&reason) {
-                        Response::from_string(why).with_status_code(410)
-                    } else {
-                        Response::from_string("pending").with_status_code(202)
-                    }
-                }
-            }
-            _ => Response::from_string("zsettle seller: POST /offer, GET /reply/<tag>")
-                .with_status_code(404),
-        };
-        let _ = request.respond(response.with_header(server_header()));
+/// The HTTP face of the service: offers in, replies out, with limits of its own: a request
+/// head of at most 8 KiB read with a timeout, bodies refused above 1 MiB before they are
+/// read, a bounded number of connections, one request per connection. An envelope lands in
+/// the inbox under its content tag, so the directory loop handles it like a dropped file,
+/// and each buyer can fetch only the reply to its own envelope.
+fn serve_http(listener: std::net::TcpListener, inbox: PathBuf, outbox: PathBuf) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let live = Arc::new(AtomicUsize::new(0));
+    for stream in listener.incoming() {
+        let Ok(mut stream) = stream else { continue };
+        if live.load(Ordering::Relaxed) >= MAX_HTTP_CONNECTIONS {
+            let _ = respond(&mut stream, 503, "text/plain", b"busy; try again later");
+            continue;
+        }
+        live.fetch_add(1, Ordering::Relaxed);
+        let (live, inbox, outbox) = (Arc::clone(&live), inbox.clone(), outbox.clone());
+        thread::spawn(move || {
+            handle_http(stream, &inbox, &outbox);
+            live.fetch_sub(1, Ordering::Relaxed);
+        });
     }
 }
 
-/// A neutral `Server` header instead of the library's name and version.
-fn server_header() -> tiny_http::Header {
-    tiny_http::Header::from_bytes("Server", "zsettle").expect("header")
+/// One HTTP request: `POST /offer` or `GET /reply/<tag>`.
+fn handle_http(mut stream: std::net::TcpStream, inbox: &Path, outbox: &Path) {
+    use std::io::Read;
+    let timeout = Some(Duration::from_secs(HTTP_TIMEOUT_SECS));
+    if stream.set_read_timeout(timeout).is_err() || stream.set_write_timeout(timeout).is_err() {
+        return;
+    }
+    let mut head = Vec::new();
+    let mut buf = [0u8; 1024];
+    let body_start = loop {
+        let n = match stream.read(&mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => n,
+        };
+        head.extend_from_slice(&buf[..n]);
+        if let Some(at) = find(&head, b"\r\n\r\n") {
+            break at + 4;
+        }
+        if head.len() > MAX_HTTP_HEAD {
+            let _ = respond(&mut stream, 431, "text/plain", b"request head too large");
+            return;
+        }
+    };
+    let (head_bytes, rest) = head.split_at(body_start);
+    let head_text = String::from_utf8_lossy(head_bytes);
+    let mut lines = head_text.lines();
+    let mut request_line = lines.next().unwrap_or("").split_whitespace();
+    let method = request_line.next().unwrap_or("");
+    let path = request_line.next().unwrap_or("");
+    let mut content_length: u64 = 0;
+    let mut expects_continue = false;
+    for line in lines {
+        if let Some((name, value)) = line.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("content-length") {
+                content_length = value.trim().parse().unwrap_or(u64::MAX);
+            } else if name.trim().eq_ignore_ascii_case("expect")
+                && value.trim().eq_ignore_ascii_case("100-continue")
+            {
+                expects_continue = true;
+            }
+        }
+    }
+    match (method, path) {
+        ("POST", "/offer") => {
+            if content_length == 0 || content_length > MAX_ENVELOPE_BYTES {
+                let _ = respond(
+                    &mut stream,
+                    413,
+                    "text/plain",
+                    b"the envelope must be between 1 byte and 1 MiB, with a Content-Length",
+                );
+                return;
+            }
+            let pending = fs::read_dir(inbox)
+                .map(|d| {
+                    d.filter_map(|e| e.ok())
+                        .filter(|e| e.path().extension().is_some_and(|x| x == "pczt"))
+                        .count()
+                })
+                .unwrap_or(0);
+            if pending >= MAX_PENDING_OFFERS {
+                let _ = respond(
+                    &mut stream,
+                    503,
+                    "text/plain",
+                    b"too many offers waiting; try again later",
+                );
+                return;
+            }
+            if expects_continue {
+                use std::io::Write;
+                if stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").is_err() {
+                    return;
+                }
+            }
+            let mut body = rest.to_vec();
+            body.truncate(content_length as usize);
+            while (body.len() as u64) < content_length {
+                let want = ((content_length - body.len() as u64) as usize).min(buf.len());
+                match stream.read(&mut buf[..want]) {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => body.extend_from_slice(&buf[..n]),
+                }
+            }
+            let tag = pczt_ops::envelope_tag(&body);
+            let file = inbox.join(format!("{tag}.pczt"));
+            let stored = if file.exists() {
+                Ok(())
+            } else {
+                write_atomic(&file, &body)
+            };
+            match stored {
+                Ok(()) => {
+                    let answer =
+                        serde_json::json!({ "tag": tag, "reply": format!("/reply/{tag}") });
+                    let _ = respond(
+                        &mut stream,
+                        200,
+                        "application/json",
+                        answer.to_string().as_bytes(),
+                    );
+                }
+                Err(e) => {
+                    let _ = respond(
+                        &mut stream,
+                        500,
+                        "text/plain",
+                        format!("cannot store the offer: {e:#}").as_bytes(),
+                    );
+                }
+            }
+        }
+        ("GET", p) if p.starts_with("/reply/") => {
+            let tag = &p["/reply/".len()..];
+            if tag.len() != 32
+                || !tag
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                let _ = respond(&mut stream, 400, "text/plain", b"bad tag");
+                return;
+            }
+            let signed = outbox.join(format!("{tag}.{tag}.signed.pczt"));
+            let reason = inbox
+                .join("rejected")
+                .join(format!("{tag}.pczt.reason.txt"));
+            if let Ok(bytes) = fs::read(&signed) {
+                let _ = respond(&mut stream, 200, "application/octet-stream", &bytes);
+            } else if let Ok(why) = fs::read_to_string(&reason) {
+                let _ = respond(&mut stream, 410, "text/plain", why.as_bytes());
+            } else {
+                let _ = respond(&mut stream, 202, "text/plain", b"pending");
+            }
+        }
+        _ => {
+            let _ = respond(
+                &mut stream,
+                404,
+                "text/plain",
+                b"zsettle seller: POST /offer, GET /reply/<tag>",
+            );
+        }
+    }
+}
+
+/// Write one HTTP/1.1 response and close.
+fn respond(
+    stream: &mut std::net::TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let reason = match status {
+        200 => "OK",
+        202 => "Accepted",
+        400 => "Bad Request",
+        404 => "Not Found",
+        410 => "Gone",
+        413 => "Payload Too Large",
+        431 => "Request Header Fields Too Large",
+        500 => "Internal Server Error",
+        503 => "Service Unavailable",
+        _ => "",
+    };
+    write!(
+        stream,
+        "HTTP/1.1 {status} {reason}\r\nServer: zsettle\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    )?;
+    stream.write_all(body)?;
+    stream.flush()
+}
+
+fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
