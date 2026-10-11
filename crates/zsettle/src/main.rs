@@ -7,13 +7,14 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use orchard::keys::SpendAuthorizingKey;
 use zcash_protocol::consensus::Network;
+use zsettle_core::broadcast::{check_consensus_blocking, server_info_blocking, DEFAULT_SERVER};
 use zsettle_core::listing::Listings;
 use zsettle_core::pczt as pczt_ops;
 use zsettle_core::trade::{build_trade, TradeRequest};
 use zsettle_core::verify::Consignment;
 use zsettle_core::wallet::{
     account_ufvk, find_account_by_ufvk, heights, import_viewing_key, largest_spendable_note,
-    parse_account, sync_blocking, NoteRef, Wallet,
+    parse_account, reserve_note, reserved_notes, sync_blocking, NoteRef, Wallet,
 };
 
 #[derive(Parser)]
@@ -29,7 +30,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Show the items in a listings file.
+    /// Show the items in a listings file and whether its signature checks out.
     List {
         /// Listings file published by a seller.
         #[arg(long)]
@@ -41,7 +42,7 @@ enum Cmd {
         #[arg(long)]
         wallet: PathBuf,
         /// lightwalletd server URL.
-        #[arg(long, default_value = zsettle_core::broadcast::DEFAULT_SERVER)]
+        #[arg(long, default_value = DEFAULT_SERVER)]
         server: String,
     },
     /// Import the item viewing key from a listings file into the buyer wallet (the consignment).
@@ -49,14 +50,14 @@ enum Cmd {
         /// Buyer wallet directory.
         #[arg(long)]
         wallet: PathBuf,
-        /// Listings file published by a seller.
+        /// Listings file published by a seller (must be signed).
         #[arg(long)]
         listings: PathBuf,
         /// Name for the imported view-only account.
         #[arg(long, default_value = "item-view")]
         name: String,
         /// lightwalletd server URL (for the account birthday).
-        #[arg(long, default_value = zsettle_core::broadcast::DEFAULT_SERVER)]
+        #[arg(long, default_value = DEFAULT_SERVER)]
         server: String,
     },
     /// Build, prove and redact a trade; writes the full PCZT and the seller's copy.
@@ -67,7 +68,7 @@ enum Cmd {
         /// UUID of the buyer's spending account.
         #[arg(long)]
         buyer_account: String,
-        /// Listings file; fills in the seller address, price and expiry for `--item`.
+        /// Listings file (must be signed); fills in the seller address, price and expiry for `--item`.
         #[arg(long)]
         listings: Option<PathBuf>,
         /// The item note, as <txid>:<output index>.
@@ -80,7 +81,8 @@ enum Cmd {
         /// Use a dedicated item account if you may resell the item later.
         #[arg(long)]
         receive_account: Option<String>,
-        /// The buyer's note that pays, as <txid>:<output index> (default: the largest spendable note).
+        /// The buyer's note that pays, as <txid>:<output index> (default: the largest spendable
+        /// note that is not reserved by an unsettled trade).
         #[arg(long)]
         buyer_note: Option<NoteRef>,
         /// Seller's unified address (taken from the listings when omitted).
@@ -98,13 +100,16 @@ enum Cmd {
         /// Memo for the payment output.
         #[arg(long, default_value = "")]
         memo: String,
-        /// Build the trade even if the listing marks the item as under offer.
+        /// lightwalletd server URL, asked which consensus branch is live before building.
+        #[arg(long, default_value = DEFAULT_SERVER)]
+        server: String,
+        /// Skip the consensus-branch check against the server.
         #[arg(long)]
-        force: bool,
-        /// Where to write the full PCZT (keep private).
+        offline: bool,
+        /// Where to write the full PCZT. It holds your viewing key and witnesses: keep it private.
         #[arg(long)]
         out: PathBuf,
-        /// Where to write the redacted copy for the seller.
+        /// Where to write the redacted copy for the seller (drop it in the seller's inbox).
         #[arg(long)]
         seller_copy: PathBuf,
     },
@@ -132,7 +137,7 @@ enum Cmd {
         #[arg(long)]
         broadcast: bool,
         /// lightwalletd server URL.
-        #[arg(long, default_value = zsettle_core::broadcast::DEFAULT_SERVER)]
+        #[arg(long, default_value = DEFAULT_SERVER)]
         server: String,
     },
     /// Broadcast a raw transaction file through a lightwalletd server.
@@ -140,8 +145,11 @@ enum Cmd {
         /// Raw transaction bytes, as written by `finish`.
         #[arg(long)]
         tx: PathBuf,
+        /// Network the transaction is for (`main` or `test`).
+        #[arg(long, default_value = "main")]
+        network: String,
         /// lightwalletd server URL.
-        #[arg(long, default_value = zsettle_core::broadcast::DEFAULT_SERVER)]
+        #[arg(long, default_value = DEFAULT_SERVER)]
         server: String,
     },
     /// Keyless provenance check of an item: trace it from its genesis note with the listings' viewing keys.
@@ -149,14 +157,14 @@ enum Cmd {
     /// Pass `--listings` once per holder the item has passed through; each file contributes
     /// one consignment and the trace follows the item across every resale it can decrypt.
     Verify {
-        /// Listings file(s) providing item viewing keys and birthdays.
+        /// Listings file(s) providing item viewing keys and birthdays (must be signed).
         #[arg(long, required = true)]
         listings: Vec<PathBuf>,
         /// Genesis note of the item, as <txid>:<output index>.
         #[arg(long)]
         item: NoteRef,
         /// lightwalletd server URL.
-        #[arg(long, default_value = zsettle_core::broadcast::DEFAULT_SERVER)]
+        #[arg(long, default_value = DEFAULT_SERVER)]
         server: String,
         /// Stop scanning at this height (default: chain tip).
         #[arg(long)]
@@ -172,6 +180,13 @@ fn parse_network(name: &str) -> Result<Network> {
     }
 }
 
+/// Refuse to send when the server is on a consensus branch this build does not sign for.
+fn check_server_before_sending(server: &str, network: Network) -> Result<()> {
+    let info = server_info_blocking(server)?;
+    check_consensus_blocking(server, network, info.block_height.saturating_add(1))?;
+    Ok(())
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -180,19 +195,19 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::List { listings } => {
             let l = Listings::read(&listings)?;
+            let signed = match l.verify_signature() {
+                Ok(()) => "signed by the item account's key".to_string(),
+                Err(e) => format!("NOT TRUSTWORTHY: {e}"),
+            };
             println!(
-                "network: {}  payout: {}…{}",
+                "network: {}  payout: {}…{}  {signed}",
                 l.network,
                 &l.payout_address[..12],
                 &l.payout_address[l.payout_address.len() - 6..]
             );
             for i in &l.items {
-                let state = match &i.pending {
-                    Some(p) => format!("  under offer until block {}", p.expiry_height),
-                    None => String::new(),
-                };
                 println!(
-                    "{}  {:>10} zat  expiry<= {:>3} blocks  {}{state}",
+                    "{}  {:>10} zat  expiry<= {:>3} blocks  {}",
                     i.note, i.price_zat, i.max_expiry_delta, i.name
                 );
             }
@@ -212,7 +227,10 @@ fn main() -> Result<()> {
             server,
         } => {
             let w = Wallet::open(&wallet)?;
-            let l = Listings::read(&listings)?;
+            let l = Listings::read_verified(&listings)?;
+            if l.network()? != w.network {
+                return Err(anyhow!("the listings file is for another network"));
+            }
             let mut db = w.db()?;
             if let Some(existing) = find_account_by_ufvk(&db, w.network, &l.item_ufvk)? {
                 println!(
@@ -248,24 +266,23 @@ fn main() -> Result<()> {
             expiry_delta,
             min_confirmations,
             memo,
-            force,
+            server,
+            offline,
             out,
             seller_copy,
         } => {
             let w = Wallet::open(&wallet)?;
             let mut db = w.db()?;
-            let l = listings.as_ref().map(|p| Listings::read(p)).transpose()?;
-            let listed = l
+            let l = listings
                 .as_ref()
-                .and_then(|l| l.find(&format!("{}:{}", item.txid, item.index)).cloned());
-            if let Some(p) = listed.as_ref().and_then(|i| i.pending.as_ref()) {
-                if !force {
-                    return Err(anyhow!(
-                        "the listing marks this item as under offer until block {}; pass --force to build a trade anyway",
-                        p.expiry_height
-                    ));
+                .map(|p| Listings::read_verified(p))
+                .transpose()?;
+            if let Some(l) = &l {
+                if l.network()? != w.network {
+                    return Err(anyhow!("the listings file is for another network"));
                 }
             }
+            let listed = l.as_ref().and_then(|l| l.find(&item.to_string()).cloned());
             let seller_address = seller
                 .or_else(|| l.as_ref().map(|l| l.payout_address.clone()))
                 .ok_or_else(|| anyhow!("--seller or --listings is required"))?;
@@ -290,13 +307,18 @@ fn main() -> Result<()> {
                 (None, None) => return Err(anyhow!("--item-account or --listings is required")),
             };
             let receive_account = receive_account.as_deref().map(parse_account).transpose()?;
+            let (target, _) = heights(&db, min_confirmations)?;
+            let target_height = u32::from(zcash_protocol::consensus::BlockHeight::from(target));
+            if !offline {
+                check_consensus_blocking(&server, w.network, target_height)?;
+            }
+            let reserved = reserved_notes(&w, target_height)?;
             let buyer_note = match buyer_note {
                 Some(n) => n,
-                None => {
-                    let (target, _) = heights(&db, min_confirmations)?;
-                    largest_spendable_note(&db, buyer_account, target)?
-                        .ok_or_else(|| anyhow!("no spendable note in the buyer account"))?
-                }
+                None => largest_spendable_note(&db, buyer_account, target, &reserved)?
+                    .ok_or_else(|| {
+                        anyhow!("no spendable note in the buyer account that is not reserved by an unsettled trade")
+                    })?,
             };
             let _ = account_ufvk(&db, buyer_account)?;
             let req = TradeRequest {
@@ -317,13 +339,20 @@ fn main() -> Result<()> {
                 .with_context(|| format!("writing {}", out.display()))?;
             let redacted =
                 pczt_ops::redact_for_seller(built.pczt.clone(), built.item_action_index)?;
-            fs::write(&seller_copy, pczt_ops::to_bytes(&redacted)?)
+            let envelope = pczt_ops::to_bytes(&redacted)?;
+            fs::write(&seller_copy, &envelope)
                 .with_context(|| format!("writing {}", seller_copy.display()))?;
+            reserve_note(&w, buyer_note, built.expiry_height)?;
+            let stem = seller_copy
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("trade");
+            let expect_signed = format!("{stem}.{}.signed.pczt", pczt_ops::envelope_tag(&envelope));
             println!(
                 "{}",
                 serde_json::json!({
-                    "item": format!("{}:{}", item.txid, item.index),
-                    "buyer_note": format!("{}:{}", buyer_note.txid, buyer_note.index),
+                    "item": item.to_string(),
+                    "buyer_note": buyer_note.to_string(),
                     "price_zat": price_zat,
                     "item_action_index": built.item_action_index,
                     "payment_action_index": built.payment_action_index,
@@ -334,6 +363,7 @@ fn main() -> Result<()> {
                     "receive_account": receive_account.map(|a| a.expose_uuid().to_string()),
                     "full_pczt": out,
                     "seller_copy": seller_copy,
+                    "expect_signed": expect_signed,
                 })
             );
             Ok(())
@@ -363,6 +393,7 @@ fn main() -> Result<()> {
             fs::write(&out, &bytes)?;
             let mut sent = serde_json::Value::Null;
             if broadcast {
+                check_server_before_sending(&server, w.network)?;
                 let msg =
                     zsettle_core::broadcast::send_raw_transaction_blocking(&server, bytes.clone())?;
                 sent = serde_json::json!({ "server": server, "response": msg });
@@ -380,8 +411,13 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
-        Cmd::Broadcast { tx, server } => {
+        Cmd::Broadcast {
+            tx,
+            network,
+            server,
+        } => {
             let bytes = fs::read(&tx).with_context(|| format!("reading {}", tx.display()))?;
+            check_server_before_sending(&server, parse_network(&network)?)?;
             let msg = zsettle_core::broadcast::send_raw_transaction_blocking(&server, bytes)?;
             println!(
                 "{}",
@@ -398,8 +434,8 @@ fn main() -> Result<()> {
             let mut network: Option<Network> = None;
             let mut consignments = Vec::with_capacity(listings.len());
             for path in &listings {
-                let l = Listings::read(path)?;
-                let net = parse_network(&l.network)?;
+                let l = Listings::read_verified(path)?;
+                let net = l.network()?;
                 match network {
                     None => network = Some(net),
                     Some(n) if n != net => {
@@ -407,15 +443,9 @@ fn main() -> Result<()> {
                     }
                     Some(_) => {}
                 }
-                let ufvk = zcash_keys::keys::UnifiedFullViewingKey::decode(&net, &l.item_ufvk)
-                    .map_err(|e| anyhow!("decoding item viewing key in {}: {e}", path.display()))?;
-                let fvk = ufvk.orchard().cloned().ok_or_else(|| {
-                    anyhow!("{} has no Orchard/Ironwood viewing key", path.display())
-                })?;
-                let label = path.display().to_string();
                 consignments.push(Consignment {
-                    label,
-                    fvk,
+                    label: path.display().to_string(),
+                    fvk: l.item_fvk()?,
                     birthday: l.item_birthday,
                 });
             }

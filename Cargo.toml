@@ -42,6 +42,7 @@ tonic = { version = "0.14", features = ["tls-ring", "tls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 async-trait = "0.1"
+pasta_curves = "0.5"
 
 # general
 anyhow = "1"

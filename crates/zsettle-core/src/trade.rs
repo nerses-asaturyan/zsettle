@@ -25,7 +25,7 @@ use zcash_protocol::consensus::{BlockHeight, Network};
 use zcash_protocol::memo::MemoBytes;
 use zcash_protocol::value::Zatoshis;
 
-use crate::wallet::{account_ufvk, heights, ironwood_note, Db, NoteRef};
+use crate::wallet::{account_ufvk, heights, ironwood_note, next_orchard_address, Db, NoteRef};
 use crate::{zip317_fee, DEFAULT_MAX_EXPIRY_DELTA};
 
 /// Everything the buyer needs to assemble a trade.
@@ -116,20 +116,32 @@ pub fn build_trade(db: &mut Db, network: Network, req: &TradeRequest) -> Result<
         ));
     }
 
-    // Fee and change. Two spends; outputs are item, payment and (maybe) change.
+    // Fee and change. Two spends; outputs are item, payment and (maybe) change. Fees are
+    // always the conventional ZIP 317 amount, so the transaction looks like any other.
     let fee_no_change = zip317_fee(2);
-    let (fee, change) = if payer_value == req.price_zat + fee_no_change {
+    let fee_with_change = zip317_fee(3);
+    let exact = req.price_zat + fee_no_change;
+    let (fee, change) = if payer_value == exact {
         (fee_no_change, 0)
     } else {
-        let fee = zip317_fee(3);
-        let needed = req.price_zat + fee;
+        let needed = req.price_zat + fee_with_change;
         if payer_value < needed {
             return Err(anyhow!(
-                "buyer note {payer_value} zat cannot cover price {} + fee {fee}",
+                "buyer note {payer_value} zat cannot cover price {} plus the {fee_with_change} zat fee of a \
+                 three-action transaction; pick a note (--buyer-note) worth at least {needed} zat, or exactly \
+                 {exact} zat for a two-action transaction",
                 req.price_zat
             ));
         }
-        (fee, payer_value - needed)
+        let change = payer_value - needed;
+        if change <= crate::ZIP317_MARGINAL_FEE {
+            return Err(anyhow!(
+                "the change of {change} zat would be dust that no wallet spends; pick a note (--buyer-note) \
+                 that leaves more than {} zat of change, or exactly {exact} zat for no change",
+                crate::ZIP317_MARGINAL_FEE
+            ));
+        }
+        (fee_with_change, change)
     };
 
     // Recipient addresses.
@@ -145,14 +157,10 @@ pub fn build_trade(db: &mut Db, network: Network, req: &TradeRequest) -> Result<
         }
         None => return Err(anyhow!("cannot decode seller address for this network")),
     };
-    let fvk_receive = match req.receive_account {
-        Some(account) => account_ufvk(db, account)?
-            .orchard()
-            .cloned()
-            .ok_or_else(|| anyhow!("receiving account has no Orchard/Ironwood key"))?,
-        None => fvk_buyer.clone(),
-    };
-    let buyer_item_addr = fvk_receive.address_at(0u32, Scope::External);
+    // The item goes to a fresh diversified address of the receiving account: nothing on
+    // chain links two purchases, or a purchase and the account's default address.
+    let buyer_item_addr =
+        next_orchard_address(db, req.receive_account.unwrap_or(req.buyer_account))?;
     let buyer_change_addr = fvk_buyer.address_at(0u32, Scope::Internal);
 
     // Anchor and witnesses at one checkpoint.
@@ -215,7 +223,7 @@ pub fn build_trade(db: &mut Db, network: Network, req: &TradeRequest) -> Result<
             .map_err(|e| anyhow!("adding buyer spend: {e:?}"))?;
         builder
             .add_ironwood_output::<FeeError>(
-                Some(fvk_item.to_ovk(Scope::External)),
+                Some(fvk_buyer.to_ovk(Scope::External)),
                 buyer_item_addr,
                 item_value_zat,
                 item_memo.clone(),

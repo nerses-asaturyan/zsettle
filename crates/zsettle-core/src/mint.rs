@@ -7,7 +7,6 @@
 use std::{num::NonZeroUsize, str::FromStr};
 
 use anyhow::{anyhow, Result};
-use orchard::keys::Scope;
 use rand_core::OsRng;
 use secrecy::SecretVec;
 use zcash_address::ZcashAddress;
@@ -34,7 +33,7 @@ use zcash_protocol::{
 };
 use zip321::{Payment, TransactionRequest};
 
-use crate::wallet::{account_ufvk, Db, NoteRef, Wallet};
+use crate::wallet::{next_orchard_address, Db, NoteRef, Wallet};
 
 /// An unspent note of the item account.
 #[derive(Clone, Debug)]
@@ -52,11 +51,7 @@ pub struct ItemNote {
 /// which is exactly where item notes live, so this reads the wallet's tables directly.
 pub fn unspent_notes(wallet: &Wallet, db: &Db, account: AccountUuid) -> Result<Vec<ItemNote>> {
     let tip = crate::wallet::max_scanned_height(db)?.unwrap_or(0);
-    let conn = rusqlite::Connection::open_with_flags(
-        wallet.dir.join("data.sqlite"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|e| anyhow!("opening wallet database: {e}"))?;
+    let conn = open_read_only(wallet)?;
     let mut stmt = conn
         .prepare(
             "SELECT t.txid, n.action_index, n.value, t.mined_height
@@ -105,15 +100,82 @@ pub fn unspent_notes(wallet: &Wallet, db: &Db, account: AccountUuid) -> Result<V
     Ok(out)
 }
 
-/// The item account's receiving address, as a unified address string.
-pub fn item_address(db: &Db, network: Network, item_account: AccountUuid) -> Result<String> {
-    let fvk = account_ufvk(db, item_account)?
-        .orchard()
-        .cloned()
-        .ok_or_else(|| anyhow!("item account has no Orchard/Ironwood key"))?;
-    let ua =
-        UnifiedAddress::from_receivers(Some(fvk.address_at(0u32, Scope::External)), None, None)
-            .ok_or_else(|| anyhow!("cannot build item address"))?;
+/// Whether a note of this wallet is unspent, spent, or unknown.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NoteState {
+    /// The wallet has never seen this note.
+    Unknown,
+    /// Received and not spent; `mined_height` is `None` while the creating transaction is unmined.
+    Unspent {
+        /// Height of the transaction that created the note.
+        mined_height: Option<u32>,
+    },
+    /// Spent by the given transaction (mined, or created by this wallet and not yet expired).
+    Spent {
+        /// Transaction id of the spend.
+        txid: String,
+    },
+}
+
+fn open_read_only(wallet: &Wallet) -> Result<rusqlite::Connection> {
+    rusqlite::Connection::open_with_flags(
+        wallet.dir.join("data.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| anyhow!("opening wallet database: {e}"))
+}
+
+/// The wallet's knowledge of one Ironwood note, read from its tables. Unlike
+/// [`crate::wallet::find_ironwood_note`], this distinguishes a note the wallet has recorded
+/// a spend for from one it merely cannot spend right now (unmined, reorged, not yet
+/// scanned).
+pub fn note_state(wallet: &Wallet, db: &Db, note: NoteRef) -> Result<NoteState> {
+    use rusqlite::OptionalExtension;
+    let tip = crate::wallet::max_scanned_height(db)?.unwrap_or(0);
+    let conn = open_read_only(wallet)?;
+    let row = conn
+        .query_row(
+            "SELECT t.mined_height, (
+                SELECT st.txid FROM ironwood_received_note_spends s
+                JOIN transactions st ON st.id_tx = s.transaction_id
+                WHERE s.ironwood_received_note_id = n.id
+                  AND (st.mined_height IS NOT NULL
+                       OR st.expiry_height IS NULL
+                       OR st.expiry_height = 0
+                       OR st.expiry_height >= ?3)
+                LIMIT 1)
+             FROM ironwood_received_notes n
+             JOIN transactions t ON t.id_tx = n.transaction_id
+             WHERE t.txid = ?1 AND n.action_index = ?2",
+            rusqlite::params![note.txid.as_ref().to_vec(), note.index, tip],
+            |row| {
+                let mined: Option<u32> = row.get(0)?;
+                let spent: Option<Vec<u8>> = row.get(1)?;
+                Ok((mined, spent))
+            },
+        )
+        .optional()
+        .map_err(|e| anyhow!("{e}"))?;
+    Ok(match row {
+        None => NoteState::Unknown,
+        Some((mined_height, None)) => NoteState::Unspent { mined_height },
+        Some((_, Some(spender))) => {
+            let bytes: [u8; 32] = spender
+                .try_into()
+                .map_err(|_| anyhow!("bad txid in the wallet database"))?;
+            NoteState::Spent {
+                txid: TxId::from_bytes(bytes).to_string(),
+            }
+        }
+    })
+}
+
+/// A fresh receiving address of the item account, as a unified address string with only
+/// an Orchard receiver. Each mint gets its own diversifier.
+pub fn item_address(db: &mut Db, network: Network, item_account: AccountUuid) -> Result<String> {
+    let addr = next_orchard_address(db, item_account)?;
+    let ua = UnifiedAddress::from_receivers(Some(addr), None, None)
+        .ok_or_else(|| anyhow!("cannot build item address"))?;
     Ok(ua.encode(&network))
 }
 

@@ -5,7 +5,10 @@
 - Two-party atomic settlement core: one Ironwood transaction with spends under two full viewing keys, proven by the buyer, signed per party, extracted and broadcast.
 - Buyer CLI: `list`, `sync`, `import-listing`, `buy`, `finish`, `broadcast`, `verify`.
 - Seller service: `sync`, `mint`, `items`, `publish`, `sign`, `serve`.
-- Seller policy with tests: expiry cap, single item spend, no extra seller spends, payment check.
-- Seller service hardening: built-in wallet sync before every pass, chain reconciliation of the listings (sold items removed, expired offers relisted), one offer per item, atomic writes, idempotent restart, retry with backoff.
+- Seller policy with tests: expiry bounds (set, after the tip, within the limit), single item spend, no extra seller spends, payment check.
+- Seller service hardening: built-in wallet sync before every pass, listings reconciled with the wallet's recorded spends, proof verification before signing, every acceptable offer signed (no lock to grief), replies named by envelope content, size cap and per-envelope quarantine, atomic writes, idempotent restart, retry with backoff.
+- Privacy: the new item note is encrypted to the buyer's outgoing key and sent to a fresh diversified address; the payout address is derived for the market; listings publish the Orchard viewing key only; the seller copy carries no value trapdoors; expiry and fees are the ecosystem defaults.
+- Signed listings: buyers verify the file against the published viewing key.
 - Resale: items can be received into a dedicated item account and relisted; `verify` follows an item across holders when given each holder's listings.
+- Consensus guard: build, mint and broadcast stop when the server is on a branch this build does not sign for.
 - Keyless provenance verification from compact blocks.

@@ -1,5 +1,5 @@
-//! `zsettle-seller`: the seller's half. Publishes listings, checks incoming trade envelopes
-//! against policy, and signs only the item action.
+//! `zsettle-seller`: the seller's half. Publishes signed listings, checks incoming trade
+//! envelopes against policy, verifies their proofs, and signs only the item action.
 
 use std::{
     fs,
@@ -10,16 +10,20 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
-use orchard::keys::{FullViewingKey, Scope, SpendAuthorizingKey};
+use orchard::circuit::VerifyingKey;
+use orchard::keys::{FullViewingKey, SpendAuthorizingKey};
 use orchard::note::Nullifier;
 use zcash_keys::address::UnifiedAddress;
-use zsettle_core::listing::{ListedItem, Listings, Pending};
+use zsettle_core::broadcast::{check_consensus_blocking, server_info_blocking, DEFAULT_SERVER};
+use zsettle_core::listing::{ListedItem, Listings};
+use zsettle_core::mint::{note_state, NoteState};
 use zsettle_core::pczt as pczt_ops;
 use zsettle_core::policy::{check, describe, prepared_ivk, Approved, PolicyError, SellerPolicy};
 use zsettle_core::wallet::{
-    account_ufvk, find_ironwood_note, heights, ironwood_note, max_scanned_height, parse_account,
-    sync_blocking, unspent_ironwood_nullifiers, Db, NoteRef, Wallet,
+    account_birthday, account_orchard_fvk, heights, ironwood_note, next_orchard_address,
+    parse_account, sync_blocking, unspent_ironwood_nullifiers, Db, NoteRef, Wallet,
 };
+use zsettle_core::{MAX_ENVELOPE_BYTES, MIN_PRICE_ZAT};
 
 /// Longest pause between passes after repeated failures.
 const MAX_BACKOFF_SECS: u64 = 300;
@@ -63,7 +67,7 @@ enum Cmd {
         #[arg(long)]
         wallet: PathBuf,
         /// lightwalletd server URL.
-        #[arg(long, default_value = zsettle_core::broadcast::DEFAULT_SERVER)]
+        #[arg(long, default_value = DEFAULT_SERVER)]
         server: String,
     },
     /// Mint an item: pay a small amount from the payout account to the item account, memo = name.
@@ -83,7 +87,7 @@ enum Cmd {
         #[arg(long, default_value_t = zsettle_core::item::MIN_ITEM_VALUE)]
         value: u64,
         /// lightwalletd server URL.
-        #[arg(long, default_value = zsettle_core::broadcast::DEFAULT_SERVER)]
+        #[arg(long, default_value = DEFAULT_SERVER)]
         server: String,
     },
     /// List the item account's unspent notes (the references to publish).
@@ -91,10 +95,13 @@ enum Cmd {
         #[command(flatten)]
         w: WalletArgs,
     },
-    /// Create or update the public listings file for this wallet's item account.
+    /// Create or update the signed public listings file for this wallet's item account.
     Publish {
         #[command(flatten)]
         w: WalletArgs,
+        /// age identity file that decrypts the seller wallet's mnemonic (signs the file).
+        #[arg(long)]
+        identity: PathBuf,
         /// Listings file to create or update.
         #[arg(long)]
         listings: PathBuf,
@@ -104,14 +111,14 @@ enum Cmd {
         /// Display name.
         #[arg(long, default_value = "")]
         name: String,
-        /// Price in zatoshis.
+        /// Price in zatoshis (more than 5,000: smaller payments are dust no wallet spends).
         #[arg(long)]
         price: u64,
         /// Maximum blocks between the chain tip and the transaction expiry.
         #[arg(long, default_value_t = zsettle_core::DEFAULT_MAX_EXPIRY_DELTA)]
         max_expiry_delta: u32,
     },
-    /// Check one trade PCZT against the listings and sign the item action.
+    /// Check one trade PCZT against the listings, verify its proof, and sign the item action.
     Sign {
         #[command(flatten)]
         w: WalletArgs,
@@ -133,29 +140,31 @@ enum Cmd {
     },
     /// Watch an inbox directory, sign every acceptable trade, and write results to an outbox.
     ///
-    /// Each pass syncs the wallet, reconciles the listings with the chain (sold items are
-    /// removed, expired offers are listed again), then handles every envelope in the inbox.
-    /// A failed pass is logged and retried with backoff; the service does not exit on its own.
+    /// Each pass syncs the wallet, removes sold items from the listings (re-signing the
+    /// file), then handles every envelope in the inbox: policy check, proof verification,
+    /// signature of the item action. Every acceptable offer is signed; the chain settles the
+    /// first one to be mined. A failed pass is logged and retried with backoff; the service
+    /// does not exit on its own.
     Serve {
         #[command(flatten)]
         w: WalletArgs,
         /// age identity file that decrypts the seller wallet's mnemonic.
         #[arg(long)]
         identity: PathBuf,
-        /// Listings file (kept in sync with the chain: sold items removed, offers tracked).
+        /// Listings file (kept in sync with the chain: sold items removed).
         #[arg(long)]
         listings: PathBuf,
         /// Directory watched for `*.pczt` envelopes.
         #[arg(long)]
         inbox: PathBuf,
-        /// Directory where `*.signed.pczt` files are written.
+        /// Directory where `<name>.<tag>.signed.pczt` replies are written.
         #[arg(long)]
         outbox: PathBuf,
         /// Seconds between passes.
         #[arg(long, default_value_t = 5)]
         poll_secs: u64,
         /// lightwalletd server URL for the built-in sync.
-        #[arg(long, default_value = zsettle_core::broadcast::DEFAULT_SERVER)]
+        #[arg(long, default_value = DEFAULT_SERVER)]
         server: String,
         /// Do not sync; something else keeps the wallet up to date.
         #[arg(long)]
@@ -192,6 +201,8 @@ fn main() -> Result<()> {
         } => {
             let wallet = Wallet::open(&w.wallet)?;
             let mut db = wallet.db()?;
+            let info = server_info_blocking(&server)?;
+            check_consensus_blocking(&server, wallet.network, info.block_height.saturating_add(1))?;
             let seed = wallet.seed(&identity)?;
             let req = zsettle_core::mint::MintRequest {
                 from_account: parse_account(&w.payout_account)?,
@@ -215,9 +226,8 @@ fn main() -> Result<()> {
                 zsettle_core::mint::unspent_notes(&wallet, &db, parse_account(&w.item_account)?)?;
             for n in &notes {
                 println!(
-                    "{}:{}  {:>8} zat  mined {}",
-                    n.note.txid,
-                    n.note.index,
+                    "{}  {:>8} zat  mined {}",
+                    n.note,
                     n.value_zat,
                     n.mined_height
                         .map(|h| h.to_string())
@@ -231,57 +241,64 @@ fn main() -> Result<()> {
         }
         Cmd::Publish {
             w,
+            identity,
             listings,
             item_note,
             name,
             price,
             max_expiry_delta,
         } => {
+            if price < MIN_PRICE_ZAT {
+                return Err(anyhow!(
+                    "price must be at least {MIN_PRICE_ZAT} zat: a payment at or below the ZIP 317 marginal fee is dust that no wallet spends"
+                ));
+            }
             let wallet = Wallet::open(&w.wallet)?;
-            let db = wallet.db()?;
-            let item_ufvk = account_ufvk(&db, parse_account(&w.item_account)?)?;
-            let payout_fvk = payout_key(&db, &w)?;
-            let payout_ua = UnifiedAddress::from_receivers(
-                Some(payout_fvk.address_at(0u32, Scope::External)),
-                None,
-                None,
-            )
-            .ok_or_else(|| anyhow!("cannot build payout address"))?;
+            let mut db = wallet.db()?;
+            let item_account = parse_account(&w.item_account)?;
+            let item_fvk = account_orchard_fvk(&db, item_account)?;
             // Make sure the note exists and is ours before listing it.
             let (target, _) = heights(&db, 1)?;
             let note = ironwood_note(&db, item_note, target)?;
-            let fvk = item_ufvk
-                .orchard()
-                .ok_or_else(|| anyhow!("item account has no Orchard/Ironwood key"))?;
-            if fvk.scope_for_address(&note.note.recipient()).is_none() {
-                return Err(anyhow!(
-                    "note {} is not owned by the item account",
-                    item_note_str(&item_note)
-                ));
+            if item_fvk.scope_for_address(&note.note.recipient()).is_none() {
+                return Err(anyhow!("note {item_note} is not owned by the item account"));
             }
             let mut l = if listings.exists() {
-                Listings::read(&listings)?
+                let l = Listings::read(&listings)?;
+                if l.item_fvk()? != item_fvk {
+                    return Err(anyhow!(
+                        "{} belongs to another item account",
+                        listings.display()
+                    ));
+                }
+                l
             } else {
+                // A payout address derived for the market, not the account's default address.
+                let payout = next_orchard_address(&mut db, parse_account(&w.payout_account)?)?;
+                let payout_ua = UnifiedAddress::from_receivers(Some(payout), None, None)
+                    .ok_or_else(|| anyhow!("cannot build payout address"))?;
                 Listings {
                     version: 1,
                     network: network_name(wallet.network).into(),
-                    item_ufvk: item_ufvk.encode(&wallet.network),
-                    item_birthday: wallet.birthday,
+                    item_ufvk: Listings::encode_item_key(&item_fvk, wallet.network)?,
+                    item_birthday: account_birthday(&db, item_account)?,
                     payout_address: payout_ua.encode(&wallet.network),
                     items: vec![],
+                    signature: None,
                 }
             };
             l.upsert(ListedItem {
-                note: item_note_str(&item_note),
+                note: item_note.to_string(),
                 name,
                 price_zat: price,
                 max_expiry_delta,
-                pending: None,
             });
+            let ask = item_ask(&wallet, &identity, w.item_account_index)?;
+            l.sign(&ask)?;
             l.write(&listings)?;
             println!(
                 "{}",
-                serde_json::json!({ "listings": listings, "items": l.items.len() })
+                serde_json::json!({ "listings": listings, "items": l.items.len(), "signed": true })
             );
             Ok(())
         }
@@ -296,25 +313,22 @@ fn main() -> Result<()> {
             let wallet = Wallet::open(&w.wallet)?;
             let db = wallet.db()?;
             let l = Listings::read(&listings)?;
-            let pczt = pczt_ops::from_bytes(
-                &fs::read(&input).with_context(|| format!("reading {}", input.display()))?,
-            )?;
+            let bytes = fs::read(&input).with_context(|| format!("reading {}", input.display()))?;
+            let pczt = pczt_ops::from_bytes(&bytes)?;
             let outcome = process(&db, &w, &l, &pczt)?;
             println!("{}", describe(&outcome.result));
             let (item, approved) = match outcome.result {
                 Ok(a) => (outcome.item.expect("matched item"), a),
                 Err(e) => return Err(zsettle_core::policy::into_anyhow(e)),
             };
+            let vk = pczt_ops::verifying_key();
+            pczt_ops::verify_proof(&pczt, &vk).context("refused: proof")?;
+            println!("proof verified");
             if dry_run {
                 return Ok(());
             }
-            let signed = sign(
-                &wallet,
-                &identity,
-                w.item_account_index,
-                pczt,
-                approved.item_action_index,
-            )?;
+            let ask = item_ask(&wallet, &identity, w.item_account_index)?;
+            let signed = pczt_ops::sign_ironwood_action(pczt, approved.item_action_index, &ask)?;
             fs::write(&out, pczt_ops::to_bytes(&signed)?)
                 .with_context(|| format!("writing {}", out.display()))?;
             println!(
@@ -353,19 +367,19 @@ fn main() -> Result<()> {
             let wallet = Wallet::open(&w.wallet)?;
             {
                 let db = wallet.db()?;
-                account_ufvk(&db, parse_account(&w.item_account)?)?;
+                account_orchard_fvk(&db, parse_account(&w.item_account)?)?;
                 payout_key(&db, &w)?;
             }
-            wallet
-                .seed(&identity)
+            let ask = item_ask(&wallet, &identity, w.item_account_index)
                 .context("the identity file does not decrypt this wallet's mnemonic")?;
             let l = Listings::read(&listings)?;
+            let vk = pczt_ops::verifying_key();
             println!(
                 "{}",
                 serde_json::json!({
                     "event": "start",
                     "listed": l.items.len(),
-                    "under_offer": l.items.iter().filter(|i| i.pending.is_some()).count(),
+                    "signed": l.verify_signature().is_ok(),
                     "inbox": inbox,
                     "outbox": outbox,
                     "sync": if sync_cmd.is_some() { "command" } else if no_sync { "off" } else { "built-in" },
@@ -374,7 +388,8 @@ fn main() -> Result<()> {
             );
             let service = Service {
                 w: &w,
-                identity: &identity,
+                ask: &ask,
+                vk: &vk,
                 listings: &listings,
                 inbox: &inbox,
                 outbox: &outbox,
@@ -412,7 +427,8 @@ fn main() -> Result<()> {
 /// One running seller service.
 struct Service<'a> {
     w: &'a WalletArgs,
-    identity: &'a Path,
+    ask: &'a SpendAuthorizingKey,
+    vk: &'a VerifyingKey,
     listings: &'a Path,
     inbox: &'a Path,
     outbox: &'a Path,
@@ -422,7 +438,9 @@ struct Service<'a> {
 }
 
 impl Service<'_> {
-    /// One pass: sync, reconcile the listings with the chain, handle every envelope.
+    /// One pass: sync, reconcile the listings with the chain, handle every envelope. An
+    /// envelope that cannot be handled is logged and left for the next pass; it never fails
+    /// the pass for the others.
     fn pass(&self) -> Result<()> {
         if let Some(cmd) = self.sync_cmd {
             run_sync_command(cmd)?;
@@ -433,11 +451,17 @@ impl Service<'_> {
             sync_blocking(&wallet, &mut db, self.server).context("syncing the seller wallet")?;
         }
         let mut l = Listings::read(self.listings)?;
-        if reconcile(&db, &mut l)? {
+        if reconcile(&wallet, &db, &mut l)? {
+            l.sign(self.ask)?;
             l.write(self.listings)?;
         }
         for path in self.envelopes()? {
-            self.handle(&wallet, &db, &mut l, &path)?;
+            if let Err(e) = self.handle(&db, &l, &path) {
+                println!(
+                    "{}",
+                    serde_json::json!({ "event": "error", "file": path, "error": format!("{e:#}") })
+                );
+            }
         }
         Ok(())
     }
@@ -456,14 +480,24 @@ impl Service<'_> {
         Ok(paths)
     }
 
-    /// Handle one envelope: sign it or reject it, record the outcome, move the file.
-    fn handle(&self, wallet: &Wallet, db: &Db, l: &mut Listings, path: &Path) -> Result<()> {
+    /// Handle one envelope: sign it or reject it, record the outcome, move the file. The
+    /// reply is named after the envelope and a tag of its content, so two envelopes with
+    /// the same name never collide and the same envelope always gets the same reply.
+    fn handle(&self, db: &Db, l: &Listings, path: &Path) -> Result<()> {
         let stem = path
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("trade")
             .to_string();
-        let out = self.outbox.join(format!("{stem}.signed.pczt"));
+        let size = fs::metadata(path)
+            .with_context(|| format!("reading {}", path.display()))?
+            .len();
+        if size > MAX_ENVELOPE_BYTES {
+            return self.reject(path, &stem, format!("too large: {size} bytes"));
+        }
+        let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        let tag = pczt_ops::envelope_tag(&bytes);
+        let out = self.outbox.join(format!("{stem}.{tag}.signed.pczt"));
         if out.exists() {
             // Signed in an earlier pass that stopped before moving the envelope.
             println!(
@@ -472,17 +506,9 @@ impl Service<'_> {
             );
             return move_into(path, &self.inbox.join("done"));
         }
-        match self.sign_envelope(wallet, db, l, path) {
-            Ok((item, approved, bytes)) => {
-                write_atomic(&out, &bytes)?;
-                l.set_pending(
-                    &item.note,
-                    Pending {
-                        expiry_height: approved.expiry_height,
-                        trade: stem.clone(),
-                    },
-                );
-                l.write(self.listings)?;
+        match self.sign_envelope(db, l, &bytes) {
+            Ok((item, approved, signed)) => {
+                write_atomic(&out, &signed)?;
                 move_into(path, &self.inbox.join("done"))?;
                 println!(
                     "{}",
@@ -492,58 +518,52 @@ impl Service<'_> {
                         "expiry_height": approved.expiry_height, "out": out,
                     })
                 );
+                Ok(())
             }
-            Err(reason) => {
-                println!(
-                    "{}",
-                    serde_json::json!({ "event": "rejected", "file": path, "reason": reason })
-                );
-                let rejected = self.inbox.join("rejected");
-                move_into(path, &rejected)?;
-                fs::write(rejected.join(format!("{stem}.reason.txt")), reason)?;
-            }
+            Err(reason) => self.reject(path, &stem, reason),
         }
+    }
+
+    fn reject(&self, path: &Path, stem: &str, reason: String) -> Result<()> {
+        println!(
+            "{}",
+            serde_json::json!({ "event": "rejected", "file": path, "reason": reason })
+        );
+        let rejected = self.inbox.join("rejected");
+        move_into(path, &rejected)?;
+        fs::write(rejected.join(format!("{stem}.reason.txt")), reason)?;
         Ok(())
     }
 
-    /// Read, check and sign one envelope. The error is the reason recorded for the buyer.
+    /// Parse, check, verify the proof of, and sign one envelope. The error is the reason
+    /// recorded for the buyer.
     fn sign_envelope(
         &self,
-        wallet: &Wallet,
         db: &Db,
         l: &Listings,
-        path: &Path,
+        bytes: &[u8],
     ) -> std::result::Result<(ListedItem, Approved, Vec<u8>), String> {
-        let bytes = fs::read(path).map_err(|e| format!("unreadable: {e}"))?;
-        let pczt = pczt_ops::from_bytes(&bytes).map_err(|e| format!("unreadable: {e:#}"))?;
+        let pczt = pczt_ops::from_bytes(bytes).map_err(|e| format!("unreadable: {e:#}"))?;
         let outcome = process(db, self.w, l, &pczt).map_err(|e| format!("error: {e:#}"))?;
         let approved = outcome.result.map_err(|e| format!("refused: {e}"))?;
         let item = outcome
             .item
             .ok_or_else(|| "error: approved trade without a listed item".to_string())?;
-        let signed = sign(
-            wallet,
-            self.identity,
-            self.w.item_account_index,
-            pczt,
-            approved.item_action_index,
-        )
-        .map_err(|e| format!("signing failed: {e:#}"))?;
+        pczt_ops::verify_proof(&pczt, self.vk).map_err(|e| format!("refused: {e:#}"))?;
+        let signed = pczt_ops::sign_ironwood_action(pczt, approved.item_action_index, self.ask)
+            .map_err(|e| format!("signing failed: {e:#}"))?;
         let bytes = pczt_ops::to_bytes(&signed).map_err(|e| format!("signing failed: {e:#}"))?;
         Ok((item, approved, bytes))
     }
 }
 
-/// Bring the listings in line with the wallet's view of the chain. Items whose note is no
-/// longer spendable are removed (sold through the service, or spent some other way); offers
-/// whose expiry height has been scanned with the note still unspent are listed again.
+/// Remove from the listings every item whose note the wallet has recorded as spent. A
+/// note the wallet cannot see right now (reorged, unscanned, reset wallet) stays listed.
 /// Returns whether anything changed.
-fn reconcile(db: &Db, l: &mut Listings) -> Result<bool> {
-    let (target, _) = heights(db, 1)?;
-    let scanned = max_scanned_height(db)?;
+fn reconcile(wallet: &Wallet, db: &Db, l: &mut Listings) -> Result<bool> {
     let mut changed = false;
     let mut kept = Vec::with_capacity(l.items.len());
-    for mut item in std::mem::take(&mut l.items) {
+    for item in std::mem::take(&mut l.items) {
         let Ok(r) = item.note_ref() else {
             println!(
                 "{}",
@@ -552,38 +572,28 @@ fn reconcile(db: &Db, l: &mut Listings) -> Result<bool> {
             changed = true;
             continue;
         };
-        if find_ironwood_note(db, r, target)?.is_none() {
-            let event = if item.pending.is_some() {
-                "sold"
-            } else {
-                "spent_elsewhere"
-            };
-            println!(
-                "{}",
-                serde_json::json!({ "event": event, "item": item.note, "name": item.name })
-            );
-            changed = true;
-            continue;
-        }
-        let expired = match (&item.pending, scanned) {
-            (Some(p), Some(h)) => h >= p.expiry_height,
-            _ => false,
-        };
-        if expired {
-            if let Some(p) = item.pending.take() {
+        match note_state(wallet, db, r)? {
+            NoteState::Spent { txid } => {
                 println!(
                     "{}",
-                    serde_json::json!({
-                        "event": "relisted", "item": item.note, "name": item.name,
-                        "expired_trade": p.trade, "expiry_height": p.expiry_height,
-                    })
+                    serde_json::json!({ "event": "sold", "item": item.note, "name": item.name, "txid": txid })
                 );
                 changed = true;
             }
+            NoteState::Unknown => {
+                println!(
+                    "{}",
+                    serde_json::json!({ "event": "not_in_wallet", "item": item.note, "name": item.name })
+                );
+                kept.push(item);
+            }
+            NoteState::Unspent { .. } => kept.push(item),
         }
-        kept.push(item);
     }
     l.items = kept;
+    if changed {
+        l.signature = None;
+    }
     Ok(changed)
 }
 
@@ -597,10 +607,7 @@ fn process(db: &Db, w: &WalletArgs, l: &Listings, pczt: &pczt::Pczt) -> Result<O
     let (target, _) = heights(db, 1)?;
     let tip: u32 =
         u32::from(zcash_protocol::consensus::BlockHeight::from(target)).saturating_sub(1);
-    let item_fvk = account_ufvk(db, parse_account(&w.item_account)?)?
-        .orchard()
-        .cloned()
-        .ok_or_else(|| anyhow!("item account has no Orchard/Ironwood key"))?;
+    let item_fvk = account_orchard_fvk(db, parse_account(&w.item_account)?)?;
     let seller_nfs = unspent_ironwood_nullifiers(db)?;
     let trade_nfs = pczt_ops::action_nullifiers(pczt)?;
     // Which listed item does this trade spend?
@@ -625,13 +632,6 @@ fn process(db: &Db, w: &WalletArgs, l: &Listings, pczt: &pczt::Pczt) -> Result<O
             result: Err(PolicyError::ItemNotSpent),
         });
     };
-    if let Some(p) = &item.pending {
-        let until = p.expiry_height;
-        return Ok(Outcome {
-            item: Some(item),
-            result: Err(PolicyError::UnderOffer { until }),
-        });
-    }
     let ivk = prepared_ivk(&payout_key(db, w)?);
     let policy = SellerPolicy {
         price_zat: item.price_zat,
@@ -645,24 +645,19 @@ fn process(db: &Db, w: &WalletArgs, l: &Listings, pczt: &pczt::Pczt) -> Result<O
     })
 }
 
-fn sign(
+/// The item account's spend authorizing key, derived from the encrypted seed.
+fn item_ask(
     wallet: &Wallet,
     identity: &Path,
     item_account_index: u32,
-    pczt: pczt::Pczt,
-    index: usize,
-) -> Result<pczt::Pczt> {
+) -> Result<SpendAuthorizingKey> {
     let seed = wallet.seed(identity)?;
     let usk = wallet.spending_key(&seed, item_account_index)?;
-    let ask = SpendAuthorizingKey::from(usk.orchard());
-    pczt_ops::sign_ironwood_action(pczt, index, &ask)
+    Ok(SpendAuthorizingKey::from(usk.orchard()))
 }
 
 fn payout_key(db: &Db, w: &WalletArgs) -> Result<FullViewingKey> {
-    account_ufvk(db, parse_account(&w.payout_account)?)?
-        .orchard()
-        .cloned()
-        .ok_or_else(|| anyhow!("payout account has no Orchard/Ironwood key"))
+    account_orchard_fvk(db, parse_account(&w.payout_account)?)
 }
 
 fn run_sync_command(cmd: &str) -> Result<()> {
@@ -700,10 +695,6 @@ fn move_into(path: &Path, dir: &Path) -> Result<()> {
         .ok_or_else(|| anyhow!("{} has no file name", path.display()))?;
     fs::rename(path, dir.join(name))
         .with_context(|| format!("moving {} to {}", path.display(), dir.display()))
-}
-
-fn item_note_str(r: &NoteRef) -> String {
-    format!("{}:{}", r.txid, r.index)
 }
 
 fn network_name(n: zcash_protocol::consensus::Network) -> &'static str {

@@ -1,7 +1,8 @@
 //! Seller-side policy: every check that must pass before the seller signs the item action.
 //!
 //! The checks, in order:
-//! 1. expiry height is within `max_expiry_delta` of the current chain tip;
+//! 1. the expiry height is set, lies after the current chain tip and within
+//!    `max_expiry_delta` of it;
 //! 2. exactly one action spends the listed item note (matched by nullifier) and that
 //!    action carries a spend randomizer, so it can be signed; no other action spends any
 //!    note of the seller's wallet;
@@ -9,6 +10,10 @@
 //!    listed price;
 //! 4. the signer itself enforces `rk == randomize(ak, alpha)` for the action it signs, so the
 //!    seller can never be tricked into authorizing a spend of a different note.
+//!
+//! The proof is checked separately (`crate::pczt::verify_proof`) so that a forged envelope
+//! cannot even obtain a signature. Many offers for one item may be signed; only one can be
+//! mined, since every one of them spends the same nullifier.
 
 use std::cell::RefCell;
 
@@ -44,6 +49,17 @@ pub enum PolicyError {
         /// Listed price.
         want: u64,
     },
+    /// The transaction never expires (expiry height 0): the signature would be a perpetual option.
+    #[error("the transaction has no expiry height; a signature would never lapse")]
+    NoExpiry,
+    /// The expiry height is not after the chain tip the seller sees.
+    #[error("expiry height {expiry} is not after the chain tip {tip}")]
+    Expired {
+        /// Expiry height in the PCZT.
+        expiry: u32,
+        /// Current chain tip the seller sees.
+        tip: u32,
+    },
     /// Expiry too far in the future (free option for the buyer).
     #[error("expiry height {expiry} exceeds tip {tip} by more than {max_delta} blocks")]
     ExpiryTooLong {
@@ -53,12 +69,6 @@ pub enum PolicyError {
         tip: u32,
         /// Policy limit.
         max_delta: u32,
-    },
-    /// A signed trade for this item is still outstanding; the seller honours one at a time.
-    #[error("the item is under offer until block {until}; retry after that height")]
-    UnderOffer {
-        /// Height after which the outstanding trade can no longer be mined.
-        until: u32,
     },
     /// The PCZT cannot be parsed as an Ironwood bundle.
     #[error("invalid Ironwood bundle: {0}")]
@@ -96,6 +106,16 @@ pub fn check(
     policy: &SellerPolicy,
 ) -> Result<Approved, PolicyError> {
     let expiry = *pczt.global().expiry_height();
+    // ZIP 203: an expiry height of zero means the transaction never expires.
+    if expiry == 0 {
+        return Err(PolicyError::NoExpiry);
+    }
+    if expiry <= policy.tip {
+        return Err(PolicyError::Expired {
+            expiry,
+            tip: policy.tip,
+        });
+    }
     // The buyer sets expiry relative to the next block, so allow one block of slack.
     if expiry
         > policy
@@ -132,7 +152,8 @@ pub fn check(
                     }
                     item_idx = Some(i);
                 }
-                // Does this output pay the seller? Trial-decrypt the compact ciphertext.
+                // Does this output pay the seller? Trial-decrypt the compact ciphertext; the
+                // decryption only succeeds when the plaintext matches the committed note.
                 let enc = action.output().encrypted_note();
                 let mut compact = [0u8; COMPACT_NOTE_SIZE];
                 compact.copy_from_slice(&enc.enc_ciphertext[..COMPACT_NOTE_SIZE]);

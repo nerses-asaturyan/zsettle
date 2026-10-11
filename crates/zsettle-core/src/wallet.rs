@@ -16,7 +16,7 @@ use anyhow::{anyhow, Context, Result};
 use bip0039::{English, Mnemonic};
 use rand_core::OsRng;
 use secrecy::{ExposeSecret, SecretVec, Zeroize};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use zcash_client_backend::data_api::{
     chain::{error as chain_error, BlockCache, BlockSource},
     locking::LockFilter,
@@ -28,7 +28,7 @@ use zcash_client_backend::data_api::{
 use zcash_client_backend::proto::compact_formats::CompactBlock;
 use zcash_client_backend::wallet::Note;
 use zcash_client_sqlite::{util::SystemClock, AccountUuid, WalletDb};
-use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
+use zcash_keys::keys::{UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedSpendingKey};
 use zcash_protocol::{
     consensus::{BlockHeight, Network},
     ShieldedPool, TxId,
@@ -46,6 +46,12 @@ pub struct NoteRef {
     pub txid: TxId,
     /// Index of the output within the transaction's Ironwood bundle.
     pub index: u32,
+}
+
+impl std::fmt::Display for NoteRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.txid, self.index)
+    }
 }
 
 impl std::str::FromStr for NoteRef {
@@ -191,6 +197,44 @@ pub fn account_ufvk(db: &Db, account: AccountUuid) -> Result<UnifiedFullViewingK
         .ok_or_else(|| anyhow!("account {} has no full viewing key", account.expose_uuid()))
 }
 
+/// The Orchard full viewing key of an account.
+pub fn account_orchard_fvk(db: &Db, account: AccountUuid) -> Result<orchard::keys::FullViewingKey> {
+    account_ufvk(db, account)?
+        .orchard()
+        .cloned()
+        .ok_or_else(|| {
+            anyhow!(
+                "account {} has no Orchard/Ironwood key",
+                account.expose_uuid()
+            )
+        })
+}
+
+/// Birthday height of an account (where its notes can start to appear).
+pub fn account_birthday(db: &Db, account: AccountUuid) -> Result<u32> {
+    Ok(u32::from(
+        db.get_account_birthday(account)
+            .map_err(|e| anyhow!("{e}"))?,
+    ))
+}
+
+/// A fresh diversified Orchard address of an account. The wallet records it, so notes sent
+/// there are recognised like any other, and nothing ties it to the account's default address.
+pub fn next_orchard_address(db: &mut Db, account: AccountUuid) -> Result<orchard::Address> {
+    let (ua, _index) = db
+        .get_next_available_address(account, UnifiedAddressRequest::ORCHARD)
+        .map_err(|e| anyhow!("{e}"))?
+        .ok_or_else(|| {
+            anyhow!(
+                "account {} cannot derive an Orchard address",
+                account.expose_uuid()
+            )
+        })?;
+    ua.orchard()
+        .copied()
+        .ok_or_else(|| anyhow!("derived address has no Orchard receiver"))
+}
+
 /// An Ironwood note the wallet knows about, with its tree position.
 pub struct IronwoodNote {
     /// The note itself.
@@ -236,13 +280,8 @@ pub fn find_ironwood_note(
 
 /// Look up a specific Ironwood note by transaction id and output index.
 pub fn ironwood_note(db: &Db, r: NoteRef, target_height: TargetHeight) -> Result<IronwoodNote> {
-    find_ironwood_note(db, r, target_height)?.ok_or_else(|| {
-        anyhow!(
-            "note {}:{} not found or not spendable at this height",
-            r.txid,
-            r.index
-        )
-    })
+    find_ironwood_note(db, r, target_height)?
+        .ok_or_else(|| anyhow!("note {r} not found or not spendable at this height"))
 }
 
 /// Highest block the wallet has scanned, if any.
@@ -291,15 +330,22 @@ pub fn import_viewing_key(
     Ok(account.id())
 }
 
-/// Find the account whose unified full viewing key matches the given encoding.
+/// Find the account whose Orchard full viewing key is the one inside the given unified
+/// viewing key encoding. Only the Orchard component is compared, so an account imported from
+/// a complete key still matches a listing that publishes the Orchard part alone.
 pub fn find_account_by_ufvk(
     db: &Db,
     network: Network,
     ufvk_str: &str,
 ) -> Result<Option<AccountUuid>> {
+    let wanted = UnifiedFullViewingKey::decode(&network, ufvk_str)
+        .map_err(|e| anyhow!("decoding viewing key: {e}"))?
+        .orchard()
+        .cloned()
+        .ok_or_else(|| anyhow!("the viewing key has no Orchard component"))?;
     for id in db.get_account_ids().map_err(|e| anyhow!("{e}"))? {
         if let Ok(ufvk) = account_ufvk(db, id) {
-            if ufvk.encode(&network) == ufvk_str {
+            if ufvk.orchard() == Some(&wanted) {
                 return Ok(Some(id));
             }
         }
@@ -307,11 +353,12 @@ pub fn find_account_by_ufvk(
     Ok(None)
 }
 
-/// The largest spendable Ironwood note of an account, if any.
+/// The largest spendable Ironwood note of an account that is not in `exclude`, if any.
 pub fn largest_spendable_note(
     db: &Db,
     account: AccountUuid,
     target_height: TargetHeight,
+    exclude: &[NoteRef],
 ) -> Result<Option<NoteRef>> {
     use zcash_client_backend::data_api::{wallet::ConfirmationsPolicy, MaxSpendMode, TargetValue};
     let notes = db
@@ -328,12 +375,74 @@ pub fn largest_spendable_note(
     let best = notes
         .ironwood()
         .iter()
-        .max_by_key(|n| n.note().value().inner())
-        .map(|n| NoteRef {
-            txid: *n.txid(),
-            index: u32::from(n.output_index()),
-        });
+        .map(|n| {
+            (
+                NoteRef {
+                    txid: *n.txid(),
+                    index: u32::from(n.output_index()),
+                },
+                n.note().value().inner(),
+            )
+        })
+        .filter(|(r, _)| !exclude.contains(r))
+        .max_by_key(|(_, v)| *v)
+        .map(|(r, _)| r);
     Ok(best)
+}
+
+// ---- Note reservations ----------------------------------------------------------------
+
+const RESERVED_FILE: &str = "reserved-notes.json";
+
+#[derive(Serialize, Deserialize, Default)]
+struct Reservations {
+    notes: Vec<Reservation>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Reservation {
+    note: String,
+    expiry_height: u32,
+}
+
+fn read_reservations(wallet: &Wallet) -> Result<Reservations> {
+    let path = wallet.dir.join(RESERVED_FILE);
+    if !path.exists() {
+        return Ok(Reservations::default());
+    }
+    let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+}
+
+fn write_reservations(wallet: &Wallet, r: &Reservations) -> Result<()> {
+    let path = wallet.dir.join(RESERVED_FILE);
+    fs::write(&path, serde_json::to_string_pretty(r)?)
+        .with_context(|| format!("writing {}", path.display()))
+}
+
+/// Record that a note is committed to a trade that can be mined until `expiry_height`, so
+/// a later `buy` does not pick the same note while that trade is in flight.
+pub fn reserve_note(wallet: &Wallet, note: NoteRef, expiry_height: u32) -> Result<()> {
+    let mut r = read_reservations(wallet)?;
+    let key = note.to_string();
+    r.notes.retain(|x| x.note != key);
+    r.notes.push(Reservation {
+        note: key,
+        expiry_height,
+    });
+    write_reservations(wallet, &r)
+}
+
+/// Notes reserved by trades that can still be mined at `tip`. Expired reservations are
+/// dropped from the file.
+pub fn reserved_notes(wallet: &Wallet, tip: u32) -> Result<Vec<NoteRef>> {
+    let mut r = read_reservations(wallet)?;
+    let before = r.notes.len();
+    r.notes.retain(|x| x.expiry_height >= tip);
+    if r.notes.len() != before {
+        write_reservations(wallet, &r)?;
+    }
+    r.notes.iter().map(|x| x.note.parse()).collect()
 }
 
 // ---- Synchronisation ----------------------------------------------------------------

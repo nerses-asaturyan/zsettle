@@ -1,36 +1,48 @@
 # zsettle protocol
 
 ## Roles
-- **Seller**: holds the item account spending key. Publishes listings. Signs only the item action, one outstanding offer per item.
-- **Buyer**: holds ZEC. Receives the item account's full viewing key by consignment (inside the listings file), builds, proves, redacts, signs the payment action, extracts and broadcasts.
+- **Seller**: holds the item account spending key. Publishes signed listings. Verifies each offer's proof, checks it against policy, signs only the item action. Signs every acceptable offer; the chain settles one.
+- **Buyer**: holds ZEC. Receives the item account's Orchard full viewing key by consignment (inside the listings file), builds, proves, redacts, signs the payment action, extracts and broadcasts.
 - **Anyone**: verifies provenance from chain data with consignments only, no spending key.
 
 ## Items
 - Ordinary Ironwood v3 notes in a dedicated ZIP 32 account, value >= 1,000 zat (a zero-value note is not bound to the commitment tree by the circuit).
-- Minted by paying the item account from the seller's payout account; the memo `zsettle item: <name>` names the item. That note is the item's genesis.
-- Consignment = the item account's full viewing key plus the account birthday. It lets a holder of it see every item note of that account and when each one is spent, nothing else.
+- Minted by paying the item account from the seller's payout account at a fresh diversified address; the memo `zsettle item: <name>` names the item. That note is the item's genesis.
+- Consignment = the item account's Orchard full viewing key plus the account birthday. It lets a holder see every item note of that account and when each one is spent, and nothing else: the Sapling and transparent components of the account are never published, and no output of a trade is encrypted to this key.
 - Item transfer MUST happen in the same action as the item spend, so the successor note is always the output of the action that spends the predecessor, and its `rho` is the predecessor's nullifier. The Orchard builder pairs spends and outputs at random, so the trade builder rebuilds the bundle with fresh randomness until the item spend and the item output share an action (one chance in two or three per attempt; proving happens once, afterwards). `verify` relies on this rule and on nothing else: the lineage is the chain of spending actions.
 
 ## Listings
-A JSON file the seller publishes anywhere: `{ version, network, item_ufvk, item_birthday, payout_address, items: [{ note, name, price_zat, max_expiry_delta, pending? }] }`. `pending = { expiry_height, trade }` marks an item under offer: the seller has signed a trade for it that can still be mined up to `expiry_height`. The service clears the mark once that height is scanned with the note unspent, and removes the item once the note is spent.
+A JSON file the seller publishes anywhere: `{ version, network, item_ufvk, item_birthday, payout_address, items: [{ note, name, price_zat, max_expiry_delta }], signature }`.
+
+- `item_ufvk` is a unified viewing key with the Orchard component only.
+- `payout_address` is a diversified address derived for the market, never the account's default address.
+- `price_zat` is above 5,000: a smaller payment is dust that wallets refuse to spend.
+- `signature` is a RedPallas signature over the other fields (JSON in fixed field order, prefixed with `zsettle-listings-v1\n`) by the item account's spend authorizing key with randomizer zero, so it verifies under the spend validating key `ak` that opens the published viewing key. Buyers refuse unsigned or altered files. The seller service re-signs the file whenever it changes it.
 
 ## Trade flow
-1. Seller publishes the listings.
-2. Buyer imports `item_ufvk` as a view-only account and syncs both accounts.
-3. Buyer builds a PCZT: spend(item note, item FVK) -> output(item note, buyer address, same value); spend(ZEC note, buyer FVK) -> output(price, payout address) [+ change]. Both witnesses at one anchor. Expiry = next block + `max_expiry_delta`.
-4. Buyer runs the IO finalizer and the prover with the two full viewing keys, then redacts the seller's copy: the buyer's FVK, witnesses, note randomness, randomizers and output secrets are removed; the sighash-relevant fields and the item action's own spend data stay.
-5. Seller syncs, runs the policy checks (`zsettle-core::policy`) and signs action A only. The item is marked under offer.
-6. Buyer combines, signs action B, finalizes spends, extracts the transaction (proof and both signatures are verified here) and broadcasts.
-7. Anyone runs `verify` with the consignments: genesis note found by trial decryption, its nullifier derived, the spending action located, its output taken as the successor, repeated while a supplied consignment decrypts the successor.
+1. Seller publishes the signed listings.
+2. Buyer verifies the signature, imports `item_ufvk` as a view-only account and syncs both accounts.
+3. Buyer asks the light server which consensus branch is live and refuses to build on a branch this build does not sign for.
+4. Buyer builds a PCZT: spend(item note, item FVK) -> output(item note, a fresh diversified address of the buyer's receiving account, same value, memo = item name, outgoing key = the buyer's); spend(ZEC note, buyer FVK) -> output(price, payout address) [+ change]. Both witnesses at one anchor. Expiry = next block + `max_expiry_delta`; fee = the conventional ZIP 317 amount.
+5. Buyer runs the IO finalizer and the prover with the two full viewing keys, then redacts the seller's copy: the buyer's FVK, witnesses, note randomness, randomizers, value-commitment trapdoors and output secrets are removed; the sighash-relevant fields, the proof and the item action's own spend data stay. The buyer records the paying note as reserved until the expiry height.
+6. Seller syncs, matches the item by nullifier, runs the policy checks (`zsettle-core::policy`: expiry set, after the tip and within the limit; exactly one spend of the listed note with a randomizer; no other seller note spent; payment outputs decrypting under the payout key sum to at least the price), verifies the proof against the bundle's public inputs, and signs action A only.
+7. Buyer combines (conflicting fields fail the merge), signs action B, finalizes spends, extracts the transaction (proof and both signatures are verified here), checks the server's branch again and broadcasts.
+8. Anyone runs `verify` with the consignments: genesis note found by trial decryption, its nullifier derived, the spending action located, its output taken as the successor, repeated while a supplied consignment decrypts the successor.
 
 ## Why it is atomic
 Both spends live in one transaction authorized by one binding signature. A transaction with any unsigned action is invalid. A prior spend of the item note makes the trade's nullifier a duplicate, so the whole transaction is rejected by consensus.
 
+## Offers
+The seller signs every offer that passes. Several signed offers for one item may exist at once; all spend the same nullifier, so at most one is ever mined and the seller is paid exactly once. A buyer who loses the race loses nothing but the time spent proving. Nothing is locked, so nobody can keep an item off the market by sending offers.
+
 ## Expiry
-The buyer counts from the next block; the seller sees the chain tip, so the seller allows one block of slack beyond `max_expiry_delta`. After the expiry height the seller's signature is worthless and the item goes back on sale without any action from the seller.
+The buyer counts from the next block; the seller sees the chain tip, so the seller allows one block of slack beyond `max_expiry_delta`. An expiry of zero (never expires) or at or below the tip is refused. After the expiry height the seller's signature is worthless. The default of 40 blocks is the librustzcash default for every transaction, so a trade carries no distinguishing expiry; the seller can end the option early by spending the item itself.
 
 ## Resale
 A buyer who wants to resell receives the item into its own item account (`buy --receive-account`), then publishes listings from that wallet exactly as the first seller did. Provenance across resales is verified by supplying every holder's listings file; the trace stops at the first successor no supplied consignment can open.
 
 ## Fees
-ZIP 317: 5,000 zat per logical action, minimum two. A trade with change is three actions (15,000 zat); with an exact paying note it is two (10,000 zat). The buyer pays the fee.
+ZIP 317: 5,000 zat per logical action, minimum two. A trade with change is three actions (15,000 zat); with an exact paying note it is two (10,000 zat). The buyer pays the fee. Change that would be dust is refused rather than created.
+
+## Network upgrades
+The consensus branch id is part of the sighash. Before building, minting or broadcasting, the tools compare the branch the server reports with the one this build signs for at the target height and stop with a clear message when they differ, instead of producing a transaction the network would reject.

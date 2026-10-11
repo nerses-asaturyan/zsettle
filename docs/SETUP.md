@@ -40,4 +40,18 @@ This is the `zcash_client_backend` synchronizer with an in-memory block cache: i
 
 ## Funding
 
-Send ZEC to the buyer account's unified address (`$D wallet -w ~/.zsettle/buyer list-addresses`). A trade costs the price plus the ZIP 317 fee: 15,000 zat with a change output, 10,000 when the paying note is exact. A mint costs 10,000 zat plus 5,000 for every input beyond the first. Everything in [TRADE.md](TRADE.md) was funded with 161,000 zat.
+Send ZEC to the buyer account's unified address (`$D wallet -w ~/.zsettle/buyer list-addresses`). A trade costs the price plus the ZIP 317 fee: 15,000 zat with a change output, 10,000 when the paying note is exact. A mint costs 10,000 zat plus 5,000 for every input beyond the first. Prices must be above 5,000 zat, since a smaller payment is dust that wallets refuse to spend. Everything in [TRADE.md](TRADE.md) was funded with 161,000 zat.
+
+## Files the tools write
+
+- `<wallet>/reserved-notes.json`: notes committed to unsettled trades, with their expiry heights; `buy` skips them until they expire.
+- The buyer's full PCZT and the final PCZT written by `finish`: contain the buyer's viewing key and witnesses, keep them private.
+- The seller's inbox (`done/`, `rejected/` with reason files) and outbox (`<name>.<tag>.signed.pczt`).
+
+## Privacy of the light server connection
+
+Every sync, broadcast and `verify` talks to a lightwalletd server over TLS. The server learns the IP that syncs an imported key, sends a trade or fetches an item's genesis transaction. Use Tor or your own lightwalletd if that matters to you.
+
+## Network upgrade
+
+NU7 is scheduled for mainnet in early November 2026. This build signs for NU6.3; before building, minting or broadcasting, the tools compare the server's consensus branch with their own and stop with a message if they differ. Update the dependencies to the NU7 release line once it is published.

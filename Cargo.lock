@@ -4448,6 +4448,7 @@ dependencies = [
  "hex",
  "incrementalmerkletree",
  "orchard",
+ "pasta_curves",
  "pczt",
  "rand 0.8.8",
  "rand_chacha",

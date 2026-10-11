@@ -39,6 +39,7 @@ tonic = { workspace = true }
 tokio = { workspace = true }
 rustls = { workspace = true }
 async-trait = { workspace = true }
+pasta_curves = { workspace = true }
 
 [dev-dependencies]
 rand_chacha = { workspace = true }

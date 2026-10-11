@@ -37,15 +37,24 @@ pub mod wallet;
 /// Zcash mainnet coin type (ZIP 32).
 pub const COIN_TYPE_MAINNET: u32 = 133;
 
-/// Default maximum number of blocks a seller signature stays valid.
-/// Shorter than the stack default (40) to limit the buyer's free option.
-pub const DEFAULT_MAX_EXPIRY_DELTA: u32 = 10;
+/// Default maximum number of blocks a seller signature stays valid. Equal to the librustzcash
+/// default transaction expiry, so a trade carries the same expiry as any wallet transaction
+/// and cannot be picked out on chain by it. The seller can end the option early by spending
+/// the item itself.
+pub const DEFAULT_MAX_EXPIRY_DELTA: u32 = 40;
 
 /// ZIP 317 marginal fee per logical action, in zatoshis.
 pub const ZIP317_MARGINAL_FEE: u64 = 5_000;
 
 /// ZIP 317 minimum number of logical actions charged.
 pub const ZIP317_GRACE_ACTIONS: u64 = 2;
+
+/// Lowest price a listing may carry. A payment at or below the ZIP 317 marginal fee is dust
+/// that standard wallets refuse to spend.
+pub const MIN_PRICE_ZAT: u64 = ZIP317_MARGINAL_FEE + 1;
+
+/// Largest trade envelope the seller service reads. A real one is about 10 KB with its proof.
+pub const MAX_ENVELOPE_BYTES: u64 = 1 << 20;
 
 /// Conventional ZIP 317 fee for a bundle with `actions` logical actions.
 pub fn zip317_fee(actions: u64) -> u64 {

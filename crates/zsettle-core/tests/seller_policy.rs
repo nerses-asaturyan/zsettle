@@ -19,7 +19,7 @@ use zsettle_core::policy::{check, prepared_ivk, PolicyError, SellerPolicy};
 const TARGET: u32 = 3_514_200;
 
 /// Build an unsigned, unproven trade PCZT. `price` is what the buyer actually pays.
-fn trade(f: &Fixture, price: u64, expiry_delta: u32, spend_extra: bool) -> Pczt {
+fn trade(f: &Fixture, price: u64, expiry_height: u32, spend_extra: bool) -> Pczt {
     let target = BlockHeight::from(TARGET);
     let mut b = Builder::new(
         Network::MainNetwork,
@@ -32,7 +32,7 @@ fn trade(f: &Fixture, price: u64, expiry_delta: u32, spend_extra: bool) -> Pczt 
             ironwood_padding: BundlePadding::DEFAULT,
         },
     )
-    .with_expiry_height(target + expiry_delta);
+    .with_expiry_height(BlockHeight::from(expiry_height));
     b.add_ironwood_spend::<FeeError>(f.fvk_item.clone(), f.item_note, f.paths[0].clone())
         .unwrap();
     let mut inputs = 1_000 + 100_000;
@@ -91,7 +91,7 @@ fn policy(price: u64) -> SellerPolicy {
 #[test]
 fn approves_a_correct_trade() {
     let f = fixture();
-    let pczt = trade(&f, 5_000, 10, false);
+    let pczt = trade(&f, 5_000, TARGET + 10, false);
     let nf = f.item_note.nullifier(&f.fvk_item);
     let extra_nf = f.extra_seller_note.nullifier(&f.fvk_item);
     let ivk = prepared_ivk(&f.fvk_seller);
@@ -103,7 +103,7 @@ fn approves_a_correct_trade() {
 #[test]
 fn refuses_underpayment() {
     let f = fixture();
-    let pczt = trade(&f, 4_999, 10, false);
+    let pczt = trade(&f, 4_999, TARGET + 10, false);
     let nf = f.item_note.nullifier(&f.fvk_item);
     let ivk = prepared_ivk(&f.fvk_seller);
     assert_eq!(
@@ -118,7 +118,7 @@ fn refuses_underpayment() {
 #[test]
 fn refuses_long_expiry() {
     let f = fixture();
-    let pczt = trade(&f, 5_000, 40, false);
+    let pczt = trade(&f, 5_000, TARGET + 40, false);
     let nf = f.item_note.nullifier(&f.fvk_item);
     let ivk = prepared_ivk(&f.fvk_seller);
     assert!(matches!(
@@ -130,7 +130,7 @@ fn refuses_long_expiry() {
 #[test]
 fn refuses_when_the_item_is_not_spent() {
     let f = fixture();
-    let pczt = trade(&f, 5_000, 10, false);
+    let pczt = trade(&f, 5_000, TARGET + 10, false);
     let other_nf = f.extra_seller_note.nullifier(&f.fvk_item);
     let ivk = prepared_ivk(&f.fvk_seller);
     assert_eq!(
@@ -142,7 +142,7 @@ fn refuses_when_the_item_is_not_spent() {
 #[test]
 fn refuses_an_extra_seller_spend() {
     let f = fixture();
-    let pczt = trade(&f, 5_000, 10, true);
+    let pczt = trade(&f, 5_000, TARGET + 10, true);
     let nf = f.item_note.nullifier(&f.fvk_item);
     let extra_nf = f.extra_seller_note.nullifier(&f.fvk_item);
     let ivk = prepared_ivk(&f.fvk_seller);
@@ -155,7 +155,7 @@ fn refuses_an_extra_seller_spend() {
 #[test]
 fn payment_to_someone_else_does_not_count() {
     let f = fixture();
-    let pczt = trade(&f, 5_000, 10, false);
+    let pczt = trade(&f, 5_000, TARGET + 10, false);
     let nf = f.item_note.nullifier(&f.fvk_item);
     // The buyer's own key sees the item and change outputs, not a payment to the seller.
     let ivk = prepared_ivk(&f.fvk_buyer);
@@ -163,4 +163,33 @@ fn payment_to_someone_else_does_not_count() {
         check(&pczt, &nf, &[nf], &ivk, &policy(5_000)),
         Err(PolicyError::Underpaid { .. })
     ));
+}
+
+#[test]
+fn refuses_a_transaction_that_never_expires() {
+    let f = fixture();
+    let pczt = trade(&f, 5_000, 0, false);
+    let nf = f.item_note.nullifier(&f.fvk_item);
+    let ivk = prepared_ivk(&f.fvk_seller);
+    assert_eq!(
+        check(&pczt, &nf, &[nf], &ivk, &policy(5_000)),
+        Err(PolicyError::NoExpiry)
+    );
+}
+
+#[test]
+fn refuses_an_expiry_at_or_below_the_tip() {
+    let f = fixture();
+    let nf = f.item_note.nullifier(&f.fvk_item);
+    let ivk = prepared_ivk(&f.fvk_seller);
+    for expiry in [TARGET - 5, TARGET - 1] {
+        let pczt = trade(&f, 5_000, expiry, false);
+        assert!(matches!(
+            check(&pczt, &nf, &[nf], &ivk, &policy(5_000)),
+            Err(PolicyError::Expired { .. })
+        ));
+    }
+    // One block above the tip is the earliest acceptable expiry.
+    let pczt = trade(&f, 5_000, TARGET, false);
+    assert!(check(&pczt, &nf, &[nf], &ivk, &policy(5_000)).is_ok());
 }
