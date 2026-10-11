@@ -89,6 +89,25 @@ zsettle finish --wallet ~/.zsettle/buyer --identity ~/.zsettle/buyer/key.txt --a
 
 Combines the two PCZTs (fields that differ fail the merge, so the seller cannot alter the trade), signs the payment action, finalizes spends, extracts the transaction (proof and signatures are verified here), checks the server's consensus branch and sends it. `zsettle broadcast --tx trade.final.tx` resends a raw transaction.
 
+## Taking an item off the market
+
+```
+zsettle-seller publish --wallet S --item-account I --payout-account P --identity S/key.txt --listings listings.json --remove <txid>:<idx>
+zsettle-seller cancel  --wallet S --item-account I --payout-account P --identity S/key.txt --listings listings.json --item-note <txid>:<idx>
+```
+
+`publish --remove` only delists: an offer the service already signed stays valid until its expiry (at most 40 blocks). `cancel` ends it for good by spending the item note to a fresh address of the item account; an item note alone is below the fee, so one payout-account note is spent with it (exactly the fee, or with change above dust). The listings file loses the entry and is signed again; once the transaction is mined, `items` shows the item's new note, which `publish --item-note` can list again. The service defers an offer whose anchor or expiry it cannot judge yet because the buyer is a few blocks ahead, instead of refusing it for good.
+
+## Paying with several small notes
+
+A trade is paid from one note. If the balance is spread over several, merge them first:
+
+```
+zsettle consolidate --wallet B --account A --identity B/key.txt
+```
+
+It spends every spendable note of the account that is not reserved for an open offer into one note at a fresh address, for the ZIP 317 fee of that many actions. `--dry-run` shows the plan.
+
 ## After an offer that did not settle
 
 The seller keeps your envelope, and with it the nullifier of the note you paid with. If the trade was mined that nullifier is public anyway; if it was not (you lost the race, the offer expired, you gave up), retire the note:
@@ -116,7 +135,7 @@ zsettle verify --listings listings.json --item <TXID>:<INDEX>
 zsettle verify --listings listings.json --listings mine.json --item <TXID>:<INDEX>
 ```
 
-Asks the server which block holds the genesis transaction, streams compact blocks from there, trial-decrypts Ironwood actions with the listings' viewing keys to find the genesis note, derives its nullifier, and follows the spend: the action that spends the item is the trade, and that action's output commitment is the item's new note. When another supplied listing decrypts that note, the trace continues with it. `--private` skips asking the server about the genesis transaction (which tells it which item you look at); the trace then starts at the listings' birthdays and carries no name. Output is a JSON report with the item name (from the genesis memo), every hop (txid, height, commitment, holder) and a status: `held` by a named listing, or `transferred_to_unknown_holder` after a sale to someone whose listings were not supplied. About two seconds per item on mainnet today, most of it connection setup.
+Asks the server which block holds the genesis transaction, streams compact blocks from there, trial-decrypts Ironwood actions with the listings' viewing keys to find the genesis note, derives its nullifier, and follows the spend: the action that spends the item is the trade, and that action's output commitment is the item's new note. When another supplied listing decrypts that note, the trace continues with it. `--private` skips asking the server about the genesis transaction (which tells it which item you look at); the trace then starts at the listings' birthdays, which still shows the server which consignment you are interested in, and carries no name. Output is a JSON report with the item name (from the genesis memo), every hop (txid, height, commitment, holder) and a status: `held` by a named listing, or `transferred_to_unknown_holder` after a sale to someone whose listings were not supplied. About two seconds per item on mainnet today, most of it connection setup.
 
 ## Mainnet trades so far
 

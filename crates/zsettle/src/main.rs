@@ -243,6 +243,39 @@ enum Cmd {
         /// Report what would be done without building or sending anything.
         #[arg(long)]
         dry_run: bool,
+        /// Skip the sync before deciding (the wallet must be fresh).
+        #[arg(long)]
+        no_sync: bool,
+    },
+    /// Merge every spendable note of an account into one note at a fresh address, so that one
+    /// note can pay for a trade. Notes reserved for open offers are left alone.
+    Consolidate {
+        /// Wallet directory.
+        #[arg(long)]
+        wallet: PathBuf,
+        /// UUID of the account.
+        #[arg(long)]
+        account: String,
+        /// ZIP 32 account index of that account.
+        #[arg(long, default_value_t = 0)]
+        account_index: u32,
+        /// age identity file that decrypts the wallet's mnemonic. Omit it for a
+        /// passphrase-protected wallet: the passphrase is asked for, or taken from
+        /// ZSETTLE_PASSPHRASE.
+        #[arg(long)]
+        identity: Option<PathBuf>,
+        /// Confirmations required on the notes.
+        #[arg(long, default_value_t = 3)]
+        min_confirmations: u32,
+        /// lightwalletd server URL.
+        #[arg(long, default_value = DEFAULT_SERVER)]
+        server: String,
+        /// Report the plan without building or sending anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the sync first (the wallet must be fresh).
+        #[arg(long)]
+        no_sync: bool,
     },
     /// List the unspent Ironwood notes of an account of a wallet, dust included.
     Notes {
@@ -475,6 +508,11 @@ fn main() -> Result<()> {
                 (None, None) => return Err(anyhow!("--item-account or --listings is required")),
             };
             let receive_account = receive_account.as_deref().map(parse_account).transpose()?;
+            if receive_account.is_none() {
+                eprintln!(
+                    "note: the item will be received by the paying account; pass --receive-account <item account> if you may resell it, so that publishing that account's key later reveals nothing about your payments"
+                );
+            }
             let (target, _) = heights(&db, min_confirmations)?;
             let target_height = u32::from(zcash_protocol::consensus::BlockHeight::from(target));
             if !offline {
@@ -619,9 +657,13 @@ fn main() -> Result<()> {
             min_confirmations,
             server,
             dry_run,
+            no_sync,
         } => {
             let w = Wallet::open(&wallet)?;
             let mut db = w.db()?;
+            if !no_sync {
+                sync_blocking(&w, &mut db, &server)?;
+            }
             let account = parse_account(&account)?;
             let (target, _) = heights(&db, 1)?;
             let tip =
@@ -650,7 +692,8 @@ fn main() -> Result<()> {
                         "released: already spent"
                     }
                     NoteState::Unknown => "kept: not in this wallet",
-                    NoteState::Unspent { .. } if expiry >= tip => {
+                    // Mineable while the next block (tip + 1) is at or below the expiry.
+                    NoteState::Unspent { .. } if expiry > tip => {
                         "kept: its offer can still be mined"
                     }
                     NoteState::Unspent { .. } => match &ask {
@@ -690,6 +733,99 @@ fn main() -> Result<()> {
             println!(
                 "{}",
                 serde_json::json!({ "tip": tip, "rotated": rotated, "dry_run": dry_run })
+            );
+            Ok(())
+        }
+        Cmd::Consolidate {
+            wallet,
+            account,
+            account_index,
+            identity,
+            min_confirmations,
+            server,
+            dry_run,
+            no_sync,
+        } => {
+            let w = Wallet::open(&wallet)?;
+            let mut db = w.db()?;
+            if !no_sync {
+                sync_blocking(&w, &mut db, &server)?;
+            }
+            let account = parse_account(&account)?;
+            let (target, _) = heights(&db, min_confirmations)?;
+            // Every spendable note that is not reserved for an open offer, largest first.
+            let next_block = u32::from(zcash_protocol::consensus::BlockHeight::from(target));
+            let reserved = reserved_notes(&w, next_block)?;
+            let mut seen = reserved.clone();
+            let mut notes = Vec::new();
+            while let Some(n) = largest_spendable_note(&db, account, target, &seen)? {
+                seen.push(n);
+                notes.push(n);
+            }
+            let mut total = 0u64;
+            for n in &notes {
+                total += zsettle_core::wallet::ironwood_note(&db, *n, target)?
+                    .note
+                    .value()
+                    .inner();
+            }
+            let fee = zsettle_core::zip317_fee(notes.len() as u64);
+            if notes.len() < 2 {
+                println!(
+                    "{}",
+                    serde_json::json!({ "notes": notes.len(), "reserved": reserved.len(), "action": "nothing to merge" })
+                );
+                return Ok(());
+            }
+            if total <= fee + zsettle_core::ZIP317_MARGINAL_FEE {
+                return Err(anyhow!(
+                    "the {} notes are worth {total} zat together, too little to merge for a {fee} zat fee",
+                    notes.len()
+                ));
+            }
+            if dry_run {
+                println!(
+                    "{}",
+                    serde_json::json!({ "notes": notes.iter().map(|n| n.to_string()).collect::<Vec<_>>(), "value_in": total, "fee": fee, "value_out": total - fee, "dry_run": true })
+                );
+                return Ok(());
+            }
+            let seed = w.seed(identity.as_deref())?;
+            let usk = w.spending_key(&seed, account_index)?;
+            if orchard::keys::FullViewingKey::from(usk.orchard())
+                != account_orchard_fvk(&db, account)?
+            {
+                return Err(anyhow!(
+                    "account index {account_index} does not derive account {}",
+                    account.expose_uuid()
+                ));
+            }
+            let ask = SpendAuthorizingKey::from(usk.orchard());
+            check_server_before_sending(&server, w.network)?;
+            let inputs: Vec<_> = notes.iter().map(|n| (account, *n)).collect();
+            let built = zsettle_core::trade::build_transfer(
+                &mut db,
+                w.network,
+                &inputs,
+                &[(account, total - fee)],
+                min_confirmations,
+            )?;
+            let (pczt, signed_n) = pczt_ops::sign_matching_actions(built.pczt, &ask)?;
+            if signed_n != notes.len() {
+                return Err(anyhow!(
+                    "the key signed {signed_n} of {} spends",
+                    notes.len()
+                ));
+            }
+            let tx = pczt_ops::extract(pczt)?;
+            let bytes = pczt_ops::tx_bytes(&tx)?;
+            zsettle_core::broadcast::send_raw_transaction_blocking(&server, bytes)?;
+            for n in &notes {
+                reserve_note(&w, *n, built.expiry_height)?;
+            }
+            println!(
+                "{}",
+                serde_json::json!({ "merged": notes.len(), "value_out": built.value_out, "fee": built.fee, "txid": tx.txid().to_string(), "expiry_height": built.expiry_height })
             );
             Ok(())
         }

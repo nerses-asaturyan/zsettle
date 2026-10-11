@@ -25,7 +25,9 @@ use zcash_protocol::consensus::{BlockHeight, Network};
 use zcash_protocol::memo::MemoBytes;
 use zcash_protocol::value::Zatoshis;
 
-use crate::wallet::{account_ufvk, heights, ironwood_note, next_orchard_address, Db, NoteRef};
+use crate::wallet::{
+    account_orchard_fvk, account_ufvk, heights, ironwood_note, next_orchard_address, Db, NoteRef,
+};
 use crate::{zip317_fee, DEFAULT_MAX_EXPIRY_DELTA, ZIP317_MARGINAL_FEE};
 
 /// Everything the buyer needs to assemble a trade.
@@ -269,11 +271,11 @@ pub fn build_trade(db: &mut Db, network: Network, req: &TradeRequest) -> Result<
     })
 }
 
-/// A proven one-note transfer to a fresh address of the same account.
+/// A proven transfer within one wallet (a rotation, a consolidation, a cancelled item).
 pub struct SelfSpend {
     /// The full PCZT, ready for the account's signature.
     pub pczt: Pczt,
-    /// Value of the new note.
+    /// Total value of the new notes.
     pub value_out: u64,
     /// Fee paid.
     pub fee: u64,
@@ -281,48 +283,70 @@ pub struct SelfSpend {
     pub expiry_height: u32,
 }
 
-/// Retire a note by moving its value to a fresh address of its own account. Used after an
-/// offer did not settle: the seller holds the note's nullifier from the envelope, and once
-/// the note is gone that nullifier can only ever point at this transfer.
-pub fn build_self_spend(
+/// One spend of a transfer: the account that owns the note, and the note.
+pub type Input = (AccountUuid, NoteRef);
+/// One output of a transfer: the account that receives it, at a fresh address and under its
+/// own outgoing key, and the value.
+pub type Output = (AccountUuid, u64);
+
+/// A proven transfer between accounts of one wallet. Every input is spent, every output goes
+/// to a fresh address of its account, and the inputs must exceed the outputs by exactly the
+/// ZIP 317 fee for the resulting number of actions. Outputs may be small: an item note is.
+pub fn build_transfer(
     db: &mut Db,
     network: Network,
-    account: AccountUuid,
-    note: NoteRef,
+    inputs: &[Input],
+    outputs: &[Output],
     min_confirmations: u32,
 ) -> Result<SelfSpend> {
-    let (target_height, anchor_height) = heights(db, min_confirmations)?;
-    let fvk = account_ufvk(db, account)?
-        .orchard()
-        .cloned()
-        .ok_or_else(|| anyhow!("account has no Orchard/Ironwood key"))?;
-    let n = ironwood_note(db, note, target_height)?;
-    if fvk.scope_for_address(&n.note.recipient()).is_none() {
-        return Err(anyhow!("note {note} is not owned by the account"));
-    }
-    let value = n.note.value().inner();
-    let fee = zip317_fee(2);
-    if value <= fee + ZIP317_MARGINAL_FEE {
+    if inputs.is_empty() || outputs.is_empty() {
         return Err(anyhow!(
-            "note {note} is worth {value} zat, too little to move for a {fee} zat fee"
+            "a transfer needs at least one input and one output"
         ));
     }
-    let to = next_orchard_address(db, account)?;
-    let position = n.position;
-    let (anchor, path) = db
+    let (target_height, anchor_height) = heights(db, min_confirmations)?;
+    let fee = zip317_fee(inputs.len().max(outputs.len()) as u64);
+    let mut spends = Vec::with_capacity(inputs.len());
+    let mut total_in = 0u64;
+    for (account, note) in inputs {
+        let fvk = account_orchard_fvk(db, *account)?;
+        let n = ironwood_note(db, *note, target_height)?;
+        if fvk.scope_for_address(&n.note.recipient()).is_none() {
+            return Err(anyhow!(
+                "note {note} is not owned by account {}",
+                account.expose_uuid()
+            ));
+        }
+        total_in += n.note.value().inner();
+        spends.push((fvk, n));
+    }
+    let total_out: u64 = outputs.iter().map(|(_, v)| v).sum();
+    if total_in != total_out.saturating_add(fee) {
+        return Err(anyhow!(
+            "inputs ({total_in} zat) must equal outputs ({total_out} zat) plus the fee ({fee} zat)"
+        ));
+    }
+    let mut outs = Vec::with_capacity(outputs.len());
+    for (account, value) in outputs {
+        let fvk = account_orchard_fvk(db, *account)?;
+        let to = next_orchard_address(db, *account)?;
+        outs.push((fvk.to_ovk(Scope::External), to, *value));
+    }
+    let (anchor, paths) = db
         .with_ironwood_tree_mut::<_, _, anyhow::Error>(|tree| {
             let root = tree
                 .root_at_checkpoint_id(&anchor_height)
                 .map_err(|e| anyhow!("{e:?}"))?
                 .ok_or_else(|| anyhow!("no Ironwood checkpoint at height {anchor_height}"))?;
-            let w = tree
-                .witness_at_checkpoint_id_caching(position, &anchor_height)
-                .map_err(|e| anyhow!("{e:?}"))?
-                .ok_or_else(|| anyhow!("no witness for the note at height {anchor_height}"))?;
-            Ok((
-                orchard::Anchor::from(root),
-                orchard::tree::MerklePath::from(w),
-            ))
+            let mut paths = Vec::with_capacity(spends.len());
+            for (_, n) in &spends {
+                let w = tree
+                    .witness_at_checkpoint_id_caching(n.position, &anchor_height)
+                    .map_err(|e| anyhow!("{e:?}"))?
+                    .ok_or_else(|| anyhow!("no witness for a note at height {anchor_height}"))?;
+                paths.push(orchard::tree::MerklePath::from(w));
+            }
+            Ok((orchard::Anchor::from(root), paths))
         })?
         .ok_or_else(|| anyhow!("wallet has no Ironwood commitment tree"))?;
     let target: BlockHeight = target_height.into();
@@ -339,17 +363,21 @@ pub fn build_self_spend(
         },
     )
     .with_expiry_height(expiry);
-    builder
-        .add_ironwood_spend::<FeeError>(fvk.clone(), n.note, path)
-        .map_err(|e| anyhow!("adding spend: {e:?}"))?;
-    builder
-        .add_ironwood_output::<FeeError>(
-            Some(fvk.to_ovk(Scope::External)),
-            to,
-            Zatoshis::from_u64(value - fee).map_err(|_| anyhow!("value"))?,
-            MemoBytes::empty(),
-        )
-        .map_err(|e| anyhow!("adding output: {e:?}"))?;
+    for ((fvk, n), path) in spends.into_iter().zip(paths) {
+        builder
+            .add_ironwood_spend::<FeeError>(fvk, n.note, path)
+            .map_err(|e| anyhow!("adding spend: {e:?}"))?;
+    }
+    for (ovk, to, value) in outs {
+        builder
+            .add_ironwood_output::<FeeError>(
+                Some(ovk),
+                to,
+                Zatoshis::from_u64(value).map_err(|_| anyhow!("value"))?,
+                MemoBytes::empty(),
+            )
+            .map_err(|e| anyhow!("adding output: {e:?}"))?;
+    }
     let result = builder
         .build_for_pczt(OsRng, &FeeRule::standard())
         .map_err(|e| anyhow!("building transaction: {e:?}"))?;
@@ -365,10 +393,37 @@ pub fn build_self_spend(
         .finish();
     Ok(SelfSpend {
         pczt,
-        value_out: value - fee,
+        value_out: total_out,
         fee,
         expiry_height: expiry.into(),
     })
+}
+
+/// Retire a note by moving its value to a fresh address of its own account. Used after an
+/// offer did not settle: the seller holds the note's nullifier from the envelope, and once
+/// the note is gone that nullifier can only ever point at this transfer.
+pub fn build_self_spend(
+    db: &mut Db,
+    network: Network,
+    account: AccountUuid,
+    note: NoteRef,
+    min_confirmations: u32,
+) -> Result<SelfSpend> {
+    let (target_height, _) = heights(db, min_confirmations)?;
+    let value = ironwood_note(db, note, target_height)?.note.value().inner();
+    let fee = zip317_fee(2);
+    if value <= fee + ZIP317_MARGINAL_FEE {
+        return Err(anyhow!(
+            "note {note} is worth {value} zat, too little to move for a {fee} zat fee"
+        ));
+    }
+    build_transfer(
+        db,
+        network,
+        &[(account, note)],
+        &[(account, value - fee)],
+        min_confirmations,
+    )
 }
 
 /// Build the bundle until the item spend (spend 0) and the new item note (output 0) share an

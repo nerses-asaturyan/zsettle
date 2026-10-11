@@ -3,6 +3,10 @@
 //! chain is the one this build signs for.
 
 use anyhow::{anyhow, Result};
+use std::task::{Context, Poll};
+
+use tonic::body::Body;
+use tonic::codegen::{http, BoxFuture, Service};
 use tonic::transport::{Channel, ClientTlsConfig};
 use zcash_client_backend::proto::service::{
     compact_tx_streamer_client::CompactTxStreamerClient, BlockId, Empty, RawTransaction, TreeState,
@@ -12,8 +16,52 @@ use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
 /// Default mainnet lightwalletd endpoint.
 pub const DEFAULT_SERVER: &str = "https://zec.rocks:443";
 
-/// Open a gRPC channel to a lightwalletd server (TLS with WebPKI roots for `https` URLs).
-pub async fn connect(server: &str) -> Result<CompactTxStreamerClient<Channel>> {
+/// The one lightwalletd method that would carry the wallet's transparent addresses.
+const ADDRESS_UTXOS: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetAddressUtxosStream";
+
+/// A lightwalletd channel that never sends transparent addresses. The wallet library's sync
+/// refreshes transparent UTXOs through `GetAddressUtxosStream` whenever its PCZT support is
+/// compiled in, which would hand the server a persistent identifier of the wallet on every
+/// pass. zsettle holds no transparent funds, so that request is answered here with an empty
+/// result and never leaves the process.
+#[derive(Clone)]
+pub struct Shielded<S>(S);
+
+impl<S> Service<http::Request<Body>> for Shielded<S>
+where
+    S: Service<http::Request<Body>, Response = http::Response<Body>>,
+    S::Future: Send + 'static,
+    S::Error: Send + 'static,
+{
+    type Response = http::Response<Body>;
+    type Error = S::Error;
+    type Future = BoxFuture<Self::Response, Self::Error>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.0.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: http::Request<Body>) -> Self::Future {
+        if req.uri().path() == ADDRESS_UTXOS {
+            // A gRPC "trailers-only" response: status OK and no messages.
+            let resp = http::Response::builder()
+                .status(200)
+                .header("content-type", "application/grpc")
+                .header("grpc-status", "0")
+                .body(Body::default())
+                .expect("static response");
+            return Box::pin(async move { Ok(resp) });
+        }
+        Box::pin(self.0.call(req))
+    }
+}
+
+/// The client every zsettle command talks through.
+pub type Client = CompactTxStreamerClient<Shielded<Channel>>;
+
+/// Open a gRPC channel to a lightwalletd server (TLS with WebPKI roots for `https` URLs),
+/// wrapped so that transparent addresses never go out.
+pub async fn connect(server: &str) -> Result<Client> {
     let uri: tonic::transport::Uri = server.parse().map_err(|e| anyhow!("server url: {e}"))?;
     let host = uri
         .host()
@@ -29,7 +77,7 @@ pub async fn connect(server: &str) -> Result<CompactTxStreamerClient<Channel>> {
         .connect()
         .await
         .map_err(|e| anyhow!("connecting to {server}: {e}"))?;
-    Ok(CompactTxStreamerClient::new(channel))
+    Ok(CompactTxStreamerClient::new(Shielded(channel)))
 }
 
 /// Install the process-wide rustls crypto provider. Call before any TLS connection.
@@ -178,4 +226,55 @@ fn check_consensus_info(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An inner service that records which path reached it.
+    struct Inner;
+
+    impl Service<http::Request<Body>> for Inner {
+        type Response = http::Response<Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+
+        fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, req: http::Request<Body>) -> Self::Future {
+            let path = req.uri().path().to_string();
+            Box::pin(async move {
+                Ok(http::Response::builder()
+                    .header("x-reached-server", path)
+                    .body(Body::default())
+                    .unwrap())
+            })
+        }
+    }
+
+    #[test]
+    fn transparent_address_requests_never_reach_the_server() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let mut s = Shielded(Inner);
+            let req = http::Request::builder()
+                .uri(ADDRESS_UTXOS)
+                .body(Body::default())
+                .unwrap();
+            let resp = s.call(req).await.unwrap();
+            assert_eq!(resp.headers().get("grpc-status").unwrap(), "0");
+            assert!(resp.headers().get("x-reached-server").is_none());
+
+            let other = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLatestBlock";
+            let req = http::Request::builder()
+                .uri(other)
+                .body(Body::default())
+                .unwrap();
+            let resp = s.call(req).await.unwrap();
+            assert_eq!(resp.headers().get("x-reached-server").unwrap(), other);
+        });
+    }
 }

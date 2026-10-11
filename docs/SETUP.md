@@ -51,7 +51,7 @@ Send ZEC to the address `init` printed, or to a fresh one from `zsettle address`
 
 ## Privacy of the light server connection
 
-Every sync, broadcast and `verify` talks to a lightwalletd server over TLS. The server learns the IP that syncs an imported key, sends a trade or fetches an item's genesis transaction. Use Tor or your own lightwalletd if that matters to you.
+Every sync, broadcast and `verify` talks to a lightwalletd server over TLS. The server learns the IP behind each call, the block ranges a wallet scans, the listing birthday an imported key starts at, the genesis transaction `verify` asks for (not with `--private`), and the transactions sent. It never receives the wallet's transparent addresses: the wallet library would send them on every sync, and zsettle answers that request inside the process. Use Tor or your own lightwalletd if the rest matters to you.
 
 ## Network upgrade
 

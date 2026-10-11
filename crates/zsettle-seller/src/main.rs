@@ -23,15 +23,18 @@ use zsettle_core::pczt as pczt_ops;
 use zsettle_core::policy::{check, describe, prepared_ivk, Approved, PolicyError, SellerPolicy};
 use zsettle_core::wallet::{
     account_birthday, account_orchard_fvk, create_account, heights, init_wallet, ironwood_note,
-    list_accounts, max_scanned_height, next_orchard_address, parse_account,
+    largest_spendable_note, list_accounts, max_scanned_height, next_orchard_address, parse_account,
     recent_ironwood_anchors, sync_blocking, unspent_ironwood_nullifiers, Db, NoteRef, Wallet,
 };
 use zsettle_core::DEFAULT_MAX_EXPIRY_DELTA;
+use zsettle_core::ZIP317_MARGINAL_FEE;
 use zsettle_core::{MAX_ENVELOPE_BYTES, MIN_PRICE_ZAT};
 
 /// How many recent blocks' tree roots count as acceptable anchors (the wallet keeps that
 /// many checkpoints).
 const ANCHOR_DEPTH: u32 = 100;
+/// How many blocks a buyer may be ahead of this wallet before a too-long expiry is final.
+const LAG_SLACK: u32 = 5;
 /// Longest pause between passes after repeated failures.
 const MAX_BACKOFF_SECS: u64 = 300;
 /// Inbox files modified more recently than this are left for the next pass: they may still be
@@ -178,6 +181,10 @@ enum Cmd {
         /// edit you do intend). Every entry is still checked.
         #[arg(long)]
         resign_unverified: bool,
+        /// Take this item out of the file (delist without spending; a signed offer stays
+        /// valid until its expiry, `cancel` ends it for good).
+        #[arg(long)]
+        remove: Option<NoteRef>,
         /// Display name.
         #[arg(long, default_value = "")]
         name: String,
@@ -187,6 +194,36 @@ enum Cmd {
         /// Maximum blocks between the chain tip and the transaction expiry.
         #[arg(long, default_value_t = zsettle_core::DEFAULT_MAX_EXPIRY_DELTA)]
         max_expiry_delta: u32,
+    },
+    /// Take an item off the market for good: spend its note to a fresh address of the item
+    /// account, with one payout-account note paying the fee, and drop it from the listings
+    /// file. Once mined, `items` shows the new note, which can be listed again later.
+    Cancel {
+        #[command(flatten)]
+        w: WalletArgs,
+        /// age identity file that decrypts the wallet's mnemonic. Omit it for a
+        /// passphrase-protected wallet: the passphrase is asked for, or taken from
+        /// ZSETTLE_PASSPHRASE.
+        #[arg(long)]
+        identity: Option<PathBuf>,
+        /// The listed item note, as <txid>:<output index>.
+        #[arg(long)]
+        item_note: NoteRef,
+        /// ZIP 32 account index of the payout account (signs the fee-paying spend).
+        #[arg(long, default_value_t = 0)]
+        payout_account_index: u32,
+        /// Listings file to drop the item from (signed again).
+        #[arg(long)]
+        listings: Option<PathBuf>,
+        /// Confirmations required on the notes.
+        #[arg(long, default_value_t = 3)]
+        min_confirmations: u32,
+        /// lightwalletd server URL.
+        #[arg(long, default_value = DEFAULT_SERVER)]
+        server: String,
+        /// Skip the sync first (the wallet must be fresh).
+        #[arg(long)]
+        no_sync: bool,
     },
     /// Check one trade PCZT against the listings, verify its proof, and sign the item action.
     Sign {
@@ -394,6 +431,7 @@ fn main() -> Result<()> {
             price,
             max_expiry_delta,
             resign_unverified,
+            remove,
         } => {
             let wallet = Wallet::open(&w.wallet)?;
             let mut db = wallet.db()?;
@@ -462,6 +500,11 @@ fn main() -> Result<()> {
                     max_expiry_delta,
                 });
             }
+            if let Some(note) = remove {
+                if !l.remove(&note.to_string()) {
+                    return Err(anyhow!("{note} is not listed in {}", listings.display()));
+                }
+            }
             // Every entry is checked, the new one and the ones already in the file.
             for item in &l.items {
                 if item.price_zat < MIN_PRICE_ZAT {
@@ -487,12 +530,119 @@ fn main() -> Result<()> {
                     }
                 }
             }
+            if w.item_account_index == 0 {
+                eprintln!(
+                    "warning: account index 0 is a wallet's paying account; publishing its viewing key exposes every payment it ever receives. Keep items in an account of their own (new-item-account)"
+                );
+            }
+            let held = zsettle_core::mint::unspent_notes(&wallet, &db, item_account)?.len();
+            if held > 1 {
+                eprintln!(
+                    "warning: the item account holds {held} notes; whoever has this file sees all of them and every sale. One account per item (new-item-account) keeps consignments apart"
+                );
+            }
             l.sign(&ask, max_scanned_height(&db)?.unwrap_or(0))?;
             l.verify_signature()?;
             l.write(&listings)?;
             println!(
                 "{}",
                 serde_json::json!({ "listings": listings, "items": l.items.len(), "signed": true, "issued_at": l.issued_at, "key_fingerprint": l.key_fingerprint() })
+            );
+            Ok(())
+        }
+        Cmd::Cancel {
+            w,
+            identity,
+            item_note,
+            payout_account_index,
+            listings,
+            min_confirmations,
+            server,
+            no_sync,
+        } => {
+            let wallet = Wallet::open(&w.wallet)?;
+            let mut db = wallet.db()?;
+            if !no_sync {
+                sync_blocking(&wallet, &mut db, &server)?;
+            }
+            let item_account = parse_account(&w.item_account)?;
+            let payout_account = parse_account(&w.payout_account)?;
+            let (target, _) = heights(&db, min_confirmations)?;
+            let item_value = ironwood_note(&db, item_note, target)?.note.value().inner();
+            let fee = zsettle_core::zip317_fee(2);
+            // A payout note that covers the fee exactly or leaves change above dust.
+            let mut exclude = Vec::new();
+            let (payout_note, payout_value) = loop {
+                let Some(n) = largest_spendable_note(&db, payout_account, target, &exclude)? else {
+                    return Err(anyhow!(
+                        "no payout note can pay the {fee} zat fee: it needs exactly {fee} zat or more than {} zat",
+                        fee + ZIP317_MARGINAL_FEE
+                    ));
+                };
+                let v = ironwood_note(&db, n, target)?.note.value().inner();
+                if v == fee || v > fee + ZIP317_MARGINAL_FEE {
+                    break (n, v);
+                }
+                exclude.push(n);
+            };
+            let mut outputs = vec![(item_account, item_value)];
+            if payout_value > fee {
+                outputs.push((payout_account, payout_value - fee));
+            }
+            let seed = wallet.seed(identity.as_deref())?;
+            let usk_item = wallet.spending_key(&seed, w.item_account_index)?;
+            if FullViewingKey::from(usk_item.orchard()) != account_orchard_fvk(&db, item_account)? {
+                return Err(anyhow!(
+                    "account index {} does not derive the item account",
+                    w.item_account_index
+                ));
+            }
+            let usk_payout = wallet.spending_key(&seed, payout_account_index)?;
+            if FullViewingKey::from(usk_payout.orchard())
+                != account_orchard_fvk(&db, payout_account)?
+            {
+                return Err(anyhow!(
+                    "account index {payout_account_index} does not derive the payout account"
+                ));
+            }
+            check_consensus_at_tip_blocking(&server, wallet.network)?;
+            let built = zsettle_core::trade::build_transfer(
+                &mut db,
+                wallet.network,
+                &[(item_account, item_note), (payout_account, payout_note)],
+                &outputs,
+                min_confirmations,
+            )?;
+            let item_ask = SpendAuthorizingKey::from(usk_item.orchard());
+            let (pczt, n1) = pczt_ops::sign_matching_actions(built.pczt, &item_ask)?;
+            let (pczt, n2) = pczt_ops::sign_matching_actions(
+                pczt,
+                &SpendAuthorizingKey::from(usk_payout.orchard()),
+            )?;
+            if n1 != 1 || n2 != 1 {
+                return Err(anyhow!(
+                    "expected one signature per account, got {n1} and {n2}"
+                ));
+            }
+            let tx = pczt_ops::extract(pczt)?;
+            let bytes = pczt_ops::tx_bytes(&tx)?;
+            zsettle_core::broadcast::send_raw_transaction_blocking(&server, bytes)?;
+            let mut delisted = false;
+            if let Some(path) = listings {
+                let mut l = Listings::read_verified(&path)?;
+                if l.remove(&item_note.to_string()) {
+                    l.sign(&item_ask, max_scanned_height(&db)?.unwrap_or(0))?;
+                    l.write(&path)?;
+                    delisted = true;
+                }
+            }
+            println!(
+                "{}",
+                serde_json::json!({
+                    "cancelled": item_note.to_string(), "txid": tx.txid().to_string(), "fee": built.fee,
+                    "fee_paid_by": payout_note.to_string(), "delisted": delisted, "expiry_height": built.expiry_height,
+                    "next": "once mined, `items` shows the item's new note; `publish --item-note` lists it again",
+                })
             );
             Ok(())
         }
@@ -518,7 +668,7 @@ fn main() -> Result<()> {
             let pczt = pczt_ops::from_bytes(&bytes)?;
             let vk = pczt_ops::verifying_key();
             pczt_ops::verify_proof(&pczt, &vk).context("refused: proof")?;
-            println!("proof verified");
+            eprintln!("proof verified");
             let outcome = process(&db, &w, wallet.network, &l, &pczt, &anchors)?;
             println!("{}", describe(&outcome.result));
             if outcome.item.is_none() && outcome.unavailable > 0 {
@@ -701,7 +851,9 @@ impl Service<'_> {
         let mut paths: Vec<PathBuf> = fs::read_dir(self.inbox)
             .with_context(|| format!("reading {}", self.inbox.display()))?
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().is_file() && e.path().extension().is_some_and(|x| x == "pczt"))
+            // Regular files only: a symlink to a FIFO or a device would stall the pass.
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+            .filter(|e| e.path().extension().is_some_and(|x| x == "pczt"))
             .filter(|e| settled(e, now))
             .map(|e| e.path())
             .collect();
@@ -806,9 +958,27 @@ impl Service<'_> {
                 outcome.unavailable
             )));
         }
-        let approved = outcome
-            .result
-            .map_err(|e| Refusal::Reject(format!("refused: {e}")))?;
+        let approved = match outcome.result {
+            Ok(approved) => approved,
+            // The buyer may be a block or two ahead of this wallet: a root it has not scanned
+            // yet, or an expiry measured from a later tip. Judge again next pass.
+            Err(PolicyError::UnknownAnchor) if expiry > outcome.tip => {
+                return Err(Refusal::Defer(
+                    "anchor not known to this wallet yet (buyer ahead of it?)".into(),
+                ))
+            }
+            Err(PolicyError::ExpiryTooLong {
+                expiry: e,
+                tip,
+                max_delta,
+            }) if e <= tip.saturating_add(max_delta).saturating_add(1 + LAG_SLACK) => {
+                return Err(Refusal::Defer(format!(
+                    "expiry {e} is {} blocks past the limit; the buyer may be ahead of this wallet",
+                    e - tip - max_delta - 1
+                )))
+            }
+            Err(e) => return Err(Refusal::Reject(format!("refused: {e}"))),
+        };
         let item = outcome.item.ok_or_else(|| {
             Refusal::Reject("error: approved trade without a listed item".to_string())
         })?;

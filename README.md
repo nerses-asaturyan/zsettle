@@ -20,8 +20,8 @@ The buyer builds and proves the whole transaction holding only viewing keys. The
 | Crate | Role |
 |---|---|
 | `zsettle-core` | library: items, signed listings, two-party bundle, PCZT roles, seller policy, proof check, wallet sync, provenance verifier, lightwalletd client |
-| `zsettle` | buyer and verifier CLI: `init`, `accounts`, `address`, `list`, `sync`, `import-listing`, `buy`, `finish`, `broadcast`, `rotate`, `notes`, `verify` |
-| `zsettle-seller` | seller service: `init`, `accounts`, `address`, `sync`, `new-item-account`, `mint`, `items`, `publish`, `sign`, `serve` (syncs, reconciles listings with the chain, verifies proofs, signs only the item action) |
+| `zsettle` | buyer and verifier CLI: `init`, `accounts`, `address`, `list`, `sync`, `import-listing`, `buy`, `finish`, `broadcast`, `rotate`, `consolidate`, `notes`, `verify` |
+| `zsettle-seller` | seller service: `init`, `accounts`, `address`, `sync`, `new-item-account`, `mint`, `items`, `publish`, `cancel`, `sign`, `serve` (syncs, reconciles listings with the chain, verifies proofs, signs only the item action) |
 
 ## One minute, no wallet
 
@@ -52,7 +52,7 @@ zsettle finish         --wallet B --identity B/key.txt --full trade.pczt --signe
 zsettle verify --listings listings.json --item <txid>:<idx>
 ```
 
-`S`, `B` are wallet directories, `I`, `P`, `A` the account UUIDs `init` prints (`accounts` lists them again). No other tool is needed. Every command prints one JSON line; `zsettle notes --wallet B --account A` shows what a wallet holds.
+`S`, `B` are wallet directories, `I`, `P`, `A` the account UUIDs `init` prints (`accounts` lists them again). No other tool is needed. Commands that act print one JSON line; `list`, `notes` and `items` print tables; `zsettle notes --wallet B --account A` shows what a wallet holds.
 
 See [docs/SETUP.md](docs/SETUP.md) for wallets, [docs/TRADE.md](docs/TRADE.md) for the full flow including resale, [spec/PROTOCOL.md](spec/PROTOCOL.md) and [spec/THREAT_MODEL.md](spec/THREAT_MODEL.md) for the design.
 
@@ -62,8 +62,8 @@ See [docs/SETUP.md](docs/SETUP.md) for wallets, [docs/TRADE.md](docs/TRADE.md) f
 |---|---|
 | Buyer and seller identities | private: shielded Ironwood notes, fresh diversified addresses for every item and for the market payout |
 | Trade amounts | private; only the listed price is public, by choice. The seller's copy of a trade carries no value trapdoors, so the seller cannot solve for the buyer's values |
-| On chain | a trade is a two- or three-action Ironwood transaction with the ecosystem's default expiry and fee; nothing marks it as a trade |
-| What a listings holder learns | the item notes of the listed account and when each is spent; no trade output is encrypted to the published key; one account per item limits this to one item |
+| On chain | a trade is a two- or three-action Ironwood transaction with the ecosystem's default expiry and fee; unmarked to anyone without the listings file. Whoever holds that file can derive the listed items' nullifiers and so spot every trade of that account |
+| What a listings holder learns | the item notes of the listed account and when each is spent, plus the height the file was last signed at; no trade output is encrypted to the published key; one account per item limits this to one item |
 | Settlement | real: four mainnet trades, `e76531b9…6ae2` (block 3514109), `2e0f4af1…9167c` (3514119), `e70f4890…8877` (3514159) and a resale `af09c2cf…5804` (3514174), made before the privacy pass (see docs/TRADE.md) |
 | Items | real shielded notes minted by this tool; no claim about any third-party collection |
 | Provenance | real: `zsettle verify` traces an item through mainnet compact blocks with the listings' viewing keys only, across resales |
@@ -76,6 +76,7 @@ See [docs/SETUP.md](docs/SETUP.md) for wallets, [docs/TRADE.md](docs/TRADE.md) f
 - Listings, seller service loop, minting, built-in wallet sync, provenance verification with viewing keys only: working on mainnet.
 - Seller service: syncs before every pass, removes sold items by itself, signs every acceptable offer (nothing to lock, nothing to grief), survives restarts, hostile inboxes and server outages.
 - Resale: items can be received into a dedicated item account and relisted; provenance follows them across holders.
+- Light server: the wallet's transparent addresses are never sent to it (the library's UTXO refresh is answered inside the process); what it does learn is in the threat model.
 - Network upgrades: build, mint and broadcast stop with a message when the server's consensus branch is not the one this build signs for.
 - Wallets: created by the tools themselves (`init`), in the zcash-devtool layout; no other software is needed.
 - Tests: the proven settlement core, action pairing, redaction and proof checks, twelve seller-policy cases, the rotation transfer, listings signatures.
