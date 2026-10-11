@@ -140,6 +140,23 @@ pub fn local_branch(network: Network, height: u32) -> BranchId {
 /// it is better to say so than to broadcast one.
 pub fn check_consensus_blocking(server: &str, network: Network, height: u32) -> Result<ServerInfo> {
     let info = server_info_blocking(server)?;
+    check_consensus_info(server, &info, network, height)?;
+    Ok(info)
+}
+
+/// The same check at the server's next block, in one round trip.
+pub fn check_consensus_at_tip_blocking(server: &str, network: Network) -> Result<ServerInfo> {
+    let info = server_info_blocking(server)?;
+    check_consensus_info(server, &info, network, info.block_height.saturating_add(1))?;
+    Ok(info)
+}
+
+fn check_consensus_info(
+    server: &str,
+    info: &ServerInfo,
+    network: Network,
+    height: u32,
+) -> Result<()> {
     let expected_chain = match network {
         Network::MainNetwork => "main",
         Network::TestNetwork => "test",
@@ -160,5 +177,5 @@ pub fn check_consensus_blocking(server: &str, network: Network, height: u32) -> 
             ours_id
         ));
     }
-    Ok(info)
+    Ok(())
 }

@@ -279,3 +279,43 @@ fn refuses_a_transaction_for_another_branch() {
         Err(PolicyError::WrongBranch { .. })
     ));
 }
+
+/// The policy refuses an item action whose spend randomizer is zero: `rk` would then equal
+/// the seller's bare `ak`. The builder never emits one, so the PCZT is edited after the
+/// fact: the randomizer's 32 bytes are located in the serialized form and zeroed.
+#[test]
+fn refuses_a_zero_randomizer() {
+    use pasta_curves::group::ff::PrimeField;
+    use pczt::roles::verifier::Verifier;
+    let f = fixture();
+    let pczt = trade(&f, 6_000, TARGET + 10, false);
+    let nf = f.item_note.nullifier(&f.fvk_item);
+    let ivk = prepared_ivk(&f.fvk_seller);
+    let found = std::cell::RefCell::new(None);
+    Verifier::new(pczt.clone())
+        .with_ironwood::<anyhow::Error, _>(|bundle| {
+            for (i, action) in bundle.actions().iter().enumerate() {
+                if action.spend().nullifier() == &nf {
+                    *found.borrow_mut() =
+                        Some((i, action.spend().alpha().expect("alpha set").to_repr()));
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+    let (index, alpha) = found.into_inner().expect("the item action");
+    let mut bytes = zsettle_core::pczt::to_bytes(&pczt).unwrap();
+    let hits: Vec<usize> = bytes
+        .windows(32)
+        .enumerate()
+        .filter(|(_, w)| *w == &alpha[..])
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(hits.len(), 1, "the randomizer appears exactly once");
+    bytes[hits[0]..hits[0] + 32].fill(0);
+    let edited = zsettle_core::pczt::from_bytes(&bytes).unwrap();
+    assert_eq!(
+        check(&edited, &nf, &[nf], &ivk, &policy(6_000), &[f.anchor]),
+        Err(PolicyError::ZeroRandomizer(index))
+    );
+}

@@ -2,7 +2,8 @@
 //!
 //! Atomic item-for-ZEC settlement on Zcash, in one shielded Ironwood transaction.
 //!
-//! An *item* is an ordinary shielded note named by its commitment (the nscv convention).
+//! An *item* is an ordinary shielded note, identified by the transaction and action index
+//! that created it.
 //! A *trade* is a two-action bundle: action A spends the seller's item note to a new item
 //! note owned by the buyer; action B spends the buyer's ZEC note to the seller at the
 //! listed price. The buyer proves the whole bundle holding only full viewing keys. The
