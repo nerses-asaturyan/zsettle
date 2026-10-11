@@ -32,7 +32,7 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Pczt> {
     Pczt::parse(bytes).map_err(|e| anyhow!("invalid PCZT: {e:?}"))
 }
 
-/// Short content tag of an envelope (first 4 bytes of a keyed BLAKE2b-256, as hex). Used to
+/// Content tag of an envelope (first 16 bytes of a keyed BLAKE2b-256, as hex). Used to
 /// name the seller's reply after the envelope it answers, so two envelopes with the same file
 /// name never collide and the same envelope always maps to the same reply.
 pub fn envelope_tag(bytes: &[u8]) -> String {
@@ -40,7 +40,7 @@ pub fn envelope_tag(bytes: &[u8]) -> String {
         .hash_length(32)
         .personal(b"zsettle_envelope")
         .hash(bytes);
-    hex::encode(&hash.as_bytes()[..4])
+    hex::encode(&hash.as_bytes()[..16])
 }
 
 /// Number of actions in the Ironwood bundle.

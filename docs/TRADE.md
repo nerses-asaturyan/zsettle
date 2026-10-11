@@ -91,7 +91,7 @@ zsettle buy … --receive-account <BUYER_ITEM_ACCOUNT_UUID> …
 
 After the trade is mined, the buyer is a seller: `zsettle-seller publish --wallet ~/.zsettle/buyer --identity ~/.zsettle/buyer/key.txt --item-account <BUYER_ITEM_ACCOUNT_UUID> --item-account-index 1 --payout-account <BUYER_ACCOUNT_UUID> --listings mine.json --item-note <TRADE_TXID>:<ITEM_ACTION_INDEX> …` (the item action index is printed by `buy`), then `zsettle-seller serve` with the same arguments. The next buyer proceeds exactly as above with `mine.json`.
 
-## Verifying an item without any key
+## Verifying an item with viewing keys only
 
 ```
 zsettle verify --listings listings.json --item <TXID>:<INDEX>
@@ -109,13 +109,15 @@ Asks the server which block holds the genesis transaction, streams compact block
 | `e70f48902faaf55bf3cda050f08a9ee8f3a1b02abb780c46ba3e8d6064618877` | 3514159 | item `6f1c8e26…bca26a:1` to the buyer's own item account (`--receive-account`), 5,000 zat to the seller |
 | `af09c2cf525d2bb6e553b61a1d3cc2674ebdf09726be1e3959ee36f5143f5804` | 3514174 | resale: the buyer listed the item from its item account, the original seller bought it back for 7,000 zat with an exact note (two actions, fee 10,000); the buyer's wallet ran `serve` and signed |
 
-`zsettle verify --listings market/listings.json --listings market2/listings.json --item 6f1c8e26…:1` follows item #3 from its genesis (first seller's key) into the buyer's item account (second key) in under a second. It reports the resale as a transfer to an unknown holder: that transaction was built before the action-pairing rule was enforced (see [PROTOCOL.md](../spec/PROTOCOL.md), Items), so the new item note ended up in a different action from the item spend and the lineage, as the protocol defines it, stops there.
+The two listings files are in `examples/` (`market.json`, `market2.json`); `zsettle verify --listings examples/market.json --listings examples/market2.json --item af09c2cf525d2bb6e553b61a1d3cc2674ebdf09726be1e3959ee36f5143f5804:0` needs no wallet and no funds. `zsettle verify --listings market/listings.json --listings market2/listings.json --item 6f1c8e26…:1` follows item #3 from its genesis (first seller's key) into the buyer's item account (second key) in under a second. It reports the resale as a transfer to an unknown holder: that transaction was built before the action-pairing rule was enforced (see [PROTOCOL.md](../spec/PROTOCOL.md), Items), so the new item note ended up in a different action from the item spend and the lineage, as the protocol defines it, stops there.
 
 These four trades also predate the privacy review: their item outputs were encrypted to the seller's published outgoing key and sent to the buyer's default address, and their expiry was ten blocks. Anyone holding the listings files of that day can read those four item notes. Trades built since do none of this, which is why the old transactions are listed here rather than quietly dropped.
 
 ## Notes
 
-- Expiry defaults to 40 blocks, the same as every librustzcash wallet transaction, so a trade carries no distinguishing expiry. After expiry the seller's signature is worthless; the seller can cancel earlier by spending the item note.
+- Expiry defaults to 40 blocks, the same as every librustzcash wallet transaction, so a trade carries no distinguishing expiry; `buy` never uses more, and `publish` warns about a smaller limit.
+- Stop `serve` before running `publish` on the same listings file; both rewrite it and the wallet database.
+- The seller learns the nullifier of the paying note from the envelope. If an offer does not settle, spend that note to yourself before reusing it, or the seller can recognise its later spend. After expiry the seller's signature is worthless; the seller can cancel earlier by spending the item note.
 - Anyone holding the item viewing key learns when the item sells. That is inherent to consignment-style items.
 - The buyer's full PCZT (`--out`) and the final PCZT written by `finish` contain the buyer's full viewing key and witnesses: keep them private. The seller's copy and the signed reply do not.
 - The light server sees which IP syncs an imported key, broadcasts a trade or fetches a genesis transaction. Use Tor or your own lightwalletd if that matters.

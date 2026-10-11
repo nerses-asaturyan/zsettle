@@ -19,11 +19,20 @@ The buyer builds and proves the whole transaction holding only viewing keys. The
 
 | Crate | Role |
 |---|---|
-| `zsettle-core` | library: items, signed listings, two-party bundle, PCZT roles, seller policy, proof check, wallet sync, keyless verifier, lightwalletd client |
+| `zsettle-core` | library: items, signed listings, two-party bundle, PCZT roles, seller policy, proof check, wallet sync, provenance verifier, lightwalletd client |
 | `zsettle` | buyer and verifier CLI: `list`, `sync`, `import-listing`, `buy`, `finish`, `broadcast`, `verify` |
 | `zsettle-seller` | seller service: `sync`, `mint`, `items`, `publish`, `sign`, `serve` (syncs, reconciles listings with the chain, verifies proofs, signs only the item action) |
 
 This branch targets the Zcash testnet (NU7) with the pre-release crates; see [docs/TESTNET.md](docs/TESTNET.md). The `main` branch targets mainnet.
+
+## One minute, no wallet
+
+```
+zsettle list   --listings examples/market2.json
+zsettle verify --listings examples/market.json --listings examples/market2.json --item af09c2cf525d2bb6e553b61a1d3cc2674ebdf09726be1e3959ee36f5143f5804:0
+```
+
+The two signed listings files from the mainnet trades are in `examples/`; the trace reads mainnet compact blocks and needs nothing else.
 
 ## Ten minutes, two terminals
 
@@ -62,11 +71,12 @@ See [docs/SETUP.md](docs/SETUP.md) for wallets, [docs/TRADE.md](docs/TRADE.md) f
 ## Status
 
 - Two-party trade construction, proving, redaction, seller policy, proof verification, signing, extraction and broadcast: working on mainnet.
-- Listings, seller service loop, minting, built-in wallet sync, keyless verification: working on mainnet.
+- Listings, seller service loop, minting, built-in wallet sync, provenance verification with viewing keys only: working on mainnet.
 - Seller service: syncs before every pass, removes sold items by itself, signs every acceptable offer (nothing to lock, nothing to grief), survives restarts, hostile inboxes and server outages.
 - Resale: items can be received into a dedicated item account and relisted; provenance follows them across holders.
 - Network upgrades: build, mint and broadcast stop with a message when the server's consensus branch is not the one this build signs for.
-- Tests: the proven settlement core, action pairing, redaction and proof checks, eight seller-policy cases, listings signatures.
+- Tests: the proven settlement core, action pairing, redaction and proof checks, eleven seller-policy cases, listings signatures.
+- Reviewed for privacy and soundness in several independent passes; every finding is fixed or documented.
 
 ## License
 

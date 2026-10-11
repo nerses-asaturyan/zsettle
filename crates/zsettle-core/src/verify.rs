@@ -1,4 +1,4 @@
-//! Keyless provenance verification from chain data.
+//! Provenance verification from chain data with viewing keys only.
 //!
 //! Anyone holding an item's consignments (the full viewing keys of the item accounts it has
 //! passed through) can trace the item without any spending key:
@@ -63,8 +63,15 @@ pub enum Status {
         /// Label of the consignment that owns the last hop.
         by: String,
     },
-    /// The last hop was spent into a note none of the supplied keys can decrypt.
+    /// The last hop was spent into a note none of the supplied keys can decrypt: sold to a
+    /// holder whose listings were not supplied, or spent outside the protocol.
     TransferredToUnknownHolder,
+    /// The last hop was spent by a transaction whose successor note has a different value,
+    /// which a trade never does: the item was moved or spent outside the protocol.
+    LineageBroken {
+        /// Transaction that broke the lineage.
+        txid: String,
+    },
 }
 
 /// Full provenance report.
@@ -257,6 +264,7 @@ async fn trace(
     let mut hops: Vec<Hop> = Vec::new();
     // Nullifier of the hop we are watching for a spend, and the key that owns it.
     let mut watch: Option<(Nullifier, usize)> = None;
+    let mut broken: Option<String> = None;
     let mut scanned_to = from_height;
 
     'blocks: while let Some(block) = stream.message().await.map_err(|e| anyhow!("stream: {e}"))? {
@@ -292,6 +300,7 @@ async fn trace(
                 // Spent: the successor note is this action's output.
                 match ring.decrypt(&act) {
                     Some((k, note)) => {
+                        let previous = hops.last().and_then(|h| h.value_zat);
                         hops.push(Hop {
                             txid: txid.clone(),
                             height,
@@ -299,6 +308,11 @@ async fn trace(
                             value_zat: Some(note.value().inner()),
                             holder: Some(ring.0[k].label.clone()),
                         });
+                        if previous.is_some_and(|v| v != note.value().inner()) {
+                            broken = Some(txid.clone());
+                            watch = None;
+                            break 'blocks;
+                        }
                         watch = Some((note.nullifier(&ring.0[k].fvk), k));
                     }
                     None => {
@@ -323,11 +337,12 @@ async fn trace(
             genesis.index
         ));
     }
-    let status = match watch {
-        Some((_, k)) => Status::Held {
+    let status = match (watch, broken) {
+        (_, Some(txid)) => Status::LineageBroken { txid },
+        (Some((_, k)), None) => Status::Held {
             by: ring.0[k].label.clone(),
         },
-        None => Status::TransferredToUnknownHolder,
+        (None, None) => Status::TransferredToUnknownHolder,
     };
 
     // Item name from the genesis transaction's memo, read with the key that owns the genesis note.

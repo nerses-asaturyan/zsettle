@@ -16,7 +16,7 @@ zsettle reads and writes the wallet layout of [zcash-devtool](https://github.com
 
 ```
 git clone https://github.com/zcash/zcash-devtool ~/code/tools/zcash-devtool
-cd ~/code/tools/zcash-devtool && cargo build --release
+cd ~/code/tools/zcash-devtool && git checkout 5a26ee8 && cargo build --release
 D=~/code/tools/zcash-devtool/target/release/zcash-devtool
 
 $D wallet -w ~/.zsettle/seller init --name seller -i ~/.zsettle/seller/key.txt -n main -s zecrocks

@@ -166,7 +166,7 @@ enum Cmd {
         /// The seller's signed copy.
         #[arg(long)]
         signed: PathBuf,
-        /// Where to write the final transaction (raw bytes); the final PCZT goes to `<out>.final.pczt`.
+        /// Where to write the final transaction (raw bytes); the final PCZT goes to `<out>.pczt`.
         #[arg(long)]
         out: PathBuf,
         /// Broadcast through the lightwalletd server after extraction.
@@ -200,7 +200,7 @@ enum Cmd {
         #[arg(long)]
         server: Option<String>,
     },
-    /// Keyless provenance check of an item: trace it from its genesis note with the listings' viewing keys.
+    /// Provenance check of an item with viewing keys only: trace it from its genesis note with the listings' keys.
     ///
     /// Pass `--listings` once per holder the item has passed through; each file contributes
     /// one consignment and the trace follows the item across every resale it can decrypt.
@@ -231,6 +231,26 @@ enum Cmd {
         #[arg(long)]
         account: String,
     },
+}
+
+/// A listings file older than this many blocks earns a warning at `buy`.
+const STALE_LISTING_BLOCKS: u32 = 1_000;
+
+fn shorten(s: &str) -> String {
+    if s.chars().count() > 20 {
+        let head: String = s.chars().take(12).collect();
+        let tail: String = s
+            .chars()
+            .rev()
+            .take(6)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        format!("{head}…{tail}")
+    } else {
+        s.to_string()
+    }
 }
 
 fn parse_network(name: &str) -> Result<Network> {
@@ -266,10 +286,11 @@ fn main() -> Result<()> {
                 Err(e) => format!("NOT TRUSTWORTHY: {e}"),
             };
             println!(
-                "network: {}  payout: {}…{}  {signed}",
+                "network: {}  payout: {}  key: {}  issued at: {}  {signed}",
                 l.network,
-                &l.payout_address[..12],
-                &l.payout_address[l.payout_address.len() - 6..]
+                shorten(&l.payout_address),
+                l.key_fingerprint(),
+                l.issued_at
             );
             for i in &l.items {
                 println!(
@@ -397,9 +418,17 @@ fn main() -> Result<()> {
             let price_zat = price
                 .or_else(|| listed.as_ref().map(|i| i.price_zat))
                 .ok_or_else(|| anyhow!("--price is required (item not found in listings)"))?;
-            let expiry = expiry_delta
-                .or_else(|| listed.as_ref().map(|i| i.max_expiry_delta))
-                .unwrap_or(zsettle_core::DEFAULT_MAX_EXPIRY_DELTA);
+            // Never longer than the ecosystem default: a shorter limit from the listing is
+            // honoured, a longer one would mark the trade on chain.
+            let expiry = expiry_delta.unwrap_or(
+                listed
+                    .as_ref()
+                    .map(|i| {
+                        i.max_expiry_delta
+                            .min(zsettle_core::DEFAULT_MAX_EXPIRY_DELTA)
+                    })
+                    .unwrap_or(zsettle_core::DEFAULT_MAX_EXPIRY_DELTA),
+            );
             let item_memo = match listed.as_ref().map(|i| i.name.as_str()) {
                 Some(name) if !name.is_empty() => format!("zsettle item: {name}"),
                 _ => String::new(),
@@ -425,7 +454,7 @@ fn main() -> Result<()> {
                 Some(n) => n,
                 None => largest_spendable_note(&db, buyer_account, target, &reserved)?
                     .ok_or_else(|| {
-                        anyhow!("no spendable note in the buyer account that is not reserved by an unsettled trade")
+                        anyhow!("no spendable note in the buyer account: notes received from others need 10 confirmations and change 3, and notes reserved by an unsettled trade are skipped")
                     })?,
             };
             let _ = account_ufvk(&db, buyer_account)?;
@@ -442,6 +471,19 @@ fn main() -> Result<()> {
                 item_memo,
                 receive_account,
             };
+            if let Some(l) = &l {
+                if l.issued_at > 0
+                    && target_height > l.issued_at.saturating_add(STALE_LISTING_BLOCKS)
+                {
+                    eprintln!(
+                        "warning: the listings file was signed {} blocks ago; check with the seller that the price is current",
+                        target_height - l.issued_at
+                    );
+                }
+            }
+            eprintln!(
+                "note: the seller learns the nullifier of the paying note; if this offer does not settle, spend that note to yourself before using it again"
+            );
             let built = build_trade(&mut db, w.network, &req)?;
             fs::write(&out, pczt_ops::to_bytes(&built.pczt)?)
                 .with_context(|| format!("writing {}", out.display()))?;
@@ -495,7 +537,12 @@ fn main() -> Result<()> {
             let usk = w.spending_key(&seed, account_index)?;
             let ask = SpendAuthorizingKey::from(usk.orchard());
             let (pczt, signed_n) = pczt_ops::sign_matching_actions(combined, &ask)?;
-            let final_pczt_path = out.with_extension("final.pczt");
+            if signed_n == 0 {
+                return Err(anyhow!(
+                    "the key derived from --account-index {account_index} signs none of the actions; pass the index of the account that paid"
+                ));
+            }
+            let final_pczt_path = PathBuf::from(format!("{}.pczt", out.display()));
             fs::write(&final_pczt_path, pczt_ops::to_bytes(&pczt)?)?;
             let tx = pczt_ops::extract(pczt)?;
             let bytes = pczt_ops::tx_bytes(&tx)?;

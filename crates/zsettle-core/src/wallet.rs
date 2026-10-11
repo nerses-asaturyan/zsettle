@@ -36,6 +36,9 @@ use zcash_protocol::{
 
 use crate::broadcast::{connect, install_crypto_provider};
 
+/// Account identifier of the wallet database, re-exported for the binaries.
+pub use zcash_client_sqlite::AccountUuid as WalletAccount;
+
 /// The wallet database type used throughout zsettle.
 pub type Db = WalletDb<rusqlite::Connection, Network, SystemClock, ThreadRng>;
 
@@ -457,8 +460,10 @@ fn read_reservations(wallet: &Wallet) -> Result<Reservations> {
 
 fn write_reservations(wallet: &Wallet, r: &Reservations) -> Result<()> {
     let path = wallet.dir.join(RESERVED_FILE);
-    fs::write(&path, serde_json::to_string_pretty(r)?)
-        .with_context(|| format!("writing {}", path.display()))
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_string_pretty(r)?)
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    fs::rename(&tmp, &path).with_context(|| format!("replacing {}", path.display()))
 }
 
 /// Record that a note is committed to a trade that can be mined until `expiry_height`, so

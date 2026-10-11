@@ -63,6 +63,9 @@ pub struct Listings {
     pub payout_address: String,
     /// Items for sale.
     pub items: Vec<ListedItem>,
+    /// Chain height at which the seller signed this version of the file.
+    #[serde(default)]
+    pub issued_at: u32,
     /// RedPallas signature over every other field, by the item account's spend key (hex).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
@@ -77,6 +80,7 @@ struct Unsigned<'a> {
     item_birthday: u32,
     payout_address: &'a str,
     items: &'a [ListedItem],
+    issued_at: u32,
 }
 
 impl Listings {
@@ -148,6 +152,7 @@ impl Listings {
             item_birthday: self.item_birthday,
             payout_address: &self.payout_address,
             items: &self.items,
+            issued_at: self.issued_at,
         };
         let mut msg = SIGNATURE_DOMAIN.to_vec();
         msg.extend(serde_json::to_vec(&unsigned)?);
@@ -157,7 +162,8 @@ impl Listings {
     /// Sign the file with the item account's spend authorizing key. The signature verifies
     /// under the account's spend validating key `ak`, which every holder of the viewing key
     /// has.
-    pub fn sign(&mut self, ask: &SpendAuthorizingKey) -> Result<()> {
+    pub fn sign(&mut self, ask: &SpendAuthorizingKey, issued_at: u32) -> Result<()> {
+        self.issued_at = issued_at;
         // Randomizer zero: the signing key is `ask` itself and the verification key is `ak`.
         let key = ask.randomize(&pasta_curves::pallas::Scalar::from(0u64));
         let sig = key.sign(rand::rng(), &self.signing_bytes()?);
@@ -183,6 +189,16 @@ impl Listings {
             .map_err(|_| anyhow!("the item viewing key has an invalid spend validating key"))?;
         vk.verify(&self.signing_bytes()?, &Signature::from(bytes))
             .map_err(|_| anyhow!("the listings signature does not verify: the file was altered, or it was not signed by the key that controls these items"))
+    }
+
+    /// Short fingerprint of the item viewing key, for buyers to compare out of band: the
+    /// signature only proves the file was written by whoever controls these items.
+    pub fn key_fingerprint(&self) -> String {
+        let hash = blake2b_simd::Params::new()
+            .hash_length(32)
+            .personal(b"zsettle_listkey_")
+            .hash(self.item_ufvk.as_bytes());
+        hex::encode(&hash.as_bytes()[..6])
     }
 
     /// Find an item by note reference string.
@@ -235,6 +251,7 @@ mod tests {
                 price_zat: 5_001,
                 max_expiry_delta: 40,
             }],
+            issued_at: 0,
             signature: None,
         }
     }
@@ -252,7 +269,7 @@ mod tests {
         let (ask, fvk) = keys(9);
         let mut l = sample(&fvk);
         assert!(l.verify_signature().is_err(), "unsigned must be refused");
-        l.sign(&ask).unwrap();
+        l.sign(&ask, 1).unwrap();
         l.verify_signature().unwrap();
 
         let text = serde_json::to_string(&l).unwrap();
@@ -269,7 +286,7 @@ mod tests {
 
         let (other_ask, _) = keys(10);
         let mut wrong_key = l.clone();
-        wrong_key.sign(&other_ask).unwrap();
+        wrong_key.sign(&other_ask, 1).unwrap();
         assert!(wrong_key.verify_signature().is_err());
     }
 
@@ -277,11 +294,11 @@ mod tests {
     fn edits_invalidate_the_signature_until_resigned() {
         let (ask, fvk) = keys(9);
         let mut l = sample(&fvk);
-        l.sign(&ask).unwrap();
+        l.sign(&ask, 1).unwrap();
         let note = l.items[0].note.clone();
         assert!(l.remove(&note));
         assert!(l.signature.is_none());
-        l.sign(&ask).unwrap();
+        l.sign(&ask, 1).unwrap();
         l.verify_signature().unwrap();
     }
 

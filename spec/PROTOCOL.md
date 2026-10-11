@@ -12,11 +12,12 @@
 - Item transfer MUST happen in the same action as the item spend, so the successor note is always the output of the action that spends the predecessor, and its `rho` is the predecessor's nullifier. The Orchard builder pairs spends and outputs at random, so the trade builder rebuilds the bundle with fresh randomness until the item spend and the item output share an action (one chance in two or three per attempt; proving happens once, afterwards). `verify` relies on this rule and on nothing else: the lineage is the chain of spending actions.
 
 ## Listings
-A JSON file the seller publishes anywhere: `{ version, network, item_ufvk, item_birthday, payout_address, items: [{ note, name, price_zat, max_expiry_delta }], signature }`.
+A JSON file the seller publishes anywhere: `{ version, network, item_ufvk, item_birthday, payout_address, items: [{ note, name, price_zat, max_expiry_delta }], issued_at, signature }`.
 
 - `item_ufvk` is a unified viewing key with the Orchard component only.
 - `payout_address` is a diversified address derived for the market, never the account's default address.
 - `price_zat` is above 5,000: a smaller payment is dust that wallets refuse to spend.
+- `issued_at` is the chain height at which this version was signed; buyers warn on files more than 1,000 blocks old.
 - `signature` is a RedPallas signature over the other fields (JSON in fixed field order, prefixed with `zsettle-listings-v1\n`) by the item account's spend authorizing key with randomizer zero, so it verifies under the spend validating key `ak` that opens the published viewing key. Buyers refuse unsigned or altered files. The seller service re-signs the file whenever it changes it.
 
 ## Trade flow
@@ -25,7 +26,7 @@ A JSON file the seller publishes anywhere: `{ version, network, item_ufvk, item_
 3. Buyer asks the light server which consensus branch is live and refuses to build on a branch this build does not sign for.
 4. Buyer builds a PCZT: spend(item note, item FVK) -> output(item note, a fresh diversified address of the buyer's receiving account, same value, memo = item name, outgoing key = the buyer's); spend(ZEC note, buyer FVK) -> output(price, payout address) [+ change]. Both witnesses at one anchor. Expiry = next block + `max_expiry_delta`; fee = the conventional ZIP 317 amount.
 5. Buyer runs the IO finalizer and the prover with the two full viewing keys, then redacts the seller's copy: the buyer's FVK, witnesses, note randomness, randomizers, value-commitment trapdoors and output secrets are removed; the sighash-relevant fields, the proof and the item action's own spend data stay. The buyer records the paying note as reserved until the expiry height.
-6. Seller syncs, matches the item by nullifier, runs the policy checks (`zsettle-core::policy`: the bundle's anchor is one of the seller wallet's own tree roots from the last 100 blocks; expiry set, after the tip and within the limit; exactly one spend of the listed note with a randomizer; no other seller note spent; payment outputs decrypting under the payout key sum to at least the price), verifies the proof against the bundle's public inputs, and signs action A only. The anchor rule matters: a proof only shows membership in the tree whose root it was made for, so without it a synthetic tree would pass.
+6. Seller syncs, verifies the proof against the bundle's public inputs, matches the item by nullifier, runs the policy checks (`zsettle-core::policy`: the envelope's consensus branch is the live one; the bundle's anchor is one of the seller wallet's own tree roots from the last 100 blocks; expiry set, after the tip and within the limit; exactly one spend of the listed note with a non-zero randomizer; no other seller note spent; payment outputs decrypting under the payout key, counting only those above the ZIP 317 marginal fee, sum to at least the price), and signs action A only. The anchor rule matters: a proof only shows membership in the tree whose root it was made for, so without it a synthetic tree would pass.
 7. Buyer combines (conflicting fields fail the merge), signs action B, finalizes spends, extracts the transaction (proof and both signatures are verified here), checks the server's branch again and broadcasts.
 8. Anyone runs `verify` with the consignments: the server says which block holds the genesis transaction, streaming starts there, the genesis note is decrypted, its nullifier derived, the spending action located, its output taken as the successor, repeated while a supplied consignment decrypts the successor.
 
@@ -36,7 +37,7 @@ Both spends live in one transaction authorized by one binding signature. A trans
 The seller signs every offer that passes. Several signed offers for one item may exist at once; all spend the same nullifier, so at most one is ever mined and the seller is paid exactly once. A buyer who loses the race loses nothing but the time spent proving. Nothing is locked, so nobody can keep an item off the market by sending offers.
 
 ## Expiry
-The buyer counts from the next block; the seller sees the chain tip, so the seller allows one block of slack beyond `max_expiry_delta`. An expiry of zero (never expires) or at or below the tip is refused. After the expiry height the seller's signature is worthless. The default of 40 blocks is the librustzcash default for every transaction, so a trade carries no distinguishing expiry; the seller can end the option early by spending the item itself.
+The buyer counts from the next block and never uses more than the ecosystem default of 40 blocks even if the listing allows more; the seller sees the chain tip, so the seller allows one block of slack beyond `max_expiry_delta`. An expiry of zero (never expires) or at or below the tip is refused. After the expiry height the seller's signature is worthless. The default of 40 blocks is the librustzcash default for every transaction, so a trade carries no distinguishing expiry; the seller can end the option early by spending the item itself.
 
 ## Resale
 A buyer who wants to resell receives the item into its own item account (`buy --receive-account`), then publishes listings from that wallet exactly as the first seller did. Provenance across resales is verified by supplying every holder's listings file; the trace stops at the first successor no supplied consignment can open.

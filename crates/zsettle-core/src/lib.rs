@@ -19,7 +19,7 @@
 //! - [`listing`]: the public listings file (prices, payout address, item viewing key).
 //! - [`mint`]: minting item notes and listing an account's unspent notes.
 //! - [`item`]: what an item is and its minimum value.
-//! - [`verify`]: keyless provenance verification from chain data.
+//! - [`verify`]: provenance verification from chain data with viewing keys only.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
