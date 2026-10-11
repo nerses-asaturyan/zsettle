@@ -54,6 +54,33 @@ enum Cmd {
         #[arg(long)]
         identity: PathBuf,
     },
+    /// Pay a unified address from an account of this wallet (for example to fund a second wallet).
+    Pay {
+        /// Wallet directory.
+        #[arg(long)]
+        wallet: PathBuf,
+        /// UUID of the paying account.
+        #[arg(long)]
+        account: String,
+        /// ZIP 32 account index of the paying account.
+        #[arg(long, default_value_t = 0)]
+        account_index: u32,
+        /// age identity file that decrypts the wallet's mnemonic.
+        #[arg(long)]
+        identity: PathBuf,
+        /// Recipient unified address.
+        #[arg(long)]
+        to: String,
+        /// Amount in zatoshis.
+        #[arg(long)]
+        amount: u64,
+        /// Optional memo.
+        #[arg(long)]
+        memo: Option<String>,
+        /// lightwalletd server URL (default: the zec.rocks endpoint of the wallet's network).
+        #[arg(long)]
+        server: Option<String>,
+    },
     /// Import the item viewing key from a listings file into the buyer wallet (the consignment).
     ImportListing {
         /// Buyer wallet directory.
@@ -161,6 +188,18 @@ enum Cmd {
         #[arg(long)]
         server: Option<String>,
     },
+    /// Ask the light server where a transaction is: mined (at which height), in the mempool, or unknown.
+    Tx {
+        /// Transaction id (display form).
+        #[arg(long)]
+        txid: String,
+        /// Network the transaction is for (`main` or `test`).
+        #[arg(long, default_value = "main")]
+        network: String,
+        /// lightwalletd server URL (default: the zec.rocks endpoint of the network).
+        #[arg(long)]
+        server: Option<String>,
+    },
     /// Keyless provenance check of an item: trace it from its genesis note with the listings' viewing keys.
     ///
     /// Pass `--listings` once per holder the item has passed through; each file contributes
@@ -236,6 +275,36 @@ fn main() -> Result<()> {
             println!(
                 "{}",
                 serde_json::json!({ "wallet": wallet, "upgraded": true })
+            );
+            Ok(())
+        }
+        Cmd::Pay {
+            wallet,
+            account,
+            account_index,
+            identity,
+            to,
+            amount,
+            memo,
+            server,
+        } => {
+            let w = Wallet::open(&wallet)?;
+            let server = pick_server(server, w.network);
+            let mut db = w.db()?;
+            check_server_before_sending(&server, w.network)?;
+            let seed = w.seed(&identity)?;
+            let req = zsettle_core::mint::PayRequest {
+                from_account: parse_account(&account)?,
+                from_account_index: account_index,
+                to,
+                value_zat: amount,
+                memo,
+            };
+            let (bytes, txid) = zsettle_core::mint::pay(&w, &mut db, &seed, &req)?;
+            let response = zsettle_core::broadcast::send_raw_transaction_blocking(&server, bytes)?;
+            println!(
+                "{}",
+                serde_json::json!({ "txid": txid, "amount_zat": amount, "broadcast": response })
             );
             Ok(())
         }
@@ -446,6 +515,21 @@ fn main() -> Result<()> {
             println!(
                 "{}",
                 serde_json::json!({ "server": server, "response": msg })
+            );
+            Ok(())
+        }
+        Cmd::Tx {
+            txid,
+            network,
+            server,
+        } => {
+            let network = parse_network(&network)?;
+            let server = pick_server(server, network);
+            let id = zsettle_core::wallet::parse_txid(&txid)?;
+            let status = zsettle_core::broadcast::transaction_status_blocking(&server, &id)?;
+            println!(
+                "{}",
+                serde_json::json!({ "txid": id.to_string(), "status": status, "server": server })
             );
             Ok(())
         }

@@ -193,6 +193,21 @@ pub struct MintRequest {
     pub name: String,
 }
 
+/// A plain shielded payment from an account of this wallet.
+#[derive(Clone, Debug)]
+pub struct PayRequest {
+    /// Account that pays.
+    pub from_account: AccountUuid,
+    /// ZIP 32 index of that account, to derive its spending key.
+    pub from_account_index: u32,
+    /// Recipient, as a unified address string.
+    pub to: String,
+    /// Amount in zatoshis.
+    pub value_zat: u64,
+    /// Optional text memo.
+    pub memo: Option<String>,
+}
+
 /// Mint one item: pay the item account from the payout account with the name as the memo.
 /// Returns the raw transaction bytes and its id; the caller broadcasts.
 pub fn mint(
@@ -208,14 +223,43 @@ pub fn mint(
         value_zat,
         name,
     } = req.clone();
-    let name = name.as_str();
     let to = item_address(db, wallet.network, item_account)?;
-    let memo =
-        Memo::from_str(&format!("zsettle item: {name}")).map_err(|e| anyhow!("memo: {e}"))?;
+    pay(
+        wallet,
+        db,
+        seed,
+        &PayRequest {
+            from_account,
+            from_account_index,
+            to,
+            value_zat,
+            memo: Some(format!("zsettle item: {name}")),
+        },
+    )
+}
+
+/// Pay a unified address from an account of this wallet. Returns the raw transaction bytes
+/// and its id; the caller broadcasts.
+pub fn pay(
+    wallet: &Wallet,
+    db: &mut Db,
+    seed: &SecretVec<u8>,
+    req: &PayRequest,
+) -> Result<(Vec<u8>, String)> {
+    let PayRequest {
+        from_account,
+        from_account_index,
+        to,
+        value_zat,
+        memo,
+    } = req.clone();
+    let memo = memo
+        .map(|m| Memo::from_str(&m).map_err(|e| anyhow!("memo: {e}")))
+        .transpose()?;
     let payment = Payment::new(
-        ZcashAddress::from_str(&to).map_err(|e| anyhow!("item address: {e}"))?,
+        ZcashAddress::from_str(&to).map_err(|e| anyhow!("address: {e}"))?,
         Some(Zatoshis::from_u64(value_zat).map_err(|_| anyhow!("value"))?),
-        Some(MemoBytes::from(&memo)),
+        memo.as_ref().map(MemoBytes::from),
         None,
         None,
         vec![],

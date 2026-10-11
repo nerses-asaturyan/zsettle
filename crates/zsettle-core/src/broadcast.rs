@@ -6,8 +6,10 @@ use anyhow::{anyhow, Result};
 use tonic::transport::{Channel, ClientTlsConfig};
 use zcash_client_backend::proto::service::{
     compact_tx_streamer_client::CompactTxStreamerClient, BlockId, Empty, RawTransaction, TreeState,
+    TxFilter,
 };
 use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
+use zcash_protocol::TxId;
 
 /// Default mainnet lightwalletd endpoint.
 pub const DEFAULT_SERVER: &str = "https://zec.rocks:443";
@@ -116,6 +118,48 @@ pub fn latest_height_blocking(server: &str) -> Result<u32> {
             .map_err(|e| anyhow!("get_latest_block: {e}"))?
             .into_inner();
         u32::try_from(id.height).map_err(|_| anyhow!("height out of range"))
+    })
+}
+
+/// Where the server says a transaction is.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum TxStatus {
+    /// Mined at this height.
+    Mined {
+        /// Block height.
+        height: u64,
+    },
+    /// Known to the server but not yet in a block.
+    InMempool,
+    /// The server does not know it.
+    Unknown,
+}
+
+/// Ask the server about a transaction by id.
+pub fn transaction_status_blocking(server: &str, txid: &TxId) -> Result<TxStatus> {
+    runtime()?.block_on(async {
+        let mut client = connect(server).await?;
+        match client
+            .get_transaction(TxFilter {
+                block: None,
+                index: 0,
+                hash: txid.as_ref().to_vec(),
+            })
+            .await
+        {
+            Ok(r) => Ok(match r.into_inner().height {
+                0 => TxStatus::InMempool,
+                h => TxStatus::Mined { height: h },
+            }),
+            Err(status)
+                if status.code() == tonic::Code::NotFound
+                    || status.message().contains("No such") =>
+            {
+                Ok(TxStatus::Unknown)
+            }
+            Err(status) => Err(anyhow!("get_transaction: {status}")),
+        }
     })
 }
 
