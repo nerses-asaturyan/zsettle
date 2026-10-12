@@ -621,20 +621,37 @@ pub fn write_env_files(wallet: &Path, vars: &[(&str, String)]) -> Result<(PathBu
     Ok((sh_path, sh))
 }
 
-/// Write a file readable by its owner only (on Unix), replacing any previous content.
+/// Write a file readable by its owner only (on Unix), replacing any previous content. The
+/// bytes go to a fresh file next to it that then takes its place, so a reader, a crash or a
+/// second writer never sees half a file.
 pub fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<()> {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let tmp = path.with_file_name(format!(
+        ".{name}.{}.tmp",
+        hex::encode(rand::random::<[u8; 6]>())
+    ));
     let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut f = options
-        .open(path)
-        .with_context(|| format!("writing {}", path.display()))?;
-    f.write_all(bytes)?;
-    Ok(())
+    let written = (|| -> Result<()> {
+        let mut f = options
+            .open(&tmp)
+            .with_context(|| format!("writing {}", path.display()))?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    written
 }
 
 /// Write a secret file readable by its owner only (on Unix) and never over an existing one.
@@ -797,9 +814,7 @@ fn read_reservations(wallet: &Wallet) -> Result<Reservations> {
 
 fn write_reservations(wallet: &Wallet, r: &Reservations) -> Result<()> {
     let path = wallet.dir.join(RESERVED_FILE);
-    let tmp = path.with_extension("json.tmp");
-    write_owner_only(&tmp, serde_json::to_string_pretty(r)?.as_bytes())?;
-    fs::rename(&tmp, &path).with_context(|| format!("replacing {}", path.display()))
+    write_owner_only(&path, serde_json::to_string_pretty(r)?.as_bytes())
 }
 
 /// Every reservation on file: note and the height until which its trade can be mined.

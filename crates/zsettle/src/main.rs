@@ -400,11 +400,24 @@ fn http_agent() -> Result<ureq::Agent> {
 /// Post the redacted copy to the seller service; returns the URL its reply will appear at.
 fn post_offer(seller_url: &str, envelope: &[u8]) -> Result<String> {
     let base = seller_url.trim_end_matches('/');
-    let resp = http_agent()?
-        .post(&format!("{base}/offer"))
-        .set("Content-Type", "application/octet-stream")
-        .send_bytes(envelope)
-        .map_err(|e| anyhow!("posting the offer to {base}: {e}"))?;
+    // A shop that is down for a moment (restarting, or behind a proxy that answers 502-504
+    // meanwhile) gets the same offer again a little later; its tag does not change.
+    let mut tries = 0;
+    let resp = loop {
+        tries += 1;
+        match http_agent()?
+            .post(&format!("{base}/offer"))
+            .set("Content-Type", "application/octet-stream")
+            .send_bytes(envelope)
+        {
+            Ok(resp) => break resp,
+            Err(e) if tries < 4 && transient(&e) => {
+                eprintln!("the seller is not answering yet; trying again...");
+                std::thread::sleep(std::time::Duration::from_secs(10));
+            }
+            Err(e) => return Err(anyhow!("posting the offer to {base}: {e}")),
+        }
+    };
     if resp.status() != 200 {
         return Err(anyhow!(
             "the seller answered {} to the offer; redirects are not followed, use the service's final URL",
@@ -422,6 +435,14 @@ fn post_offer(seller_url: &str, envelope: &[u8]) -> Result<String> {
         ));
     }
     Ok(format!("{base}/reply/{tag}"))
+}
+
+/// An answer worth trying again: the service or a proxy in front of it is down for a moment.
+fn transient(e: &ureq::Error) -> bool {
+    match e {
+        ureq::Error::Status(code, _) => matches!(code, 502..=504),
+        ureq::Error::Transport(_) => true,
+    }
 }
 
 /// Poll the seller's reply URL until the signed copy is there, the offer was refused, or
@@ -446,6 +467,8 @@ fn fetch_reply(url: &str, wait_secs: u64) -> Result<Vec<u8>> {
                     resp.into_string().unwrap_or_default()
                 ))
             }
+            // The shop may be down for a moment; keep waiting until the deadline.
+            Err(e) if transient(&e) => {}
             Err(e) => return Err(anyhow!("fetching {url}: {e}")),
         }
         if std::time::Instant::now() >= deadline {

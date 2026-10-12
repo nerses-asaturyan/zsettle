@@ -16,6 +16,10 @@ use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
 /// Default mainnet lightwalletd endpoint.
 pub const DEFAULT_SERVER: &str = "https://zec.rocks:443";
 
+/// Whether this build syncs the testnet. The main line talks to mainnet servers only; the
+/// nu7-testnet line picks a server per network.
+pub const TESTNET_BUILD: bool = false;
+
 /// The one lightwalletd method that would carry the wallet's transparent addresses.
 const ADDRESS_UTXOS: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetAddressUtxosStream";
 

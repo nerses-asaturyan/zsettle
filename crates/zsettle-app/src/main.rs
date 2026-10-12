@@ -14,7 +14,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -42,7 +42,7 @@ const MAX_RELAY_ANSWER: usize = 2 * 1024 * 1024;
 /// Largest request head.
 const MAX_HEAD: usize = 16 * 1024;
 /// Connections served at once.
-const MAX_CONNECTIONS: usize = 64;
+const MAX_CONNECTIONS: usize = 200;
 /// Shop events kept for the page.
 const MAX_EVENTS: usize = 300;
 /// Activity entries kept.
@@ -50,8 +50,11 @@ const MAX_ACTIVITY: usize = 200;
 /// Largest listings file fetched from a seller.
 const MAX_LISTINGS_BYTES: u64 = 1024 * 1024;
 /// Hosted: wallets the server keeps at most, and new ones per hour.
-const MAX_PROFILES: usize = 300;
+const MAX_PROFILES: usize = 500;
 const MAX_NEW_PER_HOUR: usize = 40;
+/// Hosted: a wallet nobody ever used (never synced, no coins from the faucet, nothing listed)
+/// is removed after this long, so made-and-left wallets do not fill the server.
+const UNUSED_WALLET_SECS: u64 = 3 * 86_400;
 /// Hosted: shops open at once (each is a process that syncs every few seconds).
 const MAX_OPEN_SHOPS: usize = 25;
 /// Hosted: a session lasts this long; an idle wallet is locked after this long.
@@ -64,6 +67,17 @@ const FIRST_SHOP_PORT: u16 = 19100;
 const MAX_JOBS_PER_WALLET: usize = 2;
 const MAX_JOBS_TOTAL: usize = 12;
 const MAX_SCRYPT: usize = 4;
+/// Commands that decrypt the seed and prove (pay, mint, buy, ...) running at once; each takes
+/// a few hundred MB.
+const MAX_HEAVY: usize = 3;
+/// Hosted: faucet payments waiting at once (they wait outside the job limit, since the
+/// house's coins can take minutes to confirm), and in all per hour.
+const MAX_FAUCET_WAITING: usize = 4;
+const MAX_FAUCET_PER_HOUR: usize = 12;
+/// Hosted: passphrase checks (sign-ins, backups) per visitor and per wallet a minute, wrong
+/// or right, so nobody keeps the checks busy for everyone else.
+const MAX_CHECKS_PER_IP_MIN: usize = 10;
+const MAX_CHECKS_PER_WALLET_MIN: usize = 6;
 /// A request must arrive whole within this time.
 const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
 /// Hosted: per visitor (by the proxy's X-Forwarded-For), new wallets an hour and test coins a
@@ -76,22 +90,44 @@ const MIN_HOSTED_PASSPHRASE: usize = 12;
 
 static RUNNING_JOBS: AtomicUsize = AtomicUsize::new(0);
 static SCRYPT_RUNNING: AtomicUsize = AtomicUsize::new(0);
+static HEAVY_RUNNING: AtomicUsize = AtomicUsize::new(0);
+static FAUCET_WAITING: AtomicUsize = AtomicUsize::new(0);
 
-/// One of the few passphrase checks allowed at once; refused when all are taken.
-struct ScryptSlot;
-impl ScryptSlot {
-    fn take() -> Result<Self> {
-        if SCRYPT_RUNNING.fetch_add(1, Ordering::SeqCst) >= MAX_SCRYPT {
-            SCRYPT_RUNNING.fetch_sub(1, Ordering::SeqCst);
-            return Err(anyhow!("the server is busy; try again in a moment"));
+/// A place in a counter capped at `max`, given back on drop.
+struct Slot(&'static AtomicUsize);
+impl Slot {
+    fn try_take(counter: &'static AtomicUsize, max: usize) -> Option<Self> {
+        if counter.fetch_add(1, Ordering::SeqCst) >= max {
+            counter.fetch_sub(1, Ordering::SeqCst);
+            return None;
         }
-        Ok(ScryptSlot)
+        Some(Slot(counter))
+    }
+
+    /// Wait up to `wait` for a place, in turn with the others waiting.
+    fn take(counter: &'static AtomicUsize, max: usize, wait: Duration) -> Option<Self> {
+        let until = Instant::now() + wait;
+        loop {
+            if let Some(s) = Self::try_take(counter, max) {
+                return Some(s);
+            }
+            if Instant::now() >= until {
+                return None;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
     }
 }
-impl Drop for ScryptSlot {
+impl Drop for Slot {
     fn drop(&mut self) {
-        SCRYPT_RUNNING.fetch_sub(1, Ordering::SeqCst);
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
+}
+
+/// One of the few passphrase checks allowed at once (age scrypt is heavy on CPU and memory).
+fn scrypt_slot() -> Result<Slot> {
+    Slot::take(&SCRYPT_RUNNING, MAX_SCRYPT, Duration::from_secs(10))
+        .ok_or_else(|| anyhow!("the server is busy; try again in a moment"))
 }
 /// Hosted house shop: items it keeps listed, their price, and the test coins it gives once
 /// to each new wallet.
@@ -198,6 +234,7 @@ struct Shop {
 }
 
 struct Bins {
+    dir: PathBuf,
     buyer: PathBuf,
     seller: PathBuf,
 }
@@ -216,6 +253,8 @@ struct App {
     next_job: AtomicU64,
     wallet_lock: Mutex<()>,
     shop: Mutex<Shop>,
+    /// The shop is stopped for a moment while a wallet action runs, and opens again after.
+    paused: AtomicBool,
     events: Arc<Mutex<Vec<Value>>>,
     last_sync: Mutex<Value>,
     last_seen: AtomicU64,
@@ -248,18 +287,22 @@ struct Hosted {
     sessions: Mutex<HashMap<String, Session>>,
     /// New wallets: when, and from which visitor.
     created: Mutex<Vec<(u64, String)>>,
-    /// Test coins handed out per visitor, when.
+    /// Test coins handed out per visitor, when; and in all, when.
     faucet_by_ip: Mutex<HashMap<String, Vec<u64>>>,
-    /// Failed sign-ins (and backup requests) per wallet and per visitor: count, and the time
-    /// before which the next try is refused.
-    fails: Mutex<HashMap<String, (u32, u64)>>,
+    faucet_all: Mutex<Vec<u64>>,
+    /// Failed sign-ins (and backup requests) per visitor, and per wallet and visitor: count,
+    /// the time before which the next try is refused, and the last failure. A count is
+    /// forgotten an hour after its last failure.
+    fails: Mutex<HashMap<String, (u32, u64, u64)>>,
+    /// Passphrase checks per visitor and per wallet, when.
+    checks: Mutex<HashMap<String, Vec<u64>>>,
 }
 
 impl Hosted {
     fn check_fails(&self, keys: &[String]) -> Result<()> {
         let f = self.fails.lock().unwrap();
         for k in keys {
-            if let Some((_, until)) = f.get(k) {
+            if let Some((_, until, _)) = f.get(k) {
                 if *until > now() {
                     let mins = (*until - now()).div_ceil(60);
                     return Err(anyhow!(
@@ -274,18 +317,75 @@ impl Hosted {
 
     fn record_fail(&self, keys: &[String]) {
         let mut f = self.fails.lock().unwrap();
+        let t = now();
         for k in keys {
-            let e = f.entry(k.clone()).or_insert((0, 0));
+            let e = f.entry(k.clone()).or_insert((0, 0, 0));
+            if e.2 + 3600 < t {
+                *e = (0, 0, 0);
+            }
             e.0 += 1;
+            e.2 = t;
             if e.0 >= FREE_FAILURES {
                 let wait = 60u64 << (e.0 - FREE_FAILURES).min(6);
-                e.1 = now() + wait.min(3600);
+                e.1 = t + wait.min(3600);
             }
         }
     }
 
     fn clear_fails(&self, key: &str) {
         self.fails.lock().unwrap().remove(key);
+    }
+
+    /// Count one passphrase check against each (key, limit a minute); refused when one is
+    /// over its limit.
+    fn count_check(&self, keys: &[(String, usize)]) -> Result<()> {
+        let mut c = self.checks.lock().unwrap();
+        let t = now();
+        for (k, max) in keys {
+            let times = c.entry(k.clone()).or_default();
+            times.retain(|x| *x + 60 > t);
+            if times.len() >= *max {
+                return Err(anyhow!("too many tries in a minute; wait a moment"));
+            }
+        }
+        for (k, _) in keys {
+            c.entry(k.clone()).or_default().push(t);
+        }
+        Ok(())
+    }
+
+    /// Drop what no limit needs any more.
+    fn prune(&self) {
+        let t = now();
+        self.fails
+            .lock()
+            .unwrap()
+            .retain(|_, e| e.1 > t || e.2 + 3600 > t);
+        self.checks.lock().unwrap().retain(|_, v| {
+            v.retain(|x| *x + 60 > t);
+            !v.is_empty()
+        });
+        self.faucet_by_ip.lock().unwrap().retain(|_, v| {
+            v.retain(|x| *x + 86_400 > t);
+            !v.is_empty()
+        });
+        self.faucet_all.lock().unwrap().retain(|x| *x + 3600 > t);
+    }
+}
+
+/// The visitor as the limits count them: an IPv4 address, or an IPv6 /64 (one home or one
+/// server usually holds a whole /64).
+fn visitor(ip: &str) -> String {
+    match ip.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(a)) => match a.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => {
+                let s = a.segments();
+                format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+            }
+        },
+        Ok(a) => a.to_string(),
+        Err(_) => ip.to_string(),
     }
 }
 
@@ -320,6 +420,7 @@ fn main() -> Result<()> {
     let bins = Bins {
         buyer: exe("zsettle"),
         seller: exe("zsettle-seller"),
+        dir: bin_dir.clone(),
     };
     for b in [&bins.buyer, &bins.seller] {
         if !b.exists() {
@@ -418,10 +519,12 @@ fn hosted_hub(cli: &Cli, public: &str, base: PathBuf, bins: Bins) -> Result<Hub>
             "a hosted server holds its visitors' wallets: on mainnet that is real money in your custody; pass --allow-hosted-mainnet if you mean it"
         ));
     }
-    let index: Index = fs::read(base.join("hub.json"))
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default();
+    if cli.network == "test" && !zsettle_core::broadcast::TESTNET_BUILD {
+        return Err(anyhow!(
+            "this build syncs mainnet only: build the hosted testnet demo from the nu7-testnet branch"
+        ));
+    }
+    let index: Index = read_state(&base.join("hub.json"))?;
     // One PRF salt for the whole site, kept with the data: a passkey of this site always
     // gives the same passphrase.
     let salt_path = base.join("prf.salt");
@@ -454,7 +557,9 @@ fn hosted_hub(cli: &Cli, public: &str, base: PathBuf, bins: Bins) -> Result<Hub>
         sessions: Mutex::new(HashMap::new()),
         created: Mutex::new(Vec::new()),
         faucet_by_ip: Mutex::new(HashMap::new()),
+        faucet_all: Mutex::new(Vec::new()),
         fails: Mutex::new(HashMap::new()),
+        checks: Mutex::new(HashMap::new()),
     };
     let hub = Hub {
         base,
@@ -502,6 +607,22 @@ fn valid_name(s: &str) -> bool {
         && s.len() <= 40
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Read a state file: missing gives the default; a file that does not parse stops the app
+/// rather than be replaced, since it holds what no one can rebuild (which passkey opens which
+/// wallet, for one).
+fn read_state<T: serde::de::DeserializeOwned + Default>(path: &Path) -> Result<T> {
+    match fs::read(path) {
+        Ok(b) => serde_json::from_slice(&b).with_context(|| {
+            format!(
+                "{} is damaged; restore it from a backup, or move it away to start empty",
+                path.display()
+            )
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    }
 }
 
 fn owner_only_dir(dir: &Path) -> Result<()> {
@@ -552,8 +673,17 @@ struct Request {
     body: Vec<u8>,
 }
 
+/// Read once, waiting no longer than the time left before the deadline.
+fn read_some(stream: &mut TcpStream, started: Instant, chunk: &mut [u8]) -> Result<usize> {
+    let left = REQUEST_DEADLINE
+        .checked_sub(started.elapsed())
+        .filter(|d| !d.is_zero())
+        .ok_or_else(|| anyhow!("request too slow"))?;
+    stream.set_read_timeout(Some(left.min(Duration::from_secs(10))))?;
+    Ok(stream.read(chunk)?)
+}
+
 fn read_request(stream: &mut TcpStream) -> Result<Request> {
-    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     let started = Instant::now();
     let mut buf = Vec::new();
     let mut chunk = [0u8; 8192];
@@ -564,25 +694,14 @@ fn read_request(stream: &mut TcpStream) -> Result<Request> {
         if buf.len() > MAX_HEAD {
             return Err(anyhow!("request head too large"));
         }
-        if started.elapsed() > REQUEST_DEADLINE {
-            return Err(anyhow!("request too slow"));
-        }
-        let n = stream.read(&mut chunk)?;
+        let n = read_some(stream, started, &mut chunk)?;
         if n == 0 {
             return Err(anyhow!("connection closed"));
         }
         buf.extend_from_slice(&chunk[..n]);
     };
     let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
-    let mut lines = head.split("\r\n");
-    let first = lines.next().unwrap_or_default();
-    let mut parts = first.split(' ');
-    let method = parts.next().unwrap_or_default().to_string();
-    let target = parts.next().unwrap_or_default().to_string();
-    let headers: HashMap<String, String> = lines
-        .filter_map(|l| l.split_once(':'))
-        .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string()))
-        .collect();
+    let (method, target, headers) = parse_head(&head)?;
     let path = target.split('?').next().unwrap_or_default().to_string();
     let len: usize = headers
         .get("content-length")
@@ -599,10 +718,7 @@ fn read_request(stream: &mut TcpStream) -> Result<Request> {
     }
     let mut body = buf[head_end + 4..].to_vec();
     while body.len() < len {
-        if started.elapsed() > REQUEST_DEADLINE {
-            return Err(anyhow!("request too slow"));
-        }
-        let n = stream.read(&mut chunk)?;
+        let n = read_some(stream, started, &mut chunk)?;
         if n == 0 {
             break;
         }
@@ -615,6 +731,28 @@ fn read_request(stream: &mut TcpStream) -> Result<Request> {
         headers,
         body,
     })
+}
+
+/// The request line and headers. Bodies come with a Content-Length only: a chunked body, or
+/// a Host or Content-Length given twice, is refused rather than guessed at.
+fn parse_head(head: &str) -> Result<(String, String, HashMap<String, String>)> {
+    let mut lines = head.split("\r\n");
+    let first = lines.next().unwrap_or_default();
+    let mut parts = first.split(' ');
+    let method = parts.next().unwrap_or_default().to_string();
+    let target = parts.next().unwrap_or_default().to_string();
+    let mut headers = HashMap::new();
+    for (k, v) in lines.filter_map(|l| l.split_once(':')) {
+        let k = k.trim().to_ascii_lowercase();
+        if k == "transfer-encoding" {
+            return Err(anyhow!("chunked bodies are not accepted"));
+        }
+        if headers.contains_key(&k) && (k == "host" || k == "content-length") {
+            return Err(anyhow!("repeated {k}"));
+        }
+        headers.insert(k, v.trim().to_string());
+    }
+    Ok((method, target, headers))
 }
 
 fn respond(stream: &mut TcpStream, status: u16, ctype: &str, body: &[u8]) {
@@ -761,6 +899,7 @@ fn handle_hosted(hub: &Arc<Hub>, h: &Hosted, req: Request, mut stream: TcpStream
         .and_then(|v| v.split(',').next())
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
+        .map(|v| visitor(&v))
         .unwrap_or_else(|| "local".into());
     if req.method == "GET" {
         if let Some((ctype, body)) = static_file(&req.path) {
@@ -802,11 +941,11 @@ fn handle_hosted(hub: &Arc<Hub>, h: &Hosted, req: Request, mut stream: TcpStream
         }
         ("POST", "/api/wallet/create") => {
             let r = parse_body(&req).and_then(|b| hub.hosted_create(h, &b, &ip));
-            return answer_with_session(&mut stream, r);
+            return answer_with_session(hub, &mut stream, r);
         }
         ("POST", "/api/unlock") => {
             let r = parse_body(&req).and_then(|b| hub.hosted_unlock(h, &b, &ip));
-            return answer_with_session(&mut stream, r);
+            return answer_with_session(hub, &mut stream, r);
         }
         _ => {}
     }
@@ -859,22 +998,40 @@ fn handle_hosted(hub: &Arc<Hub>, h: &Hosted, req: Request, mut stream: TcpStream
             }
         }
         ("POST", "/api/backup") => {
-            let keys = [format!("w:{}", app.profile), format!("ip:{ip}")];
-            h.check_fails(&keys).and_then(|_| {
-                parse_body(&req)
-                    .and_then(|b| app.backup(&b))
-                    .inspect_err(|_| {
-                        h.record_fail(&keys);
-                        thread::sleep(Duration::from_secs(1));
-                    })
-            })
+            let keys = [format!("w:{}:{ip}", app.profile), format!("ip:{ip}")];
+            h.check_fails(&keys)
+                .and_then(|_| {
+                    h.count_check(&[
+                        (format!("ip:{ip}"), MAX_CHECKS_PER_IP_MIN),
+                        (format!("w:{}", app.profile), MAX_CHECKS_PER_WALLET_MIN),
+                    ])
+                })
+                .and_then(|_| {
+                    parse_body(&req)
+                        .and_then(|b| app.backup(&b))
+                        .inspect_err(|_| {
+                            h.record_fail(&keys);
+                            thread::sleep(Duration::from_secs(1));
+                        })
+                })
         }
         _ => api(&app, &req),
     };
-    json_answer(&mut stream, r, "");
+    json_answer(&mut stream, scrub(hub, r), "");
 }
 
-fn answer_with_session(stream: &mut TcpStream, r: Result<(Value, String)>) {
+/// No server paths in what a visitor sees.
+fn scrub(hub: &Hub, r: Result<Value>) -> Result<Value> {
+    r.map_err(|e| {
+        let mut text = format!("{e:#}");
+        for p in [&hub.base, &hub.bins.dir] {
+            text = text.replace(&p.display().to_string(), "");
+        }
+        anyhow!(text)
+    })
+}
+
+fn answer_with_session(hub: &Hub, stream: &mut TcpStream, r: Result<(Value, String)>) {
     match r {
         Ok((v, token)) => {
             let set = format!(
@@ -882,7 +1039,7 @@ fn answer_with_session(stream: &mut TcpStream, r: Result<(Value, String)>) {
             );
             json_answer(stream, Ok(v), &set);
         }
-        Err(e) => json_answer(stream, Err(e), ""),
+        Err(e) => json_answer(stream, scrub(hub, Err(e)), ""),
     }
 }
 
@@ -898,9 +1055,26 @@ fn relay_shop(h: &Hosted, rest: &str, req: &Request, mut stream: TcpStream) {
         return respond(&mut stream, 404, "text/plain", b"not found");
     }
     let app = h.apps.lock().unwrap().get(code).cloned();
-    let Some(app) = app.filter(|a| a.shop_running()) else {
+    let Some(app) = app else {
         return respond(&mut stream, 503, "text/plain", b"this shop is closed");
     };
+    // A shop paused for a wallet action still shows its signed listings file (the very bytes
+    // it serves), and an offer or a reply waits a while for the shop to open again.
+    if !app.shop_running() && app.paused.load(Ordering::SeqCst) {
+        if tail == "listings" {
+            return match fs::read(app.listings_path()) {
+                Ok(b) => respond(&mut stream, 200, "application/json", &b),
+                Err(_) => respond(&mut stream, 503, "text/plain", b"this shop is closed"),
+            };
+        }
+        let until = Instant::now() + Duration::from_secs(25);
+        while !app.shop_running() && app.paused.load(Ordering::SeqCst) && Instant::now() < until {
+            thread::sleep(Duration::from_millis(500));
+        }
+    }
+    if !app.shop_running() {
+        return respond(&mut stream, 503, "text/plain", b"this shop is closed");
+    }
     let port = h.index.lock().unwrap().ports.get(code).copied();
     let Some(port) = port else {
         return respond(&mut stream, 503, "text/plain", b"this shop is closed");
@@ -1011,7 +1185,9 @@ fn api(app: &Arc<App>, req: &Request) -> Result<Value> {
 
 impl Hub {
     fn save_index(&self, h: &Hosted) -> Result<()> {
-        let bytes = serde_json::to_vec_pretty(&*h.index.lock().unwrap())?;
+        // Written while the lock is held, so two saves never mix.
+        let idx = h.index.lock().unwrap();
+        let bytes = serde_json::to_vec_pretty(&*idx)?;
         zsettle_core::wallet::write_owner_only(&self.base.join("hub.json"), &bytes)
     }
 
@@ -1069,6 +1245,9 @@ impl Hub {
                 return Err(anyhow!("this passkey already belongs to a wallet here"));
             }
         }
+        // A place is held while the wallet is made, and given back if that fails, so only
+        // wallets that exist count against the limits.
+        let stamp = (now(), ip.to_string());
         {
             let mut created = h.created.lock().unwrap();
             created.retain(|(t, _)| *t + 3600 > now());
@@ -1085,9 +1264,28 @@ impl Hub {
             if h.apps.lock().unwrap().len() >= MAX_PROFILES {
                 return Err(anyhow!("this demo server is full"));
             }
-            created.push((now(), ip.to_string()));
+            created.push(stamp.clone());
         }
-        let _slot = ScryptSlot::take()?;
+        let give_back = || {
+            let mut created = h.created.lock().unwrap();
+            if let Some(i) = created.iter().position(|c| *c == stamp) {
+                created.remove(i);
+            }
+        };
+        let r = self.hosted_create_inner(h, body, cred);
+        if r.is_err() {
+            give_back();
+        }
+        r
+    }
+
+    fn hosted_create_inner(
+        &self,
+        h: &Hosted,
+        body: &Value,
+        cred: Option<String>,
+    ) -> Result<(Value, String)> {
+        let _slot = scrypt_slot()?;
         let code = loop {
             const ALPHA: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
             let c: String = rand::random::<[u8; 8]>()
@@ -1133,20 +1331,31 @@ impl Hub {
     fn hosted_unlock(&self, h: &Hosted, body: &Value, ip: &str) -> Result<(Value, String)> {
         let ip_key = format!("ip:{ip}");
         h.check_fails(std::slice::from_ref(&ip_key))?;
-        let code = match field(body, "credential") {
-            Ok(id) => h
-                .index
-                .lock()
-                .unwrap()
-                .by_cred
-                .get(&id)
-                .cloned()
-                .ok_or_else(|| anyhow!("this passkey has no wallet on this server"))?,
-            Err(_) => field(body, "code")?.to_ascii_lowercase(),
+        let (code, by_passkey) = match field(body, "credential") {
+            Ok(id) => (
+                h.index
+                    .lock()
+                    .unwrap()
+                    .by_cred
+                    .get(&id)
+                    .cloned()
+                    .ok_or_else(|| anyhow!("this passkey has no wallet on this server"))?,
+                true,
+            ),
+            Err(_) => (field(body, "code")?.to_ascii_lowercase(), false),
         };
-        let wallet_key = format!("w:{code}");
-        let keys = [wallet_key.clone(), ip_key];
-        h.check_fails(&keys)?;
+        // Wrong tries count per visitor, and per wallet for that visitor only: wallet codes
+        // are public (they name the shops), so a count shared by everyone would let anyone
+        // lock an owner out. A passkey's secret cannot be guessed, so it is never held back
+        // by the wallet's count.
+        let wallet_key = format!("w:{code}:{ip}");
+        let keys = [wallet_key.clone(), ip_key.clone()];
+        if !by_passkey {
+            h.check_fails(&keys)?;
+        }
+        // Every check counts against the visitor, right or wrong (not against the wallet:
+        // that again would let anyone hold an owner back).
+        h.count_check(&[(ip_key, MAX_CHECKS_PER_IP_MIN)])?;
         let app = h.apps.lock().unwrap().get(&code).cloned();
         let app = match app {
             Some(a) if code != HOUSE => a,
@@ -1156,10 +1365,13 @@ impl Hub {
                 return Err(anyhow!("wrong wallet code or passphrase"));
             }
         };
-        // A failed guess costs a second and counts against the wallet and the visitor, so
-        // codes and passphrases cannot be tried quickly.
-        let _slot = ScryptSlot::take()?;
-        if app.unlock(body).is_err() {
+        // A failed guess costs a second and counts against the visitor, so codes and
+        // passphrases cannot be tried quickly. The check's slot is given back first.
+        let ok = {
+            let _slot = scrypt_slot()?;
+            app.unlock(body).is_ok()
+        };
+        if !ok {
             h.record_fail(&keys);
             thread::sleep(Duration::from_secs(1));
             return Err(anyhow!("wrong wallet code or passphrase"));
@@ -1208,38 +1420,62 @@ impl Hub {
         if h.network != "test" {
             return Err(anyhow!("test coins exist on the testnet only"));
         }
+        if h.index.lock().unwrap().funded.contains(&app.profile) {
+            return Err(anyhow!("this wallet already got its test coins"));
+        }
+        // Everything that can refuse comes before the wallet is marked as paid, so a refusal
+        // never uses up its chance.
+        let addr = app.address()?["address"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("no address"))?;
+        // Faucet payments wait outside the job limit (the house's coins can take minutes to
+        // confirm), a few at a time.
+        let slot = Slot::try_take(&FAUCET_WAITING, MAX_FAUCET_WAITING).ok_or_else(|| {
+            anyhow!("many people are getting test coins right now; try again in a minute")
+        })?;
+        let stamp = now();
         {
+            let mut all = h.faucet_all.lock().unwrap();
+            all.retain(|t| *t + 3600 > stamp);
+            if all.len() >= MAX_FAUCET_PER_HOUR {
+                return Err(anyhow!(
+                    "the demo faucet gave out many coins this hour; try again later"
+                ));
+            }
             let mut by_ip = h.faucet_by_ip.lock().unwrap();
             let times = by_ip.entry(ip.to_string()).or_default();
-            times.retain(|t| *t + 86_400 > now());
+            times.retain(|t| *t + 86_400 > stamp);
             if times.len() >= MAX_FAUCET_PER_IP_DAY {
                 return Err(anyhow!(
                     "you got test coins for several wallets today; try again tomorrow"
                 ));
             }
-            let mut idx = h.index.lock().unwrap();
-            if !idx.funded.insert(app.profile.clone()) {
+            if !h.index.lock().unwrap().funded.insert(app.profile.clone()) {
                 return Err(anyhow!("this wallet already got its test coins"));
             }
-            times.push(now());
+            times.push(stamp);
+            all.push(stamp);
         }
-        self.save_index(h)?;
-        let addr = app.address()?["address"]
-            .as_str()
-            .map(str::to_string)
-            .ok_or_else(|| anyhow!("no address"))?;
         let profile = app.profile.clone();
+        let ip = ip.to_string();
         let hub = self.clone();
-        Ok(app.job("faucet", move |app, id| {
+        if let Err(e) = self.save_index(h) {
+            hub.unfund(&profile, &ip, stamp);
+            return Err(e);
+        }
+        app.free_job("faucet", move |app, id| {
+            let _slot = slot;
             app.step(id, "Sending free test coins from the demo faucet");
             // The house's coins may be confirming after a restock: wait for them a while
-            // rather than fail at once.
+            // rather than fail at once. A failure once the payment may have been sent is not
+            // tried again, so the faucet never pays twice.
             let started = now();
             let mut said = false;
             let paid = loop {
                 match house.faucet_pay(&addr, FAUCET_ZAT) {
                     Ok(r) => break Ok(r),
-                    Err(e) if now() < started + 600 => {
+                    Err(e) if now() < started + 600 && !maybe_sent(&e) => {
                         if !said {
                             app.step(id, "Waiting for the faucet's coins to confirm (a few minutes)");
                             said = true;
@@ -1255,20 +1491,90 @@ impl Hub {
                     app.add_activity(json!({ "kind": "faucet", "txid": r["txid"], "amount_zat": FAUCET_ZAT, "text": "Received free test coins" }));
                     Ok(json!({ "txid": r["txid"], "amount_zat": FAUCET_ZAT }))
                 }
+                Err(e) if maybe_sent(&e) => {
+                    // It may have gone out: keep the wallet marked, and say to look again.
+                    house.push_event(json!({ "event": "log", "text": format!("faucet, maybe sent: {e:#}") }));
+                    Err(anyhow!("the faucet's payment may still arrive; sync in a few minutes and look again"))
+                }
                 Err(e) => {
                     // Give the chance back; the detail goes to the house log, not to the visitor.
-                    hub.unfund(&profile);
+                    hub.unfund(&profile, &ip, stamp);
                     house.push_event(json!({ "event": "log", "text": format!("faucet: {e:#}") }));
                     Err(anyhow!("the demo faucet cannot pay right now (its coins may still be confirming); try again in a few minutes"))
                 }
             }
-        }))
+        })
     }
 
-    fn unfund(&self, profile: &str) {
+    /// Give back a faucet chance: the wallet's, the visitor's and the hour's.
+    fn unfund(&self, profile: &str, ip: &str, stamp: u64) {
         if let Mode::Hosted(h) = &self.mode {
             h.index.lock().unwrap().funded.remove(profile);
             let _ = self.save_index(h);
+            if let Some(v) = h.faucet_by_ip.lock().unwrap().get_mut(ip) {
+                if let Some(i) = v.iter().position(|t| *t == stamp) {
+                    v.remove(i);
+                }
+            }
+            let mut all = h.faucet_all.lock().unwrap();
+            if let Some(i) = all.iter().position(|t| *t == stamp) {
+                all.remove(i);
+            }
+        }
+    }
+
+    /// Remove wallets made and never used: never synced, no test coins, nothing listed, no
+    /// shop, no one signed in, and older than a few days. Nothing in them can hold coins the
+    /// owner knows of, since they never once looked at the chain.
+    fn remove_unused(&self, h: &Hosted) {
+        let apps: Vec<Arc<App>> = h.apps.lock().unwrap().values().cloned().collect();
+        let funded = h.index.lock().unwrap().funded.clone();
+        let signed_in: HashSet<String> = h
+            .sessions
+            .lock()
+            .unwrap()
+            .values()
+            .map(|s| s.profile.clone())
+            .collect();
+        for a in apps {
+            let made = fs::metadata(a.dir.join("app.json"))
+                .and_then(|m| m.created().or_else(|_| m.modified()))
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(u64::MAX);
+            let unused = a.profile != HOUSE
+                && made.saturating_add(UNUSED_WALLET_SECS) < now()
+                && a.last_seen.load(Ordering::SeqCst) + UNUSED_WALLET_SECS < now()
+                && a.cfg.lock().unwrap().last_sync.is_none()
+                && !funded.contains(&a.profile)
+                && !signed_in.contains(&a.profile)
+                && !a.listings_path().exists()
+                && !a.shop_running();
+            if !unused {
+                continue;
+            }
+            // Only under the wallet's lock, so no job of it is running.
+            let Ok(_g) = a.wallet_lock.try_lock() else {
+                continue;
+            };
+            if a.jobs
+                .lock()
+                .unwrap()
+                .values()
+                .any(|j| j.state == "running")
+            {
+                continue;
+            }
+            h.apps.lock().unwrap().remove(&a.profile);
+            {
+                let mut idx = h.index.lock().unwrap();
+                idx.by_cred.retain(|_, p| p != &a.profile);
+                idx.ports.remove(&a.profile);
+            }
+            let _ = self.save_index(h);
+            let _ = fs::remove_dir_all(&a.dir);
+            eprintln!("removed the unused wallet {}", a.profile);
         }
     }
 
@@ -1305,12 +1611,14 @@ fn start_hosted_threads(hub: &Arc<Hub>) {
         thread::sleep(Duration::from_secs(60));
         let Mode::Hosted(h) = &hb.mode else { return };
         h.sessions.lock().unwrap().retain(|_, s| s.expires > now());
+        h.prune();
         let apps: Vec<Arc<App>> = h.apps.lock().unwrap().values().cloned().collect();
         for a in apps {
             if a.profile != HOUSE && a.last_seen.load(Ordering::SeqCst) + IDLE_LOCK_SECS < now() {
                 *a.passphrase.lock().unwrap() = None;
             }
         }
+        hb.remove_unused(h);
     });
     // Keep the house shop stocked and open.
     let hb = hub.clone();
@@ -1340,10 +1648,7 @@ impl App {
                 .with_context(|| format!("creating {}", dir.join(sub).display()))?;
         }
         owner_only_dir(dir)?;
-        let cfg: Config = fs::read(dir.join("app.json"))
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
+        let cfg: Config = read_state(&dir.join("app.json"))?;
         let last_sync = cfg.last_sync.clone().unwrap_or(Value::Null);
         Ok(Arc::new(App {
             dir: dir.to_path_buf(),
@@ -1360,6 +1665,7 @@ impl App {
                 child: None,
                 listen: None,
             }),
+            paused: AtomicBool::new(false),
             events: Arc::new(Mutex::new(Vec::new())),
             last_sync: Mutex::new(last_sync),
             last_seen: AtomicU64::new(now()),
@@ -1400,10 +1706,11 @@ impl App {
     }
 
     fn save_cfg(&self) -> Result<()> {
-        let cfg = self.cfg.lock().unwrap().clone();
+        // Written while the lock is held, so two saves never mix.
+        let cfg = self.cfg.lock().unwrap();
         zsettle_core::wallet::write_owner_only(
             &self.dir.join("app.json"),
-            &serde_json::to_vec_pretty(&cfg)?,
+            &serde_json::to_vec_pretty(&*cfg)?,
         )
     }
 
@@ -1435,9 +1742,24 @@ impl App {
         if let Some(p) = self.passphrase.lock().unwrap().as_ref() {
             cmd.env("ZSETTLE_PASSPHRASE", p.as_str());
         }
-        let out = cmd
-            .output()
-            .with_context(|| format!("running {}", bin.display()))?;
+        // Commands that open the seed and prove take a few hundred MB each: a few at a time.
+        let heavy = matches!(
+            args.first().map(String::as_str),
+            Some("init" | "pay" | "mint" | "publish" | "cancel" | "buy")
+        );
+        let _slot = if heavy {
+            Some(
+                Slot::take(&HEAVY_RUNNING, MAX_HEAVY, Duration::from_secs(300))
+                    .ok_or_else(|| anyhow!("the server is busy; try again in a moment"))?,
+            )
+        } else {
+            None
+        };
+        let name = bin
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let out = cmd.output().with_context(|| format!("running {name}"))?;
         let stdout = String::from_utf8_lossy(&out.stdout);
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
@@ -1516,64 +1838,94 @@ impl App {
 
     // ------------------------------------------------------------ jobs
 
+    /// Run `f` as a background job the page follows. When this wallet, or the server, runs
+    /// too many already, the job is shown as failed at once.
     fn job(
         self: &Arc<Self>,
         kind: &str,
         f: impl FnOnce(&Arc<App>, u64) -> Result<Value> + Send + 'static,
     ) -> Value {
-        let id = self.next_job.fetch_add(1, Ordering::SeqCst) + 1;
-        let running_here = self
-            .jobs
-            .lock()
-            .unwrap()
-            .values()
-            .filter(|j| j.state == "running")
-            .count();
-        let busy = if running_here >= MAX_JOBS_PER_WALLET {
-            Some("another task of this wallet is still running; wait for it to finish")
-        } else if RUNNING_JOBS.load(Ordering::SeqCst) >= MAX_JOBS_TOTAL {
-            Some("the server is busy; try again in a moment")
+        match self.start_job(kind, true) {
+            Ok((id, slot)) => self.run_job(id, slot, f),
+            Err(e) => {
+                let id = self.next_job.fetch_add(1, Ordering::SeqCst) + 1;
+                self.jobs.lock().unwrap().insert(
+                    id,
+                    Job {
+                        id,
+                        kind: kind.to_string(),
+                        state: "failed".into(),
+                        steps: Vec::new(),
+                        result: Value::Null,
+                        error: Some(e.to_string()),
+                    },
+                );
+                json!({ "job": id })
+            }
+        }
+    }
+
+    /// A job outside the limits, for work that has a limit of its own (the faucet).
+    fn free_job(
+        self: &Arc<Self>,
+        kind: &str,
+        f: impl FnOnce(&Arc<App>, u64) -> Result<Value> + Send + 'static,
+    ) -> Result<Value> {
+        let (id, slot) = self.start_job(kind, false)?;
+        Ok(self.run_job(id, slot, f))
+    }
+
+    /// Register a running job; the check and the count happen under one lock, so parallel
+    /// requests cannot pass the limits together.
+    fn start_job(&self, kind: &str, counted: bool) -> Result<(u64, Option<Slot>)> {
+        let mut jobs = self.jobs.lock().unwrap();
+        let slot = if counted {
+            let running_here = jobs
+                .values()
+                .filter(|j| j.state == "running" && j.kind != "faucet")
+                .count();
+            if running_here >= MAX_JOBS_PER_WALLET {
+                return Err(anyhow!(
+                    "another task of this wallet is still running; wait for it to finish"
+                ));
+            }
+            Some(
+                Slot::try_take(&RUNNING_JOBS, MAX_JOBS_TOTAL)
+                    .ok_or_else(|| anyhow!("the server is busy; try again in a moment"))?,
+            )
         } else {
             None
         };
-        if let Some(why) = busy {
-            self.jobs.lock().unwrap().insert(
-                id,
-                Job {
-                    id,
-                    kind: kind.to_string(),
-                    state: "failed".into(),
-                    steps: Vec::new(),
-                    result: Value::Null,
-                    error: Some(why.into()),
-                },
-            );
-            return json!({ "job": id });
+        let id = self.next_job.fetch_add(1, Ordering::SeqCst) + 1;
+        // Keep the last hundred jobs.
+        if jobs.len() > 100 {
+            let keep: HashSet<u64> = (id.saturating_sub(100)..=id).collect();
+            jobs.retain(|k, j| keep.contains(k) || j.state == "running");
         }
-        RUNNING_JOBS.fetch_add(1, Ordering::SeqCst);
-        {
-            let mut jobs = self.jobs.lock().unwrap();
-            // Keep the last hundred jobs.
-            if jobs.len() > 100 {
-                let keep: HashSet<u64> = (id.saturating_sub(100)..=id).collect();
-                jobs.retain(|k, _| keep.contains(k));
-            }
-            jobs.insert(
+        jobs.insert(
+            id,
+            Job {
                 id,
-                Job {
-                    id,
-                    kind: kind.to_string(),
-                    state: "running".into(),
-                    steps: Vec::new(),
-                    result: Value::Null,
-                    error: None,
-                },
-            );
-        }
+                kind: kind.to_string(),
+                state: "running".into(),
+                steps: Vec::new(),
+                result: Value::Null,
+                error: None,
+            },
+        );
+        Ok((id, slot))
+    }
+
+    fn run_job(
+        self: &Arc<Self>,
+        id: u64,
+        slot: Option<Slot>,
+        f: impl FnOnce(&Arc<App>, u64) -> Result<Value> + Send + 'static,
+    ) -> Value {
         let app = self.clone();
         thread::spawn(move || {
             let r = f(&app, id);
-            RUNNING_JOBS.fetch_sub(1, Ordering::SeqCst);
+            drop(slot);
             let mut jobs = app.jobs.lock().unwrap();
             if let Some(j) = jobs.get_mut(&id) {
                 match r {
@@ -1607,6 +1959,7 @@ impl App {
     /// database every few seconds.
     fn exclusive<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
         let _guard = self.wallet_lock.lock().unwrap();
+        self.paused.store(true, Ordering::SeqCst);
         let was = self.stop_shop();
         let r = f();
         // The shop restarts only with the passphrase it needs; a wallet locked meanwhile keeps
@@ -1618,6 +1971,7 @@ impl App {
                 );
             }
         }
+        self.paused.store(false, Ordering::SeqCst);
         r
     }
 
@@ -1748,7 +2102,7 @@ impl App {
         if pass.len() > 512 {
             return Err(anyhow!("wrong passphrase"));
         }
-        let _slot = ScryptSlot::take()?;
+        let _slot = scrypt_slot()?;
         let words = Wallet::open(self.wallet_dir())?.mnemonic_phrase(&pass)?;
         Ok(json!({ "words": words.split_whitespace().collect::<Vec<_>>() }))
     }
@@ -1953,28 +2307,31 @@ impl App {
     }
 
     fn publish_now(&self, id: Option<u64>, note: &str, name: &str, price: &str) -> Result<Value> {
+        self.exclusive(|| {
+            self.step_opt(id, "Syncing with the network");
+            self.sync()?;
+            self.publish_one(id, note, name, price)
+        })
+    }
+
+    /// Add one item to the signed listings file; the caller holds the wallet.
+    fn publish_one(&self, id: Option<u64>, note: &str, name: &str, price: &str) -> Result<Value> {
         let wa = self.wallet_args()?;
         let listings = self.listings_path().display().to_string();
-        self.exclusive(|| {
-            if !self.shop_running() {
-                self.step_opt(id, "Syncing with the network");
-                self.sync()?;
-            }
-            self.step_opt(id, "Signing the listings file");
-            let mut args = vec!["publish".to_string()];
-            args.extend(wa);
-            args.extend([
-                format!("--listings={listings}"),
-                format!("--item-note={note}"),
-                format!("--price={price}"),
-            ]);
-            if !name.is_empty() {
-                args.push(format!("--name={name}"));
-            }
-            let r = self.run(&self.seller_bin, &args)?;
-            self.add_activity(json!({ "kind": "list", "text": format!("Listed {} for {price}", if name.is_empty() { note } else { name }) }));
-            Ok(r)
-        })
+        self.step_opt(id, "Signing the listings file");
+        let mut args = vec!["publish".to_string()];
+        args.extend(wa);
+        args.extend([
+            format!("--listings={listings}"),
+            format!("--item-note={note}"),
+            format!("--price={price}"),
+        ]);
+        if !name.is_empty() {
+            args.push(format!("--name={name}"));
+        }
+        let r = self.run(&self.seller_bin, &args)?;
+        self.add_activity(json!({ "kind": "list", "text": format!("Listed {} for {price}", if name.is_empty() { note } else { name }) }));
+        Ok(r)
     }
 
     fn start_delist(self: &Arc<Self>, body: &Value) -> Result<Value> {
@@ -2036,10 +2393,24 @@ impl App {
             .filter(|i| i["listed_zat"].is_null() && !i["mined"].is_null())
             .collect();
         let pending = items.iter().filter(|i| i["mined"].is_null()).count();
-        for it in ready.iter().take(HOUSE_STOCK.saturating_sub(listed)) {
-            let note = it["note"].as_str().unwrap_or_default();
-            let name = it["name"].as_str().unwrap_or_default();
-            self.publish_now(None, note, name, HOUSE_PRICE)?;
+        // All new listings in one pause of the shop, not one pause each.
+        let batch: Vec<(String, String)> = ready
+            .iter()
+            .take(HOUSE_STOCK.saturating_sub(listed))
+            .map(|it| {
+                (
+                    it["note"].as_str().unwrap_or_default().to_string(),
+                    it["name"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect();
+        if !batch.is_empty() {
+            self.exclusive(|| {
+                for (note, name) in &batch {
+                    self.publish_one(None, note, name, HOUSE_PRICE)?;
+                }
+                Ok(())
+            })?;
         }
         if self.listings_path().exists() && !self.shop_running() {
             self.shop_start(&json!({}))?;
@@ -2246,7 +2617,11 @@ impl App {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let stem = self.dir.join("trades").join(format!("trade-{}", now()));
+        let stem = self.dir.join("trades").join(format!(
+            "trade-{}-{}",
+            now(),
+            hex::encode(rand::random::<[u8; 4]>())
+        ));
         Ok(self.job("buy", move |app, id| {
             let w = app.w();
             let full = format!("{}.pczt", stem.display());
@@ -2353,6 +2728,12 @@ impl App {
     }
 }
 
+/// A payment error after which the transaction may have reached the network: the broadcast
+/// call itself failed, so lightwalletd may or may not have taken it.
+fn maybe_sent(e: &anyhow::Error) -> bool {
+    format!("{e:#}").contains("send_transaction")
+}
+
 /// The service base and listings URLs for what the user typed.
 fn seller_urls(input: &str) -> Result<(String, String)> {
     let t = input.trim().trim_end_matches('/');
@@ -2413,4 +2794,132 @@ fn http_get(url: &str) -> Result<String> {
         return Err(anyhow!("the listings at {url} are too large"));
     }
     Ok(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hosted() -> Hosted {
+        Hosted {
+            origin: "https://demo.test".into(),
+            host: "demo.test".into(),
+            network: "test".into(),
+            salt: String::new(),
+            apps: Mutex::new(HashMap::new()),
+            index: Mutex::new(Index::default()),
+            sessions: Mutex::new(HashMap::new()),
+            created: Mutex::new(Vec::new()),
+            faucet_by_ip: Mutex::new(HashMap::new()),
+            faucet_all: Mutex::new(Vec::new()),
+            fails: Mutex::new(HashMap::new()),
+            checks: Mutex::new(HashMap::new()),
+        }
+    }
+
+    #[test]
+    fn visitors_group_ipv6_by_64() {
+        assert_eq!(visitor("203.0.113.7"), "203.0.113.7");
+        assert_eq!(
+            visitor("2001:db8:1:2:aaaa::1"),
+            visitor("2001:db8:1:2:bbbb::9")
+        );
+        assert_ne!(visitor("2001:db8:1:2::1"), visitor("2001:db8:1:3::1"));
+        assert_eq!(visitor("::ffff:198.51.100.1"), "198.51.100.1");
+        assert_eq!(visitor("local"), "local");
+    }
+
+    #[test]
+    fn heads_with_chunked_or_repeated_fields_are_refused() {
+        assert!(
+            parse_head("POST /api/x HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked").is_err()
+        );
+        assert!(parse_head("GET / HTTP/1.1\r\nHost: a\r\nHost: b").is_err());
+        assert!(parse_head("POST / HTTP/1.1\r\nContent-Length: 1\r\ncontent-length: 2").is_err());
+        let (m, t, h) = parse_head("GET /shop/x/listings?a=1 HTTP/1.1\r\nHOST: demo.test").unwrap();
+        assert_eq!((m.as_str(), t.as_str()), ("GET", "/shop/x/listings?a=1"));
+        assert_eq!(h["host"], "demo.test");
+    }
+
+    #[test]
+    fn notes_and_shop_addresses() {
+        let txid = "ab".repeat(32);
+        assert!(valid_note(&format!("{txid}:0")));
+        assert!(!valid_note(&format!("{txid}:")));
+        assert!(!valid_note(&format!("{txid}:12345")));
+        assert!(!valid_note("ab:0"));
+        let (base, url) = seller_urls("https://demo.test/shop/abc/listings").unwrap();
+        assert_eq!(base, "https://demo.test/shop/abc");
+        assert_eq!(url, "https://demo.test/shop/abc/listings");
+        assert!(seller_urls("ftp://x").is_err());
+        assert!(seller_urls("https://x/?a").is_err());
+    }
+
+    #[test]
+    fn wrong_tries_lock_then_are_forgotten() {
+        let h = hosted();
+        let keys = ["w:abc:1.2.3.4".to_string()];
+        for _ in 0..FREE_FAILURES {
+            assert!(h.check_fails(&keys).is_ok());
+            h.record_fail(&keys);
+        }
+        assert!(h.check_fails(&keys).is_err());
+        // Another visitor is not held back by these tries.
+        assert!(h.check_fails(&["w:abc:5.6.7.8".to_string()]).is_ok());
+        // An hour after the last failure the count starts again.
+        h.fails.lock().unwrap().get_mut(&keys[0]).unwrap().1 = 0;
+        h.fails.lock().unwrap().get_mut(&keys[0]).unwrap().2 = now() - 3601;
+        h.record_fail(&keys);
+        assert_eq!(h.fails.lock().unwrap()[&keys[0]].0, 1);
+        assert!(h.check_fails(&keys).is_ok());
+        h.prune();
+        assert!(h.fails.lock().unwrap().contains_key(&keys[0]));
+    }
+
+    #[test]
+    fn checks_are_limited_per_key() {
+        let h = hosted();
+        let k = [("ip:x".to_string(), 3)];
+        for _ in 0..3 {
+            assert!(h.count_check(&k).is_ok());
+        }
+        assert!(h.count_check(&k).is_err());
+        assert!(h.count_check(&[("ip:y".to_string(), 3)]).is_ok());
+    }
+
+    #[test]
+    fn slots_are_capped_and_given_back() {
+        static C: AtomicUsize = AtomicUsize::new(0);
+        let a = Slot::try_take(&C, 2).unwrap();
+        let _b = Slot::try_take(&C, 2).unwrap();
+        assert!(Slot::try_take(&C, 2).is_none());
+        drop(a);
+        assert!(Slot::take(&C, 2, Duration::from_millis(10)).is_some());
+        assert_eq!(C.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn state_files_missing_damaged_and_whole() {
+        let dir = std::env::temp_dir().join(format!("zsettle-app-test-{}", rand::random::<u32>()));
+        fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("hub.json");
+        let empty: Index = read_state(&p).unwrap();
+        assert!(empty.ports.is_empty());
+        fs::write(&p, b"{\"funded\":[\"a\"],\"ports\":{}}cc\"]").unwrap();
+        assert!(read_state::<Index>(&p).is_err());
+        let mut idx = Index::default();
+        idx.ports.insert("abc".into(), 19100);
+        zsettle_core::wallet::write_owner_only(&p, &serde_json::to_vec(&idx).unwrap()).unwrap();
+        let back: Index = read_state(&p).unwrap();
+        assert_eq!(back.ports["abc"], 19100);
+        // No temporary files left behind.
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn broadcast_failures_are_never_retried() {
+        assert!(maybe_sent(&anyhow!("send_transaction: timeout")));
+        assert!(!maybe_sent(&anyhow!("insufficient balance")));
+    }
 }
