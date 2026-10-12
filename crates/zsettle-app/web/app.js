@@ -192,6 +192,10 @@ async function api(path, body) {
     opt.body = JSON.stringify(body);
   }
   const r = await fetch(path, opt);
+  if (r.status === 401) {
+    sessionExpired();
+    throw new Error('This session ended: open the new link from the terminal.');
+  }
   let data;
   try {
     data = await r.json();
@@ -200,6 +204,28 @@ async function api(path, body) {
   }
   if (!r.ok) throw new Error(data.error || 'error ' + r.status);
   return data;
+}
+
+// The app makes a new session key each time it starts; a tab left open from before holds
+// the old one. Say so, instead of failing action by action.
+function sessionExpired() {
+  if (S.expired) return;
+  S.expired = true;
+  S.timers.forEach(clearInterval);
+  sessionStorage.removeItem('zsettle-token');
+  document.getElementById('layer').replaceChildren();
+  render(
+    h(
+      'main',
+      { class: 'onboard' },
+      h(
+        'div',
+        { class: 'panel' },
+        h('div', { class: 'hero' }, logo(), h('h1', null, 'Open the new link'), h('p', { class: 'lede' }, 'zsettle-app was restarted, so this tab’s session key no longer works. The app printed a new link in its terminal: open it, here or in a new tab. Nothing in your wallet changed.')),
+        linksRow(),
+      ),
+    ),
+  );
 }
 
 async function follow(jobId, onStep) {
@@ -1182,6 +1208,11 @@ function viewActivity() {
   );
 }
 
+// A new link pasted into this tab changes only the part after '#', which does not reload the
+// page: take the new key and start over.
+window.addEventListener('hashchange', () => {
+  if (/token=[0-9a-f]{32}/.test(location.hash)) location.reload();
+});
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden && S.status && S.status.unlocked) backgroundSync();
 });
