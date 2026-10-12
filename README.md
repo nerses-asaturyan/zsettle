@@ -16,6 +16,16 @@ moves.
 4. The buyer signs the payment spend and broadcasts. If the item was spent elsewhere first,
    the whole trade is invalid and the buyer's ZEC never moves.
 
+## The app
+
+`zsettle-app` puts the same tools in a browser, on a phone or a desktop: a wallet unlocked
+by a passkey, a market of signed shops, a buy with a review step, and each item's history
+read from the chain.
+
+| A shop | Review before buying | An item's history | On a phone |
+|---|---|---|---|
+| ![A shop's items](docs/img/app-shop.jpg) | ![Review purchase](docs/img/app-buy.jpg) | ![Item history](docs/img/app-history.jpg) | ![Wallet on a phone](docs/img/app-phone.jpg) |
+
 ## Links
 
 - Documentation: <https://nerses-asaturyan.github.io/zsettle/book/>

@@ -6,6 +6,12 @@ step and live progress, a seller page to mint items, set prices and open your sh
 histories from the chain, a QR code to receive, and backup words. Transaction links open the
 ZecBlock explorer.
 
+![A shop's items, signed by the seller](../img/app-shop.jpg)
+
+![Review before buying: price, network fee, total](../img/app-buy.jpg)
+
+![An item's history, read from the chain with viewing keys](../img/app-history.jpg)
+
 The app adds no cryptography of its own. For every action it runs the `zsettle` and
 `zsettle-seller` programs next to it and reads what they print.
 
