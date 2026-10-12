@@ -90,42 +90,27 @@ function icon(name, cls) {
   return svg;
 }
 
-// The mark: a shield cut by a "z". Swapped for the chosen logo later.
+// The mark: two halves, gold and ink, locking into a Z through a transparent cut, as a
+// trade locks the seller's half and the buyer's half into one transaction.
 let logoN = 0;
 function logo(cls = 'logo') {
-  const gid = 'zg' + ++logoN;
   const NS = 'http://www.w3.org/2000/svg';
-  const svg = document.createElementNS(NS, 'svg');
-  svg.setAttribute('viewBox', '0 0 64 64');
-  svg.setAttribute('class', cls);
-  svg.setAttribute('aria-hidden', 'true');
-  const defs = document.createElementNS(NS, 'defs');
-  const g = document.createElementNS(NS, 'linearGradient');
-  g.setAttribute('id', gid);
-  g.setAttribute('x1', '0');
-  g.setAttribute('y1', '0');
-  g.setAttribute('x2', '1');
-  g.setAttribute('y2', '1');
-  for (const [o, c] of [['0', '#ffd36b'], ['1', '#e89b0c']]) {
-    const s = document.createElementNS(NS, 'stop');
-    s.setAttribute('offset', o);
-    s.setAttribute('stop-color', c);
-    g.append(s);
-  }
-  defs.append(g);
-  svg.append(defs);
-  const shape = document.createElementNS(NS, 'path');
-  shape.setAttribute('d', 'M32 4l24 9v17c0 15-10.5 25-24 30C18.5 55 8 45 8 30V13l24-9z');
-  shape.setAttribute('fill', `url(#${gid})`);
-  svg.append(shape);
-  const z = document.createElementNS(NS, 'path');
-  z.setAttribute('d', 'M22 22h20L22 42h20');
-  z.setAttribute('fill', 'none');
-  z.setAttribute('stroke', '#1d1503');
-  z.setAttribute('stroke-width', '5.5');
-  z.setAttribute('stroke-linecap', 'round');
-  z.setAttribute('stroke-linejoin', 'round');
-  svg.append(z);
+  const n = ++logoN;
+  const el = (tag, attrs) => {
+    const e = document.createElementNS(NS, tag);
+    for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+    return e;
+  };
+  const svg = el('svg', { viewBox: '0 0 64 64', class: cls, 'aria-hidden': 'true' });
+  const defs = el('defs', {});
+  const clip = el('clipPath', { id: 'lc' + n });
+  clip.append(el('rect', { width: 64, height: 64, rx: 18 }));
+  const mask = el('mask', { id: 'lm' + n });
+  mask.append(el('rect', { width: 64, height: 64, fill: '#fff' }), el('path', { d: 'M-2 22H46L18 42H66', fill: 'none', stroke: '#000', 'stroke-width': 5, 'stroke-linejoin': 'round' }));
+  defs.append(clip, mask);
+  const g = el('g', { 'clip-path': `url(#lc${n})`, mask: `url(#lm${n})` });
+  g.append(el('path', { d: 'M0 0H64V42H18L46 22H0Z', fill: '#F4B728' }), el('path', { d: 'M0 22H46L18 42H64V64H0Z', fill: 'currentColor', class: 'logo-ink' }));
+  svg.append(defs, g);
   return svg;
 }
 
