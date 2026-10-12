@@ -43,7 +43,7 @@ a { color: var(--accent); }
 .pill.main { color: var(--accent); border-color: rgba(244, 183, 40, 0.4); }
 .pill.test { color: #8fb4ff; border-color: rgba(143, 180, 255, 0.4); }
 .spacer { flex: 1; }
-.tabs { display: flex; gap: 6px; padding: 12px 20px 0; flex-wrap: wrap; }
+.tabs { display: flex; gap: 6px; padding: 12px 20px 0; flex-wrap: wrap; max-width: 1100px; margin: 0 auto; }
 .tab {
   padding: 9px 16px; border-radius: 10px 10px 0 0; border: 1px solid transparent;
   background: none; color: var(--muted); cursor: pointer; font: inherit;

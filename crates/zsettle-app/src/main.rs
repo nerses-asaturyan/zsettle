@@ -87,6 +87,9 @@ struct Config {
     activity: Vec<Value>,
     #[serde(default)]
     sellers: Vec<String>,
+    /// Shop each bought item came from, for its history.
+    #[serde(default)]
+    origins: HashMap<String, String>,
     shop_listen: Option<String>,
 }
 
@@ -1105,13 +1108,11 @@ impl App {
             app.step(id, "Signed by both sides and broadcast");
             let txid = done["txid"].clone();
             if let (Some(t), Some(i)) = (txid.as_str(), built["item_action_index"].as_u64()) {
+                let mut cfg = app.cfg.lock().unwrap();
                 if !name.is_empty() {
-                    app.cfg
-                        .lock()
-                        .unwrap()
-                        .names
-                        .insert(format!("{t}:{i}"), name.clone());
+                    cfg.names.insert(format!("{t}:{i}"), name.clone());
                 }
+                cfg.origins.insert(format!("{t}:{i}"), base.clone());
             }
             app.add_activity(json!({
                 "kind": "buy", "txid": txid, "price_zat": built["price_zat"], "fee_zat": built["fee_zat"],
@@ -1124,7 +1125,10 @@ impl App {
     fn start_verify(self: &Arc<Self>, body: &Value) -> Result<Value> {
         let item = field(body, "item")?;
         let mut sources = Vec::new();
-        if let Ok(u) = field(body, "url") {
+        let url = field(body, "url")
+            .ok()
+            .or_else(|| self.cfg.lock().unwrap().origins.get(&item).cloned());
+        if let Some(u) = url {
             sources.push(seller_urls(&u)?.1);
         }
         if self.listings_path().exists() {
