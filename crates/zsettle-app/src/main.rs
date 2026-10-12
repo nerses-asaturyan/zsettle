@@ -24,6 +24,7 @@ use zsettle_core::wallet::Wallet;
 const INDEX_HTML: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
 const STYLE_CSS: &str = include_str!("../web/style.css");
+const QR_JS: &str = include_str!("../web/qr.js");
 
 /// Largest request body the page sends (JSON forms).
 const MAX_BODY: usize = 64 * 1024;
@@ -351,6 +352,14 @@ fn handle(app: &Arc<App>, mut stream: TcpStream) {
                 200,
                 "text/javascript; charset=utf-8",
                 APP_JS.as_bytes(),
+            )
+        }
+        ("GET", "/qr.js") => {
+            return respond(
+                &mut stream,
+                200,
+                "text/javascript; charset=utf-8",
+                QR_JS.as_bytes(),
             )
         }
         ("GET", "/style.css") => {
