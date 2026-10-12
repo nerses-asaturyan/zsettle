@@ -7,6 +7,8 @@ const LINKS = {
   docs: 'https://github.com/nerses-asaturyan/zsettle/tree/main/docs',
   x: 'https://x.com/NAsaturyan',
 };
+// Transaction pages, per network. Opening one tells the explorer which transaction you look at.
+const EXPLORER = { main: 'https://zecblock.com/tx/', test: 'https://testnet.zecblock.com/tx/' };
 const FEE_ZAT = 15000; // a three-action trade or payment under ZIP 317
 const SYNC_EVERY_MS = 60000;
 
@@ -811,9 +813,19 @@ function openSend() {
   }
 }
 
+function txLink(txid, n = 6) {
+  const base = EXPLORER[(S.status && S.status.network) || 'main'];
+  return h(
+    'span',
+    { class: 'txlink' },
+    h('a', { href: base + txid, target: '_blank', rel: 'noopener noreferrer', title: 'Open in the block explorer' }, short(txid, n), icon('external')),
+    h('button', { class: 'iconbtn sm', 'aria-label': 'Copy transaction id', onclick: () => copy(txid, 'Transaction id copied') }, icon('copy')),
+  );
+}
+
 function txRow(txid) {
   if (!txid) return null;
-  return h('div', { class: 'summary' }, h('div', { class: 'r' }, h('span', null, 'Transaction'), h('button', { class: 'linkbtn', onclick: () => copy(txid, 'Transaction id copied') }, short(txid, 8), ' ', icon('copy'))));
+  return h('div', { class: 'summary' }, h('div', { class: 'r' }, h('span', null, 'Transaction'), txLink(txid, 8)));
 }
 
 // ------------------------------------------------------------ market
@@ -957,7 +969,7 @@ async function openHistory(base, note, name) {
           { class: 'timeline' },
           hops.map((hop, i) => {
             const you = lastMine && i === hops.length - 1;
-            return h('div', { class: 'hop' + (you ? ' you' : '') }, h('div', { class: 't' }, i === 0 ? 'Created' : 'Changed hands'), h('div', { class: 'small muted' }, 'Block ' + hop.height + ' · ' + holderText(hop, you)), h('button', { class: 'linkbtn', onclick: () => copy(hop.txid, 'Transaction id copied') }, short(hop.txid, 8)));
+            return h('div', { class: 'hop' + (you ? ' you' : '') }, h('div', { class: 't' }, i === 0 ? 'Created' : 'Changed hands'), h('div', { class: 'small muted' }, 'Block ' + hop.height + ' · ' + holderText(hop, you)), txLink(hop.txid, 8));
           }),
         ),
       };
@@ -1153,7 +1165,7 @@ function activityList(items) {
         'div',
         { class: 'li' },
         h('span', { class: 'ico ' + kind }, icon(ic)),
-        h('div', { class: 'grow' }, h('div', { class: 'title' }, a.text || a.kind), h('div', { class: 'sub' }, ago(a.at), a.txid ? [' · ', h('button', { class: 'linkbtn', style: null, onclick: () => copy(a.txid, 'Transaction id copied') }, short(a.txid, 5))] : null)),
+        h('div', { class: 'grow' }, h('div', { class: 'title' }, a.text || a.kind), h('div', { class: 'sub' }, ago(a.at), a.txid ? [' · ', txLink(a.txid, 5)] : null)),
         amount ? h('span', { class: 'amt' + (a.kind === 'sale' ? ' in' : '') }, (a.kind === 'sale' ? '+' : '−') + zec(amount)) : null,
       );
     }),
@@ -1165,7 +1177,7 @@ function viewActivity() {
     'div',
     null,
     h('h2', { class: 'page' }, 'Activity'),
-    h('p', { class: 'pagesub' }, 'Everything this wallet did, newest first.'),
+    h('p', { class: 'pagesub' }, 'Everything this wallet did, newest first. Transaction links open ZecBlock, which then sees which transaction you look at.'),
     a.length ? h('div', { class: 'card' }, activityList(a)) : h('div', { class: 'card' }, h('div', { class: 'empty' }, h('div', { class: 'ico' }, icon('clock')), h('h3', null, 'Nothing yet'), h('p', null, 'Receive ZEC, buy an item or create one, and it shows up here.'))),
   );
 }

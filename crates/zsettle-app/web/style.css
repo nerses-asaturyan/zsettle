@@ -385,3 +385,10 @@ ol.steps li.failed .mark { background: var(--err); border-color: var(--err); }
 .sidefoot a:hover { color: var(--text); background: var(--surface); }
 .sidefoot .who { display: flex; align-items: center; gap: 8px; padding: 10px 12px 4px; font-size: 13px; color: var(--muted); }
 .avatar svg.i { width: 26px; height: 26px; }
+.txlink { display: inline-flex; align-items: center; gap: 2px; }
+.txlink a { display: inline-flex; align-items: center; gap: 4px; color: var(--accent); font-weight: 650; text-decoration: none; font-family: var(--mono); font-size: 13px; min-height: 32px; }
+.txlink a:hover { text-decoration: underline; }
+.txlink a svg.i { width: 14px; height: 14px; }
+.iconbtn.sm { width: 32px; height: 32px; border-radius: 8px; }
+.iconbtn.sm svg.i { width: 15px; height: 15px; }
+.li .sub .txlink a { font-size: 12px; min-height: 0; }
