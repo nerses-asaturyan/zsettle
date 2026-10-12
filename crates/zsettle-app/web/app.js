@@ -577,7 +577,12 @@ function confirmBuy(it) {
 async function showHistory(base, note, name) {
   await runJob('History of ' + (name || 'item'), '/api/verify', base ? { url: base, item: note } : { item: note }, {
     intro: 'Read from the chain with the sellers’ viewing keys only. Nobody is asked who owns what.',
-    done: (r) => statusText(r.status),
+    done: (r) => {
+      const hops = r.hops || [];
+      const last = hops[hops.length - 1];
+      if (!base && last && last.txid === String(note).split(':')[0]) return 'It is in your wallet now.';
+      return statusText(r.status);
+    },
     render: (r) =>
       h(
         'div',
