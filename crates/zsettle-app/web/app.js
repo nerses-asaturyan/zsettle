@@ -177,6 +177,7 @@ function human(msg) {
   const m = String(msg || 'Something went wrong');
   if (/wrong passphrase/i.test(m)) return 'Wrong passphrase.';
   if (/too recent for the anchor|wait a few blocks/i.test(m)) return 'Your newest funds are a few blocks too fresh to spend. Try again in a minute.';
+  if (/demo faucet/i.test(m)) return m.charAt(0).toUpperCase() + m.slice(1) + '.';
   if (/insufficient|not enough|no spendable|InsufficientFunds/i.test(m)) return 'Not enough spendable ZEC. Money from another wallet can be spent after 10 confirmations.';
   if (/Connection (Failed|refused)|fetching http|could not be reached|timed out/i.test(m)) return 'Could not reach the shop. Check the address and that the shop is open.';
   if (/seller refused the offer/i.test(m)) return m.replace(/^.*?seller refused the offer:\s*/i, 'The seller refused the offer: ');

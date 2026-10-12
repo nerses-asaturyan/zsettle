@@ -1011,7 +1011,7 @@ impl Hub {
     }
 
     /// Test coins from the house wallet, once per wallet.
-    fn faucet(&self, h: &Hosted, app: &Arc<App>) -> Result<Value> {
+    fn faucet(self: &Arc<Self>, h: &Hosted, app: &Arc<App>) -> Result<Value> {
         let house = h
             .apps
             .lock()
@@ -1034,7 +1034,7 @@ impl Hub {
             .map(str::to_string)
             .ok_or_else(|| anyhow!("no address"))?;
         let profile = app.profile.clone();
-        let base = self.base.clone();
+        let hub = self.clone();
         Ok(app.job("faucet", move |app, id| {
             app.step(id, "Sending free test coins from the demo faucet");
             match house.faucet_pay(&addr, FAUCET_ZAT) {
@@ -1043,19 +1043,20 @@ impl Hub {
                     Ok(json!({ "txid": r["txid"], "amount_zat": FAUCET_ZAT }))
                 }
                 Err(e) => {
-                    // Give the chance back, and say what failed.
-                    if let Ok(b) = fs::read(base.join("hub.json")) {
-                        if let Ok(mut idx) = serde_json::from_slice::<Index>(&b) {
-                            idx.funded.remove(&profile);
-                            if let Ok(bytes) = serde_json::to_vec_pretty(&idx) {
-                                let _ = zsettle_core::wallet::write_owner_only(&base.join("hub.json"), &bytes);
-                            }
-                        }
-                    }
-                    Err(anyhow!("the faucet could not pay right now ({e:#}); try again in a few minutes"))
+                    // Give the chance back; the detail goes to the house log, not to the visitor.
+                    hub.unfund(&profile);
+                    house.push_event(json!({ "event": "log", "text": format!("faucet: {e:#}") }));
+                    Err(anyhow!("the demo faucet cannot pay right now (its coins may still be confirming); try again in a few minutes"))
                 }
             }
         }))
+    }
+
+    fn unfund(&self, profile: &str) {
+        if let Mode::Hosted(h) = &self.mode {
+            h.index.lock().unwrap().funded.remove(profile);
+            let _ = self.save_index(h);
+        }
     }
 
     fn open_house(&self, pass: &str) -> Result<()> {
