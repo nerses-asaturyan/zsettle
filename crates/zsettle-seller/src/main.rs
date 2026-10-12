@@ -57,8 +57,10 @@ const MAX_HTTP_CONNECTIONS: usize = 32;
 /// Envelopes one pass may leave waiting for a later pass; beyond this they are refused, so a
 /// flood of unproven envelopes cannot fill the inbox up to its cap.
 const MAX_DEFERRED: usize = 100;
-/// Blocks a deferred envelope may wait for the chain view to catch up with it; every honest
-/// reason to defer resolves within a few blocks, so a longer wait is given up.
+/// Blocks a deferred envelope may wait for the chain view to catch up with it. A buyer can be
+/// ahead of this wallet's view by at most `LAG_SLACK` blocks (beyond that the expiry check
+/// refuses for good), and a listed note becomes spendable a few blocks after its mint, so every
+/// honest reason to defer resolves well within this; a longer wait is given up.
 const DEFER_MAX_BLOCKS: u32 = 10;
 /// Content tags whose proof was verified, kept in memory; cleared when this many.
 const MAX_VERIFIED_TAGS: usize = 10_000;
@@ -1103,7 +1105,16 @@ impl Service<'_> {
                 "{}",
                 serde_json::json!({ "event": "already_signed", "file": path, "out": out })
             );
-            move_into(path, &self.inbox.join("done"))?;
+            let filed = self
+                .inbox
+                .join("done")
+                .join(path.file_name().unwrap_or_default());
+            if filed.exists() {
+                // The same bytes are already filed: a re-post adds nothing.
+                fs::remove_file(path).with_context(|| format!("removing {}", path.display()))?;
+            } else {
+                move_into(path, &self.inbox.join("done"))?;
+            }
             return Ok(());
         }
         match self.sign_envelope(db, l, anchors, &bytes) {
@@ -1128,12 +1139,15 @@ impl Service<'_> {
                     .unwrap_or("envelope")
                     .to_string();
                 let tip = last_tip(db);
-                let since = *self.deferred_since.borrow_mut().entry(name).or_insert(tip);
-                if tip > since.saturating_add(DEFER_MAX_BLOCKS) {
-                    return self.reject(
-                        path,
-                        format!("refused: waited {DEFER_MAX_BLOCKS} blocks for the chain view to catch up with this offer, and it did not; build the offer again"),
-                    );
+                // A tip of zero means the wallet view was unreadable: judge the wait later.
+                if tip != 0 {
+                    let since = *self.deferred_since.borrow_mut().entry(name).or_insert(tip);
+                    if tip > since.saturating_add(DEFER_MAX_BLOCKS) {
+                        return self.reject(
+                            path,
+                            format!("refused: waited {DEFER_MAX_BLOCKS} blocks for the chain view to catch up with this offer, and it did not; build the offer again"),
+                        );
+                    }
                 }
                 if self.deferred.get() >= MAX_DEFERRED {
                     return self.reject(
@@ -1756,7 +1770,11 @@ fn move_into(path: &Path, dir: &Path) -> Result<PathBuf> {
     let mut dest = dir.join(name);
     let mut n = 1u32;
     while dest.exists() {
-        dest = dir.join(format!("{name}.{n}"));
+        // Keep the extension, so the daily cleanup recognises the file.
+        dest = dir.join(match name.rsplit_once('.') {
+            Some((stem, ext)) => format!("{stem}.{n}.{ext}"),
+            None => format!("{name}.{n}"),
+        });
         n += 1;
     }
     fs::rename(path, &dest)
