@@ -427,6 +427,16 @@ pub fn import_viewing_key(
 
 /// The wallet passphrase: `ZSETTLE_PASSPHRASE` when set, otherwise asked for on the terminal
 /// (twice when `confirm`), otherwise one line of standard input.
+/// scrypt work factor (log2 N) for a passphrase that is already a random 256-bit secret.
+const PASSKEY_WORK_FACTOR: u8 = 10;
+
+/// Whether a passphrase is a secret a passkey gave (`passkey:` and 64 hex digits), which
+/// no one can guess.
+pub fn is_random_secret(p: &str) -> bool {
+    p.strip_prefix("passkey:")
+        .is_some_and(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
 fn passphrase(confirm: bool) -> Result<age::secrecy::SecretString> {
     use std::io::IsTerminal;
     use zeroize::Zeroizing;
@@ -546,11 +556,17 @@ pub fn init_wallet(
             write_private(identity, text.as_bytes())?;
             (vec![Box::new(public)], "identity-file", true)
         }
-        None => (
-            vec![Box::new(age::scrypt::Recipient::new(passphrase(true)?))],
-            "passphrase",
-            false,
-        ),
+        None => {
+            let pass = passphrase(true)?;
+            let strong = is_random_secret(age::secrecy::ExposeSecret::expose_secret(&pass));
+            let mut r = age::scrypt::Recipient::new(pass);
+            // A passphrase made from a passkey is 256 random bits: stretching it adds nothing,
+            // so it gets a light work factor and every command opens the wallet at once.
+            if strong {
+                r.set_work_factor(PASSKEY_WORK_FACTOR);
+            }
+            (vec![Box::new(r)], "passphrase", false)
+        }
     };
 
     let mnemonic = <Mnemonic<English>>::generate(Count::Words24);
@@ -1022,4 +1038,23 @@ pub fn sync_blocking(wallet: &Wallet, db: &mut Db, server: &str) -> Result<SyncR
             .map(u32::from),
         scanned_to: max_scanned_height(db)?,
     })
+}
+
+#[cfg(test)]
+mod passkey_tests {
+    #[test]
+    fn only_passkey_secrets_get_the_light_work_factor() {
+        assert!(super::is_random_secret(&format!(
+            "passkey:{}",
+            "ab".repeat(32)
+        )));
+        assert!(!super::is_random_secret("passkey:short"));
+        assert!(!super::is_random_secret(&format!(
+            "passkey:{}",
+            "zz".repeat(32)
+        )));
+        assert!(!super::is_random_secret(
+            "a long human passphrase of many words"
+        ));
+    }
 }
