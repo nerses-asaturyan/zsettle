@@ -198,6 +198,30 @@ impl Wallet {
         Ok(seed)
     }
 
+    /// Check that `passphrase` decrypts this wallet's mnemonic; nothing is kept.
+    pub fn check_passphrase(&self, passphrase: &str) -> Result<()> {
+        let ciphertext = self
+            .mnemonic_ciphertext
+            .as_deref()
+            .ok_or_else(|| anyhow!("wallet has no encrypted mnemonic (view-only wallet?)"))?;
+        let identity =
+            age::scrypt::Identity::new(age::secrecy::SecretString::new(passphrase.into()));
+        let decryptor = age::Decryptor::new(age::armor::ArmoredReader::new(ciphertext.as_bytes()))
+            .map_err(|e| anyhow!("age decryptor: {e}"))?;
+        let mut buf = zeroize::Zeroizing::new(Vec::new());
+        decryptor
+            .decrypt(std::iter::once(&identity as &dyn age::Identity))
+            .map_err(|e| match e {
+                age::DecryptError::DecryptionFailed => anyhow!("wrong passphrase"),
+                age::DecryptError::NoMatchingKeys => {
+                    anyhow!("this wallet is protected by an identity file, not a passphrase")
+                }
+                e => anyhow!("age decrypt: {e}"),
+            })?
+            .read_to_end(&mut buf)?;
+        Ok(())
+    }
+
     /// Derive the unified spending key of a ZIP 32 account of this wallet.
     pub fn spending_key(
         &self,
