@@ -221,7 +221,7 @@ function sessionExpired() {
       h(
         'div',
         { class: 'panel' },
-        h('div', { class: 'hero' }, logo(), h('h1', null, 'Open the new link'), h('p', { class: 'lede' }, 'zsettle-app was restarted, so this tab’s session key no longer works. The app printed a new link in its terminal: open it, here or in a new tab. Nothing in your wallet changed.')),
+        h('div', { class: 'hero' }, logo(), h('h1', null, 'Open the new link'), h('p', { class: 'lede' }, 'This tab’s page key no longer works: the app was started with a new one. Open the link it printed in its terminal, here or in a new tab. Nothing in your wallet changed.')),
         linksRow(),
       ),
     ),

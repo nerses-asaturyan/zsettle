@@ -73,6 +73,9 @@ struct Cli {
     /// one).
     #[arg(long)]
     bin_dir: Option<PathBuf>,
+    /// Replace this profile's page key, so links printed before stop working.
+    #[arg(long)]
+    new_token: bool,
 }
 
 /// What the app remembers about a profile. Nothing secret: the wallet's mnemonic stays
@@ -179,7 +182,23 @@ fn main() -> Result<()> {
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default();
-    let token = hex::encode(rand::random::<[u8; 16]>());
+    // The page key is kept with the profile (owner-only), so the link stays the same across
+    // restarts; it only keeps other web pages away from the app.
+    let token_path = dir.join("page.token");
+    let token = match fs::read_to_string(&token_path) {
+        Ok(t)
+            if !cli.new_token
+                && t.trim().len() == 32
+                && t.trim().bytes().all(|b| b.is_ascii_hexdigit()) =>
+        {
+            t.trim().to_string()
+        }
+        _ => {
+            let t = hex::encode(rand::random::<[u8; 16]>());
+            zsettle_core::wallet::write_owner_only(&token_path, t.as_bytes())?;
+            t
+        }
+    };
     let listener = TcpListener::bind(("127.0.0.1", cli.port))
         .with_context(|| format!("listening on 127.0.0.1:{}", cli.port))?;
     let app = Arc::new(App {
@@ -205,7 +224,7 @@ fn main() -> Result<()> {
         *app.last_sync.lock().unwrap() = v;
     }
     eprintln!(
-        "zsettle-app, profile {:?}\nOpen this link in your browser (it carries this session's key; keep it to yourself):\n\n    http://localhost:{}/#token={}\n",
+        "zsettle-app, profile {:?}\nOpen this link in your browser (it carries this profile's page key; keep it to yourself; --new-token replaces it):\n\n    http://localhost:{}/#token={}\n",
         app.profile, app.port, app.token
     );
     let open = Arc::new(AtomicUsize::new(0));
