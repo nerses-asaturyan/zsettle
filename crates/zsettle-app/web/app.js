@@ -91,7 +91,9 @@ function icon(name, cls) {
 }
 
 // The mark: a shield cut by a "z". Swapped for the chosen logo later.
+let logoN = 0;
 function logo(cls = 'logo') {
+  const gid = 'zg' + ++logoN;
   const NS = 'http://www.w3.org/2000/svg';
   const svg = document.createElementNS(NS, 'svg');
   svg.setAttribute('viewBox', '0 0 64 64');
@@ -99,7 +101,7 @@ function logo(cls = 'logo') {
   svg.setAttribute('aria-hidden', 'true');
   const defs = document.createElementNS(NS, 'defs');
   const g = document.createElementNS(NS, 'linearGradient');
-  g.setAttribute('id', 'zg');
+  g.setAttribute('id', gid);
   g.setAttribute('x1', '0');
   g.setAttribute('y1', '0');
   g.setAttribute('x2', '1');
@@ -114,7 +116,7 @@ function logo(cls = 'logo') {
   svg.append(defs);
   const shape = document.createElementNS(NS, 'path');
   shape.setAttribute('d', 'M32 4l24 9v17c0 15-10.5 25-24 30C18.5 55 8 45 8 30V13l24-9z');
-  shape.setAttribute('fill', 'url(#zg)');
+  shape.setAttribute('fill', `url(#${gid})`);
   svg.append(shape);
   const z = document.createElementNS(NS, 'path');
   z.setAttribute('d', 'M22 22h20L22 42h20');
@@ -664,6 +666,14 @@ async function loadView(quiet) {
   if (S.view !== view) return;
   const c = document.getElementById('content');
   if (!c) return;
+  // A background refresh redraws only when something changed, so a tap never lands on a
+  // screen that is being replaced.
+  const key = JSON.stringify([view, S.wallet, S.shop && S.shop.running, S.activity, S.market, S.status && S.status.sellers]);
+  if (quiet && key === S.lastKey && c.firstChild && !c.querySelector('[aria-busy="true"]')) {
+    updateSyncChip();
+    return;
+  }
+  S.lastKey = key;
   const page = { wallet: viewWallet, market: viewMarket, sell: viewSell, activity: viewActivity }[view]();
   c.replaceChildren(page);
   updateSyncChip();
@@ -862,6 +872,13 @@ function avatar(seed, cls = 'avatar') {
   return el;
 }
 
+function shopAvatar(seed) {
+  const el = h('div', { class: 'avatar', 'aria-hidden': 'true' }, icon('store'));
+  el.style.background = gradient(seed);
+  el.style.color = '#fff';
+  return el;
+}
+
 function viewShopFront() {
   const m = S.market;
   const wrongNet = m.network !== S.status.network;
@@ -872,7 +889,7 @@ function viewShopFront() {
     h(
       'div',
       { class: 'card stack' },
-      h('div', { class: 'shophead' }, avatar(m.fingerprint), h('div', { style: null, class: 'grow' }, h('div', { style: null }, h('b', null, m.base.replace(/^https?:\/\//, ''))), h('div', { class: 'row', style: null }, h('span', { class: 'chip ok' }, icon('shield'), 'Signed by the seller'), h('span', { class: 'chip' }, m.items.length + ' for sale'), wrongNet ? h('span', { class: 'chip err' }, 'Other network') : null))),
+      h('div', { class: 'shophead' }, shopAvatar(m.fingerprint), h('div', { style: null, class: 'grow' }, h('div', { style: null }, h('b', null, m.base.replace(/^https?:\/\//, ''))), h('div', { class: 'row', style: null }, h('span', { class: 'chip ok' }, icon('shield'), 'Signed by the seller'), h('span', { class: 'chip' }, m.items.length + ' for sale'), wrongNet ? h('span', { class: 'chip err' }, 'Other network') : null))),
       h('div', { class: 'callout info' }, icon('info'), h('span', null, 'When you buy, the seller sees the price and the time of the sale, never your address or your balance.')),
     ),
     h('div', { class: 'section-title' }, 'For sale'),
