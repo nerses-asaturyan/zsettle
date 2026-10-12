@@ -254,6 +254,12 @@ enum Cmd {
         /// Display name.
         #[arg(long, default_value = "")]
         name: String,
+        /// A short description for buyers (one line, at most 280 characters).
+        #[arg(long)]
+        description: Option<String>,
+        /// One emoji shown as the item's picture.
+        #[arg(long)]
+        icon: Option<String>,
         /// Price, in zatoshis or ZEC (`0.001`, `0.001 ZEC`); more than 5,000 zatoshis, since a
         /// smaller payment is dust no wallet spends.
         #[arg(long, value_parser = zsettle_core::parse_zat)]
@@ -572,6 +578,8 @@ fn main() -> Result<()> {
             listings,
             item_note,
             name,
+            description,
+            icon,
             price,
             max_expiry_delta,
             resign_unverified,
@@ -637,11 +645,17 @@ fn main() -> Result<()> {
                 if item_fvk.scope_for_address(&note.note.recipient()).is_none() {
                     return Err(anyhow!("note {item_note} is not owned by the item account"));
                 }
+                let description = description
+                    .map(|d| d.trim().to_string())
+                    .filter(|d| !d.is_empty());
+                let icon = icon.map(|i| i.trim().to_string()).filter(|i| !i.is_empty());
                 l.upsert(ListedItem {
                     note: item_note.to_string(),
                     name,
                     price_zat: price,
                     max_expiry_delta,
+                    description,
+                    icon,
                 });
             }
             if let Some(note) = remove {
@@ -651,6 +665,8 @@ fn main() -> Result<()> {
             }
             // Every entry is checked, the new one and the ones already in the file.
             for item in &l.items {
+                item.check_details()
+                    .with_context(|| format!("item {}", item.note))?;
                 if item.price_zat < MIN_PRICE_ZAT {
                     return Err(anyhow!(
                         "{}: price must be at least {MIN_PRICE_ZAT} zat: a payment at or below the ZIP 317 marginal fee is dust that no wallet spends",

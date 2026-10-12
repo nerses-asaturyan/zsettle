@@ -134,6 +134,9 @@ fn scrypt_slot() -> Result<Slot> {
 const HOUSE: &str = "house";
 const HOUSE_STOCK: usize = 6;
 const HOUSE_PRICE: &str = "0.0005 zec";
+const HOUSE_ICON: &str = "\u{1f39f}\u{fe0f}";
+const HOUSE_DESCRIPTION: &str =
+    "A demo ticket from the house shop: a real shielded note on the Zcash testnet.";
 const FAUCET_ZAT: u64 = 300_000;
 /// Variables the commands read; the app passes everything explicitly instead, so none of the
 /// user's shell settings can redirect a command to another wallet.
@@ -210,6 +213,9 @@ struct Config {
     /// seller's key opens it.
     #[serde(default)]
     origin_items: HashMap<String, String>,
+    /// Icon and description of items bought, as their seller listed them.
+    #[serde(default)]
+    details: HashMap<String, Value>,
     shop_listen: Option<String>,
     /// The last sync: its report and when.
     last_sync: Option<Value>,
@@ -940,7 +946,21 @@ fn handle_hosted(hub: &Arc<Hub>, h: &Hosted, req: Request, mut stream: TcpStream
             return json_answer(&mut stream, r, "");
         }
         ("POST", "/api/wallet/create") => {
-            let r = parse_body(&req).and_then(|b| hub.hosted_create(h, &b, &ip));
+            let r = parse_body(&req)
+                .and_then(|b| hub.hosted_create(h, &b, &ip))
+                .map(|(mut v, token)| {
+                    // A new wallet gets its test coins at once: one step fewer for a visitor.
+                    // A refusal (limits, no house) just leaves the "Get coins" button.
+                    let app = v["code"]
+                        .as_str()
+                        .and_then(|c| h.apps.lock().unwrap().get(c).cloned());
+                    if let Some(app) = app {
+                        if let Ok(j) = hub.faucet(h, &app, &ip) {
+                            v["faucet"] = j;
+                        }
+                    }
+                    (v, token)
+                });
             return answer_with_session(hub, &mut stream, r);
         }
         ("POST", "/api/unlock") => {
@@ -1130,6 +1150,14 @@ fn relay_shop(h: &Hosted, rest: &str, req: &Request, mut stream: TcpStream) {
         Err(_) => respond(&mut stream, 502, "text/plain", b"the shop did not answer"),
     }
     let _ = app;
+}
+
+/// An optional text field: absent or blank gives none.
+fn opt_text(body: &Value, key: &str) -> Option<String> {
+    body.get(key)
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 fn field(body: &Value, key: &str) -> Result<String> {
@@ -2112,7 +2140,9 @@ impl App {
         let names = self.item_names();
         let zec = self.notes(&payout)?;
         let items = self.notes(&item)?;
-        let listed: HashMap<String, u64> = Listings::read(&self.listings_path())
+        let own = Listings::read(&self.listings_path()).ok();
+        let listed: HashMap<String, u64> = own
+            .as_ref()
             .map(|l| {
                 l.items
                     .iter()
@@ -2120,14 +2150,34 @@ impl App {
                     .collect()
             })
             .unwrap_or_default();
+        let details = self.item_details(own.as_ref());
         Ok(json!({
             "balance_zat": zec.iter().map(|n| n.1).sum::<u64>(),
             "notes": zec.iter().map(|(n, v, m)| json!({ "note": n, "value_zat": v, "mined": m })).collect::<Vec<_>>(),
             "items": items.iter().map(|(n, v, m)| json!({
                 "note": n, "value_zat": v, "mined": m,
                 "name": names.get(n), "listed_zat": listed.get(n),
+                "icon": details.get(n).and_then(|d| d["icon"].as_str()),
+                "description": details.get(n).and_then(|d| d["description"].as_str()),
             })).collect::<Vec<_>>(),
         }))
+    }
+
+    /// Icon and description per item note: from this wallet's own listings, else as the seller
+    /// listed an item bought.
+    fn item_details(&self, own: Option<&Listings>) -> HashMap<String, Value> {
+        let mut d = self.cfg.lock().unwrap().details.clone();
+        if let Some(l) = own {
+            for i in &l.items {
+                if i.icon.is_some() || i.description.is_some() {
+                    d.insert(
+                        i.note.clone(),
+                        json!({ "icon": i.icon, "description": i.description }),
+                    );
+                }
+            }
+        }
+        d
     }
 
     fn item_names(&self) -> HashMap<String, String> {
@@ -2293,6 +2343,9 @@ impl App {
         self.require_unlocked()?;
         let note = note_field(body, "note")?;
         let price = field(body, "price")?;
+        let description = opt_text(body, "description");
+        let icon = opt_text(body, "icon");
+        zsettle_core::listing::check_details(description.as_deref(), icon.as_deref())?;
         let name = body
             .get("name")
             .and_then(Value::as_str)
@@ -2302,20 +2355,43 @@ impl App {
             .unwrap_or_default();
         self.accounts()?;
         Ok(self.job("publish", move |app, id| {
-            app.publish_now(Some(id), &note, &name, &price)
+            app.publish_now(
+                Some(id),
+                &note,
+                &name,
+                &price,
+                description.as_deref(),
+                icon.as_deref(),
+            )
         }))
     }
 
-    fn publish_now(&self, id: Option<u64>, note: &str, name: &str, price: &str) -> Result<Value> {
+    fn publish_now(
+        &self,
+        id: Option<u64>,
+        note: &str,
+        name: &str,
+        price: &str,
+        description: Option<&str>,
+        icon: Option<&str>,
+    ) -> Result<Value> {
         self.exclusive(|| {
             self.step_opt(id, "Syncing with the network");
             self.sync()?;
-            self.publish_one(id, note, name, price)
+            self.publish_one(id, note, name, price, description, icon)
         })
     }
 
     /// Add one item to the signed listings file; the caller holds the wallet.
-    fn publish_one(&self, id: Option<u64>, note: &str, name: &str, price: &str) -> Result<Value> {
+    fn publish_one(
+        &self,
+        id: Option<u64>,
+        note: &str,
+        name: &str,
+        price: &str,
+        description: Option<&str>,
+        icon: Option<&str>,
+    ) -> Result<Value> {
         let wa = self.wallet_args()?;
         let listings = self.listings_path().display().to_string();
         self.step_opt(id, "Signing the listings file");
@@ -2328,6 +2404,12 @@ impl App {
         ]);
         if !name.is_empty() {
             args.push(format!("--name={name}"));
+        }
+        if let Some(d) = description {
+            args.push(format!("--description={d}"));
+        }
+        if let Some(i) = icon {
+            args.push(format!("--icon={i}"));
         }
         let r = self.run(&self.seller_bin, &args)?;
         self.add_activity(json!({ "kind": "list", "text": format!("Listed {} for {price}", if name.is_empty() { note } else { name }) }));
@@ -2407,7 +2489,14 @@ impl App {
         if !batch.is_empty() {
             self.exclusive(|| {
                 for (note, name) in &batch {
-                    self.publish_one(None, note, name, HOUSE_PRICE)?;
+                    self.publish_one(
+                        None,
+                        note,
+                        name,
+                        HOUSE_PRICE,
+                        Some(HOUSE_DESCRIPTION),
+                        Some(HOUSE_ICON),
+                    )?;
                 }
                 Ok(())
             })?;
@@ -2600,6 +2689,7 @@ impl App {
             "own": self.public_shop.as_deref() == Some(base.as_str()),
             "items": l.items.iter().map(|i| json!({
                 "note": i.note, "name": i.name, "price_zat": i.price_zat, "max_expiry_delta": i.max_expiry_delta,
+                "icon": i.icon, "description": i.description,
             })).collect::<Vec<_>>(),
         }))
     }
@@ -2617,6 +2707,10 @@ impl App {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
+        let (description, icon) = (opt_text(body, "description"), opt_text(body, "icon"));
+        if zsettle_core::listing::check_details(description.as_deref(), icon.as_deref()).is_err() {
+            return Err(anyhow!("that item's details are not valid"));
+        }
         let stem = self.dir.join("trades").join(format!(
             "trade-{}-{}",
             now(),
@@ -2657,6 +2751,12 @@ impl App {
                     cfg.names.insert(format!("{t}:{i}"), name.clone());
                 }
                 cfg.origins.insert(format!("{t}:{i}"), base.clone());
+                if description.is_some() || icon.is_some() {
+                    cfg.details.insert(
+                        format!("{t}:{i}"),
+                        json!({ "icon": icon, "description": description }),
+                    );
+                }
                 cfg.origin_items.insert(format!("{t}:{i}"), item.clone());
             }
             app.add_activity(json!({

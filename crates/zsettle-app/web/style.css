@@ -470,3 +470,12 @@ ol.words li { padding: 4px 0; }
 .how-n { flex: none; width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 13px; color: var(--accent-ink); background: var(--accent); }
 .how-t { font-weight: 600; font-size: 14px; }
 .how-d { color: var(--muted); font-size: 13px; line-height: 1.45; margin-top: 2px; }
+
+/* Item details: the seller's emoji and description */
+.has-icon { font-size: 2.4em; text-shadow: none; }
+.ico.has-icon { font-size: 20px; }
+p.desc { margin: 12px 0 4px; color: var(--text-2); line-height: 1.5; overflow-wrap: anywhere; }
+.iconpicks { display: flex; flex-wrap: wrap; gap: 6px; }
+.iconpick { width: 40px; height: 40px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface-2); font-size: 20px; line-height: 1; cursor: pointer; }
+.iconpick.on { border-color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 0 2px var(--accent-soft); }
+.field .label { font-size: 13px; font-weight: 600; color: var(--text-2); margin-bottom: 6px; }
