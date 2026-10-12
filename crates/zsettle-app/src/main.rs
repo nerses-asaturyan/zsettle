@@ -1138,30 +1138,51 @@ impl App {
 
     fn start_verify(self: &Arc<Self>, body: &Value) -> Result<Value> {
         let item = field(body, "item")?;
-        let mut sources = Vec::new();
-        let url = field(body, "url")
-            .ok()
-            .or_else(|| self.cfg.lock().unwrap().origins.get(&item).cloned());
-        if let Some(u) = url {
-            sources.push(seller_urls(&u)?.1);
+        // Which shops to read the item's keys from: the one named, else the one it was bought
+        // from, else the shops opened lately, tried in turn.
+        let named = field(body, "url").ok();
+        let cfg = self.cfg.lock().unwrap().clone();
+        let candidates: Vec<String> = match named.or_else(|| cfg.origins.get(&item).cloned()) {
+            Some(u) => vec![u],
+            None => cfg.sellers.iter().take(5).cloned().collect(),
+        };
+        let mut shops = Vec::new();
+        for c in &candidates {
+            shops.push(seller_urls(c)?.1);
         }
-        if self.listings_path().exists() {
-            sources.push(self.listings_path().display().to_string());
-        }
-        if sources.is_empty() {
-            return Err(anyhow!("a history needs the seller's listings"));
+        let own = self
+            .listings_path()
+            .exists()
+            .then(|| self.listings_path().display().to_string());
+        if shops.is_empty() && own.is_none() {
+            return Err(anyhow!(
+                "a history needs the seller's listings: open the seller's shop once"
+            ));
         }
         Ok(self.job("verify", move |app, id| {
             app.step(
                 id,
                 "Tracing the item through the chain with viewing keys only",
             );
-            let mut args = vec!["verify".to_string()];
-            for s in &sources {
-                args.extend(["--listings".to_string(), s.clone()]);
+            let attempt = |shop: Option<&String>| {
+                let mut args = vec!["verify".to_string()];
+                for s in shop.into_iter().chain(own.as_ref()) {
+                    args.extend(["--listings".to_string(), s.clone()]);
+                }
+                args.extend(["--item".to_string(), item.clone()]);
+                app.run(&app.buyer_bin, &args)
+            };
+            if shops.is_empty() {
+                return attempt(None);
             }
-            args.extend(["--item".to_string(), item.clone()]);
-            app.run(&app.buyer_bin, &args)
+            let mut last = None;
+            for shop in &shops {
+                match attempt(Some(shop)) {
+                    Ok(v) => return Ok(v),
+                    Err(e) => last = Some(e),
+                }
+            }
+            Err(last.unwrap_or_else(|| anyhow!("no shop could trace this item")))
         }))
     }
 }
