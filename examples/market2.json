@@ -4,14 +4,7 @@
   "item_ufvk": "uview1fzphu5xhyrv0nwpvey559cgeq4grz0px2989z66407wcenguv596dn6wrtuyzzv8lwzn0uygllrgkhx98wc8js5jydkkcehlzxq2r5qydmk9gm9rjnr452kv8wfr6zmny0k88jzc3ap045nsvka2day3k879nsy8r2kz8nydwe8kk9s3fung2uq2tn2r7",
   "item_birthday": 3514056,
   "payout_address": "u1rvcs7jr2vxm3td6jykk7u0gmt274tzem9dqj3897t37z8vhd7324p3k9kvlpn06dpsd2mmf0gyc5f29mpyzfhzdv77en64cfh5z4upat",
-  "items": [
-    {
-      "note": "c1c554f20bea2a8dbf632986a0b65b1a75487dbeccbeb9c56c342654671306f6:2",
-      "name": "zsettle item #3",
-      "price_zat": 5001,
-      "max_expiry_delta": 40
-    }
-  ],
-  "issued_at": 3514456,
-  "signature": "e62895abc717b4af036be747c9e9c18f5bbc73f3f59e33debea0d519c1610397e392b25bb218138173026a1841e67e9c0dc2da9338c03cef66bce028ffc38812"
+  "items": [],
+  "issued_at": 3514597,
+  "signature": "4d3688e57393bbc4ab2b326a246e00f4fde1e5f76e128152fb64357b8b9517afc4f22640b08d0d50655557718bc159fc34d6625933f5029994b1b50e2e0c8222"
 }

@@ -119,8 +119,9 @@ enum Cmd {
         /// UUID of the imported, view-only account that holds the item note (auto-detected from the listings).
         #[arg(long)]
         item_account: Option<String>,
-        /// UUID of the account of this wallet that receives the item (default: the buyer account).
-        /// Use a dedicated item account if you may resell the item later.
+        /// Account that receives the item. Default: the wallet's `item` account, as `init`
+        /// makes it, so that items stay apart from payments; the paying account if there is
+        /// none.
         #[arg(long)]
         receive_account: Option<String>,
         /// The buyer's note that pays, as <txid>:<output index> (default: the largest spendable
@@ -151,9 +152,10 @@ enum Cmd {
         /// Where to write the full PCZT. It holds your viewing key and witnesses: keep it private.
         #[arg(long)]
         out: PathBuf,
-        /// Where to write the redacted copy for the seller (drop it in the seller's inbox).
+        /// Where to write the redacted copy for the seller: drop it in the seller's inbox, or
+        /// let `--seller-url` post it. Default: `<out>.seller.pczt`.
         #[arg(long)]
-        seller_copy: PathBuf,
+        seller_copy: Option<PathBuf>,
         /// Seller service URL (http://host:port). The redacted copy is also posted to
         /// `<url>/offer`, and the reply URL to pass to `finish --signed` is printed.
         #[arg(long)]
@@ -287,6 +289,36 @@ enum Cmd {
         #[arg(long)]
         no_sync: bool,
     },
+    /// Send ZEC from an account of this wallet to any address: to take money out, or to fund
+    /// a counterparty.
+    Pay {
+        /// Wallet directory.
+        #[arg(long)]
+        wallet: PathBuf,
+        /// UUID of the paying account.
+        #[arg(long)]
+        account: String,
+        /// ZIP 32 account index of the paying account.
+        #[arg(long, default_value_t = 0)]
+        account_index: u32,
+        /// age identity file that decrypts the wallet's mnemonic. Omit it for a
+        /// passphrase-protected wallet: the passphrase is asked for, or taken from
+        /// ZSETTLE_PASSPHRASE.
+        #[arg(long)]
+        identity: Option<PathBuf>,
+        /// Recipient unified address.
+        #[arg(long)]
+        to: String,
+        /// Amount in zatoshis.
+        #[arg(long)]
+        amount: u64,
+        /// Optional memo.
+        #[arg(long)]
+        memo: Option<String>,
+        /// lightwalletd server URL.
+        #[arg(long, default_value = DEFAULT_SERVER)]
+        server: String,
+    },
     /// List the unspent Ironwood notes of an account of a wallet, dust included.
     Notes {
         /// Wallet directory.
@@ -396,6 +428,11 @@ fn fetch_reply(url: &str, wait_secs: u64) -> Result<Vec<u8>> {
     }
 }
 
+/// Zatoshis as ZEC, for people.
+fn zec(zat: u64) -> String {
+    format!("{} ZEC", zat as f64 / 1e8)
+}
+
 fn check_server_before_sending(server: &str, network: Network) -> Result<()> {
     check_consensus_at_tip_blocking(server, network)?;
     Ok(())
@@ -428,8 +465,12 @@ fn main() -> Result<()> {
             );
             for i in &l.items {
                 println!(
-                    "{}  {:>10} zat  expiry<= {:>3} blocks  {}",
-                    i.note, i.price_zat, i.max_expiry_delta, i.name
+                    "{}  {:>10} zat ({}) expiry<= {:>3} blocks  {}",
+                    i.note,
+                    i.price_zat,
+                    zec(i.price_zat),
+                    i.max_expiry_delta,
+                    i.name
                 );
             }
             Ok(())
@@ -661,6 +702,11 @@ fn main() -> Result<()> {
             let redacted =
                 pczt_ops::redact_for_seller(built.pczt.clone(), built.item_action_index)?;
             let envelope = pczt_ops::to_bytes(&redacted)?;
+            let seller_copy = seller_copy.unwrap_or_else(|| {
+                let mut p = out.clone().into_os_string();
+                p.push(".seller.pczt");
+                PathBuf::from(p)
+            });
             fs::write(&seller_copy, &envelope)
                 .with_context(|| format!("writing {}", seller_copy.display()))?;
             reserve_note(&w, buyer_note, built.expiry_height)?;
@@ -965,6 +1011,35 @@ fn main() -> Result<()> {
             println!(
                 "{}",
                 serde_json::json!({ "merged": notes.len(), "value_out": built.value_out, "fee": built.fee, "txid": tx.txid().to_string(), "expiry_height": built.expiry_height })
+            );
+            Ok(())
+        }
+        Cmd::Pay {
+            wallet,
+            account,
+            account_index,
+            identity,
+            to,
+            amount,
+            memo,
+            server,
+        } => {
+            let w = Wallet::open(&wallet)?;
+            let mut db = w.db()?;
+            check_server_before_sending(&server, w.network)?;
+            let seed = w.seed(identity.as_deref())?;
+            let req = zsettle_core::mint::PayRequest {
+                from_account: parse_account(&account)?,
+                from_account_index: account_index,
+                to,
+                value_zat: amount,
+                memo,
+            };
+            let (bytes, txid) = zsettle_core::mint::pay(&w, &mut db, &seed, &req)?;
+            let response = zsettle_core::broadcast::send_raw_transaction_blocking(&server, bytes)?;
+            println!(
+                "{}",
+                serde_json::json!({ "txid": txid, "amount_zat": amount, "broadcast": response })
             );
             Ok(())
         }

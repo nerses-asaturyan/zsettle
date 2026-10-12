@@ -221,12 +221,30 @@ pub struct MintRequest {
 
 /// Mint one item: pay the item account from the payout account with the name as the memo.
 /// Returns the raw transaction bytes and its id; the caller broadcasts.
+/// A plain shielded payment from an account of this wallet.
+#[derive(Clone, Debug)]
+pub struct PayRequest {
+    /// Account that pays.
+    pub from_account: AccountUuid,
+    /// ZIP 32 index of that account, to derive its spending key.
+    pub from_account_index: u32,
+    /// Recipient, as a unified address string.
+    pub to: String,
+    /// Amount in zatoshis.
+    pub value_zat: u64,
+    /// Optional text memo.
+    pub memo: Option<String>,
+}
+
+/// Mint one item: pay the item account from the payout account with the name as the memo.
+/// Returns the raw transaction bytes, its id and the index of the item note's action, so the
+/// note can be listed as soon as the transaction is mined; the caller broadcasts.
 pub fn mint(
     wallet: &Wallet,
     db: &mut Db,
     seed: &SecretVec<u8>,
     req: &MintRequest,
-) -> Result<(Vec<u8>, String)> {
+) -> Result<(Vec<u8>, String, Option<u32>)> {
     let MintRequest {
         from_account,
         from_account_index,
@@ -234,14 +252,72 @@ pub fn mint(
         value_zat,
         name,
     } = req.clone();
-    let name = name.as_str();
     let to = item_address(db, wallet.network, item_account)?;
-    let memo =
-        Memo::from_str(&format!("zsettle item: {name}")).map_err(|e| anyhow!("memo: {e}"))?;
+    let (bytes, txid) = pay(
+        wallet,
+        db,
+        seed,
+        &PayRequest {
+            from_account,
+            from_account_index,
+            to,
+            value_zat,
+            memo: Some(format!("zsettle item: {name}")),
+        },
+    )?;
+    let index = item_output_index(wallet, db, &bytes, item_account)?;
+    Ok((bytes, txid, index))
+}
+
+/// Which action of a transaction this wallet built carries a note for `account`.
+fn item_output_index(
+    wallet: &Wallet,
+    db: &Db,
+    bytes: &[u8],
+    account: AccountUuid,
+) -> Result<Option<u32>> {
+    use orchard::keys::{PreparedIncomingViewingKey, Scope};
+    use orchard::note_encryption::IronwoodDomain;
+    use zcash_note_encryption::try_note_decryption;
+    use zcash_protocol::consensus::{BlockHeight, BranchId};
+    let height = crate::wallet::max_scanned_height(db)?.unwrap_or(0) + 1;
+    let tx = zcash_primitives::transaction::Transaction::read(
+        bytes,
+        BranchId::for_height(&wallet.network, BlockHeight::from(height)),
+    )
+    .map_err(|e| anyhow!("re-reading the transaction: {e}"))?;
+    let fvk = crate::wallet::account_orchard_fvk(db, account)?;
+    let ivk = PreparedIncomingViewingKey::new(&fvk.to_ivk(Scope::External));
+    Ok(tx.ironwood_bundle().and_then(|bundle| {
+        bundle.actions().iter().enumerate().find_map(|(i, action)| {
+            let domain = IronwoodDomain::for_action(action);
+            try_note_decryption(&domain, &ivk, action).map(|_| i as u32)
+        })
+    }))
+}
+
+/// Pay a unified address from an account of this wallet. Returns the raw transaction bytes
+/// and its id; the caller broadcasts.
+pub fn pay(
+    wallet: &Wallet,
+    db: &mut Db,
+    seed: &SecretVec<u8>,
+    req: &PayRequest,
+) -> Result<(Vec<u8>, String)> {
+    let PayRequest {
+        from_account,
+        from_account_index,
+        to,
+        value_zat,
+        memo,
+    } = req.clone();
+    let memo = memo
+        .map(|m| Memo::from_str(&m).map_err(|e| anyhow!("memo: {e}")))
+        .transpose()?;
     let payment = Payment::new(
-        ZcashAddress::from_str(&to).map_err(|e| anyhow!("item address: {e}"))?,
+        ZcashAddress::from_str(&to).map_err(|e| anyhow!("address: {e}"))?,
         Some(Zatoshis::from_u64(value_zat).map_err(|_| anyhow!("value"))?),
-        Some(MemoBytes::from(&memo)),
+        memo.as_ref().map(MemoBytes::from),
         None,
         None,
         vec![],

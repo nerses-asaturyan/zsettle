@@ -26,7 +26,7 @@ The buyer builds and proves the whole transaction holding only viewing keys. The
 ## One minute, no wallet
 
 ```
-zsettle list   --listings examples/market2.json
+zsettle list   --listings examples/market.json
 zsettle verify --listings examples/market.json --listings examples/market2.json --item af09c2cf525d2bb6e553b61a1d3cc2674ebdf09726be1e3959ee36f5143f5804:0
 ```
 
@@ -35,24 +35,27 @@ The two signed listings files from the mainnet trades are in `examples/`; the tr
 ## Ten minutes, two terminals
 
 ```
-# once
-zsettle-seller init --wallet S --identity S/key.txt     # prints P (payout) and I (item) and an address to fund
-zsettle init        --wallet B --identity B/key.txt     # prints A (buyer) and the item account, and an address to fund
-#   (omit --identity on either to protect the mnemonic with a passphrase instead of a key file)
+# once (keep the key files outside the wallet directories; omit --identity for a passphrase instead)
+zsettle-seller init --wallet S --identity ~/seller.key     # prints P (payout) and I (item) and an address to fund
+zsettle init        --wallet B --identity ~/buyer.key      # prints A (buyer) and the item account, and an address to fund
+# fund both addresses; a note received from another wallet is spendable after ten confirmations (about 13 minutes)
 # seller
-zsettle-seller mint    --wallet S --item-account I --payout-account P --identity S/key.txt --name "Item #1"
-zsettle-seller publish --wallet S --item-account I --payout-account P --identity S/key.txt --listings listings.json --item-note <txid>:<idx> --price 100000
-zsettle-seller serve   --wallet S --item-account I --payout-account P --identity S/key.txt --listings listings.json --inbox inbox --outbox outbox   # add --listen 0.0.0.0:8900 to take offers over HTTP
-# buyer
+zsettle-seller sync    --wallet S
+zsettle-seller mint    --wallet S --item-account I --payout-account P --identity ~/seller.key --name "Item #1"     # prints the note as <txid>:<idx>
+zsettle-seller publish --wallet S --item-account I --payout-account P --identity ~/seller.key --listings listings.json --item-note <txid>:<idx> --name "Item #1" --price 100000
+zsettle-seller serve   --wallet S --item-account I --payout-account P --identity ~/seller.key --listings listings.json --inbox inbox --outbox outbox --listen 0.0.0.0:8900
+# buyer (gets listings.json from the seller, or from http://seller:8900/listings)
 zsettle import-listing --wallet B --listings listings.json
 zsettle sync           --wallet B
-zsettle buy            --wallet B --buyer-account A --listings listings.json --item <txid>:<idx> --out trade.pczt --seller-copy inbox/trade.pczt
-zsettle finish         --wallet B --identity B/key.txt --full trade.pczt --signed outbox/trade.<tag>.signed.pczt --out trade.tx --broadcast   # or --signed http://seller:8900/reply/<tag> after buy --seller-url
+zsettle buy            --wallet B --buyer-account A --listings listings.json --item <txid>:<idx> --out trade.pczt --seller-url http://seller:8900
+zsettle finish         --wallet B --identity ~/buyer.key --full trade.pczt --signed http://seller:8900/reply/<tag> --out trade.tx --broadcast
 # anyone
 zsettle verify --listings listings.json --item <txid>:<idx>
 ```
 
-`S`, `B` are wallet directories, `I`, `P`, `A` the account UUIDs `init` prints (`accounts` lists them again). No other tool is needed. Commands that act print one JSON line; `list`, `notes` and `items` print tables; `zsettle notes --wallet B --account A` shows what a wallet holds.
+Without a network between them, the parties share a folder instead: `buy --seller-copy inbox/trade.pczt` and `finish --signed outbox/trade.<tag>.signed.pczt`.
+
+`S`, `B` are wallet directories, `I`, `P`, `A` the account UUIDs `init` prints (`accounts` lists them again). No other tool is needed; `zsettle pay` sends ZEC out to any address, your phone wallet included. Prices are in zatoshis; `list` shows them in ZEC too. Commands that act print one JSON line; `list`, `notes` and `items` print tables; `zsettle notes --wallet B --account A` shows what a wallet holds.
 
 See [docs/SETUP.md](docs/SETUP.md) for wallets, [docs/TRADE.md](docs/TRADE.md) for the full flow including resale, [spec/PROTOCOL.md](spec/PROTOCOL.md) and [spec/THREAT_MODEL.md](spec/THREAT_MODEL.md) for the design.
 
@@ -78,7 +81,8 @@ See [docs/SETUP.md](docs/SETUP.md) for wallets, [docs/TRADE.md](docs/TRADE.md) f
 - Resale: items can be received into a dedicated item account and relisted; provenance follows them across holders.
 - Light server: the wallet's transparent addresses are never sent to it (the library's UTXO refresh is answered inside the process); what it does learn is in the threat model.
 - Network upgrades: build, mint and broadcast stop with a message when the server's consensus branch is not the one this build signs for.
-- Wallets: created by the tools themselves (`init`), in the zcash-devtool layout; no other software is needed.
+- Wallets: created by the tools themselves (`init`), in the zcash-devtool layout; no other software is needed. `pay` sends ZEC out.
+- Binaries: the release workflow builds Linux, macOS and Windows binaries for every `v*` tag and on demand (Actions, "release").
 - Tests: the proven settlement core, action pairing, redaction and proof checks, twelve seller-policy cases, the rotation transfer, listings signatures.
 - Reviewed for privacy and soundness in several independent passes; the findings and what was done about each are in the changelog, and what remains by design is in the threat model.
 

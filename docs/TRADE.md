@@ -16,7 +16,7 @@ It prints the account UUID and ZIP 32 index to use as `--item-account` and `--it
 zsettle-seller mint --wallet ~/.zsettle/seller --item-account <ITEM_ACCOUNT_UUID> --item-account-index 1 \
   --payout-account <PAYOUT_ACCOUNT_UUID> --identity ~/.zsettle/seller/key.txt --name "Item #3" --value 1000
 zsettle-seller sync --wallet ~/.zsettle/seller
-zsettle-seller items --wallet ~/.zsettle/seller --item-account <ITEM_ACCOUNT_UUID> --payout-account <PAYOUT_ACCOUNT_UUID>
+zsettle-seller items --wallet ~/.zsettle/seller --item-account <ITEM_ACCOUNT_UUID>
 ```
 
 `mint` pays the item account at a fresh address from the payout account with the name in the memo and broadcasts; the resulting note is the item's genesis note. `items` lists the item account's unspent notes as `<txid>:<index>`, the reference `publish` takes.
@@ -85,10 +85,12 @@ Every acceptable offer is signed, whether or not another offer for the same item
 The inbox and outbox can be directories the parties share, or the service can listen:
 
 ```
-zsettle-seller serve ... --listen 0.0.0.0:8900
-zsettle buy    ... --seller-url http://seller.example:8900
-zsettle finish ... --signed http://seller.example:8900/reply/<tag>
+zsettle-seller serve --wallet S --item-account I --payout-account P --identity ~/seller.key --listings listings.json --inbox inbox --outbox outbox --listen 0.0.0.0:8900
+zsettle buy    --wallet B --buyer-account A --listings listings.json --item <txid>:<idx> --out trade.pczt --seller-url http://seller.example:8900
+zsettle finish --wallet B --identity ~/buyer.key --full trade.pczt --signed http://seller.example:8900/reply/<tag> --out trade.tx --broadcast
 ```
+
+The service also answers `GET /listings` with the signed listings file, so buyers can fetch it from the same address.
 
 `buy` posts the redacted copy to `/offer` (the answer names its content tag, which `buy` checks) and prints the reply URL; `finish` polls that URL until the signed copy is there (202 while pending, 410 with the reason if refused). Each buyer can fetch only the reply to its own envelope; nothing else is served. The endpoint reads a request head of at most 8 KiB with a ten-second timeout, refuses bodies above 1 MiB before reading them, serves at most 32 connections at once and answers 503 once 1,000 offers wait in the inbox. Plain HTTP carries the redacted envelope and the signed copy, which are safe to see, but it lets an observer link an IP to an offer: put a TLS reverse proxy or a Tor hidden service in front of it for the internet.
 
@@ -132,7 +134,7 @@ It walks the reservations `buy` recorded, drops the ones whose notes are already
 
 ## Resale
 
-A buyer who may resell receives the item into a dedicated item account of its own wallet, so that publishing that account's viewing key later reveals nothing about the account that paid:
+A buyer receives the item into the wallet's own item account by default (the one `init` makes), so that publishing that account's viewing key later reveals nothing about the account that paid; `--receive-account` chooses another:
 
 ```
 zsettle buy … --receive-account <BUYER_ITEM_ACCOUNT_UUID> …
