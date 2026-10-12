@@ -152,8 +152,9 @@ function itemMark(name) {
   const num = (t.match(/(\d+)\s*$/) || [])[1];
   return (num ? t[0].toUpperCase() + num : t.slice(0, 2).toUpperCase()).slice(0, 4);
 }
-function art(seed, name, cls = 'art') {
-  const el = h('div', { class: cls, 'aria-hidden': 'true' }, itemMark(name));
+function art(seed, name, cls = 'art', icon) {
+  // The seller's chosen emoji, else a mark from the name.
+  const el = h('div', { class: cls + (icon ? ' has-icon' : ''), 'aria-hidden': 'true' }, icon || itemMark(name));
   el.style.background = gradient(seed || name);
   return el;
 }
@@ -595,9 +596,10 @@ function viewWelcomeHosted() {
     say('Confirm with your device. Some devices ask twice: once to make the passkey, once to read its key.');
     const { pk, passphrase } = await passkeyCreate();
     say('Creating your shielded wallet…');
-    await api('/api/wallet/create', { passphrase, passkey: pk });
+    const r = await api('/api/wallet/create', { passphrase, passkey: pk });
     say('Opening your wallet…');
     await done();
+    watchFaucet(r.faucet);
   });
   const signInPk = () => act(async () => {
     say('Confirm with your device.');
@@ -617,6 +619,7 @@ function viewWelcomeHosted() {
     const r = await api('/api/wallet/create', { passphrase: pass.value });
     await done();
     showCode(r.code);
+    watchFaucet(r.faucet);
   });
   const pwBox = h(
     'div',
@@ -884,7 +887,9 @@ function viewWallet() {
     'div',
     { class: 'stack lg' },
     S.hosted ? h('div', { class: 'callout info' }, icon('info'), h('span', null, 'Public demo on the Zcash testnet. Wallet code ', h('b', null, S.status.code || ''), '. Coins here are free and worthless.')) : null,
-    S.status.faucet ? h('div', { class: 'card row nowrap' }, h('span', { class: 'ico' }, icon('spark')), h('div', { class: 'grow' }, h('b', null, 'Free test coins'), h('div', { class: 'small muted' }, 'Get 0.003 test ZEC to try buying and selling.')), h('button', { class: 'btn primary', onclick: getCoins }, 'Get coins')) : null,
+    S.faucetPending
+      ? h('div', { class: 'card row nowrap' }, h('span', { class: 'ico' }, h('span', { class: 'spinner sm', 'aria-hidden': 'true' })), h('div', { class: 'grow' }, h('b', null, 'Free test coins on the way'), h('div', { class: 'small muted' }, 'The demo is sending 0.003 test ZEC to your new wallet. This can take a minute.')))
+      : S.status.faucet ? h('div', { class: 'card row nowrap' }, h('span', { class: 'ico' }, icon('spark')), h('div', { class: 'grow' }, h('b', null, 'Free test coins'), h('div', { class: 'small muted' }, 'Get 0.003 test ZEC to try buying and selling.')), h('button', { class: 'btn primary', onclick: getCoins }, 'Get coins')) : null,
     h(
       'section',
       { class: 'balance-card', 'aria-label': 'Balance' },
@@ -919,6 +924,27 @@ function viewWallet() {
   );
 }
 
+// The demo sends a new wallet its test coins by itself; the wallet page shows them coming.
+async function watchFaucet(f) {
+  if (!f || !f.job) return;
+  S.faucetPending = true;
+  if (S.view === 'wallet') loadView(true);
+  try {
+    const j = await follow(f.job);
+    if (j.state === 'done') toast('Free test coins sent. They arrive in about a minute.');
+  } catch {
+    /* the Get coins button stays */
+  } finally {
+    S.faucetPending = false;
+    try {
+      S.status = await api('/api/status');
+    } catch {
+      /* signed out meanwhile */
+    }
+    if (S.view === 'wallet') loadView(true);
+  }
+}
+
 async function getCoins() {
   const sh = sheet({ title: 'Free test coins', body: [] });
   await runInSheet(sh, '/api/faucet', {}, { total: 1, success: (r) => ({ title: 'On their way', text: zec(r.amount_zat) + ' arrives in about a minute and can be spent after 10 confirmations, a few minutes later.', extra: txRow(r.txid) }), failTitle: 'No coins this time' });
@@ -935,7 +961,7 @@ function itemsGrid(items, onOpen, emptyText) {
       h(
         'button',
         { class: 'item', onclick: () => onOpen(it), 'aria-label': (it.name || 'Item') + (it.price_zat ? ', ' + zec(it.price_zat) : '') },
-        art(it.genesis || it.note, it.name),
+        art(it.genesis || it.note, it.name, 'art', it.icon),
         h(
           'div',
           { class: 'body' },
@@ -951,7 +977,8 @@ function openOwnItem(it) {
   const sh = sheet({
     title: it.name || 'Item',
     body: [
-      art(it.note, it.name, 'art big'),
+      art(it.note, it.name, 'art big', it.icon),
+      it.description ? h('p', { class: 'desc' }, it.description) : null,
       h('div', { class: 'summary' }, h('div', { class: 'r' }, h('span', null, 'Status'), h('span', null, it.listed_zat ? 'Listed for ' + zec(it.listed_zat) : it.mined ? 'In your wallet' : 'Arriving')), h('div', { class: 'r' }, h('span', null, 'Note'), h('span', { class: 'mono' }, short(it.note, 10)))),
     ],
     foot: [h('button', { class: 'btn', onclick: () => { sh.close(); openHistory(null, it.note, it.name); } }, icon('history'), 'History'), h('button', { class: 'btn primary', onclick: () => { sh.close(); go('sell'); } }, icon('tag'), 'Sell')],
@@ -1122,7 +1149,8 @@ function openShopItem(it, wrongNet) {
   const sh = sheet({
     title: it.name || 'Item',
     body: [
-      art(it.note, it.name, 'art big'),
+      art(it.note, it.name, 'art big', it.icon),
+      it.description ? h('p', { class: 'desc' }, it.description) : null,
       h('div', { class: 'summary' }, h('div', { class: 'r' }, h('span', null, 'Price'), h('b', null, zec(it.price_zat))), h('div', { class: 'r' }, h('span', null, 'Seller'), h('span', null, S.market.base.replace(/^https?:\/\//, ''))), h('div', { class: 'r' }, h('span', null, 'Item note'), h('span', { class: 'mono' }, short(it.note, 8)))),
       wrongNet ? h('div', { class: 'callout warn' }, icon('alert'), h('span', null, 'This shop is on another network than your wallet.')) : null,
     ],
@@ -1134,7 +1162,7 @@ function buyReview(sh, it) {
   const bal = (S.wallet && S.wallet.balance_zat) || null;
   sh.setTitle('Review purchase');
   sh.setBody(
-    h('div', { class: 'row nowrap' }, art(it.note, it.name, 'ico'), h('div', null, h('b', null, it.name || 'Item'), h('div', { class: 'small muted' }, 'from ' + S.market.base.replace(/^https?:\/\//, '')))),
+    h('div', { class: 'row nowrap' }, art(it.note, it.name, 'ico', it.icon), h('div', null, h('b', null, it.name || 'Item'), h('div', { class: 'small muted' }, 'from ' + S.market.base.replace(/^https?:\/\//, '')))),
     h('div', { class: 'summary' }, h('div', { class: 'r' }, h('span', null, 'Price'), h('span', null, zec(it.price_zat))), h('div', { class: 'r' }, h('span', null, 'Network fee'), h('span', null, 'about ' + zec(FEE_ZAT))), h('div', { class: 'r total' }, h('span', null, 'Total'), h('span', null, 'about ' + zec(it.price_zat + FEE_ZAT)))),
     bal !== null && bal < it.price_zat + FEE_ZAT ? h('div', { class: 'callout warn' }, icon('alert'), h('span', null, 'Your balance may be too low for this purchase.')) : null,
     h('div', { class: 'callout' }, icon('shield'), h('span', null, 'Your payment and the item move in one transaction. If someone else buys it first, nothing happens and your ZEC stays with you.')),
@@ -1154,7 +1182,7 @@ function buyReview(sh, it) {
       class: 'btn primary',
       onclick: async () => {
         sh.setTitle('Buying ' + (it.name || 'item'));
-        const r = await runInSheet(sh, '/api/buy', { url: S.market.base, item: it.note, name: it.name }, {
+        const r = await runInSheet(sh, '/api/buy', { url: S.market.base, item: it.note, name: it.name, description: it.description, icon: it.icon }, {
           total: 5,
           success: (r) => ({
             title: (it.name || 'The item') + ' is yours',
@@ -1262,7 +1290,7 @@ function viewSell() {
 }
 
 function inventoryRow(it) {
-  const thumb = art(it.note, it.name, 'ico');
+  const thumb = art(it.note, it.name, 'ico', it.icon);
   thumb.style.fontSize = '14px';
   const status = it.listed_zat ? h('span', { class: 'chip ok' }, zec(it.listed_zat)) : it.mined ? h('span', { class: 'chip' }, 'Not listed') : h('span', { class: 'chip warn' }, 'Waiting for block');
   return h(
@@ -1277,12 +1305,34 @@ function inventoryRow(it) {
   );
 }
 
+const ITEM_ICONS = ['🎟️', '🎫', '🎵', '🎨', '🎮', '📚', '🏆', '💎', '🔑', '🎁', '☕', '🌟'];
+
 function listSheet(it) {
   const price = h('input', { class: 'input', id: 'price', inputmode: 'decimal', placeholder: '0.001', autocomplete: 'off' });
+  const desc = h('input', { class: 'input', id: 'desc', maxlength: '280', placeholder: 'Front row, Saturday night', autocomplete: 'off', value: it.description || '' });
+  let chosen = it.icon || '';
+  const picks = ITEM_ICONS.map((e) => {
+    const b = h('button', { type: 'button', class: 'iconpick' + (e === chosen ? ' on' : ''), 'aria-label': 'Icon ' + e, 'aria-pressed': String(e === chosen) }, e);
+    b.onclick = () => {
+      chosen = chosen === e ? '' : e;
+      picks.forEach((x) => {
+        const on = x.textContent === chosen;
+        x.classList.toggle('on', on);
+        x.setAttribute('aria-pressed', String(on));
+      });
+    };
+    return b;
+  });
   const err = h('p', { class: 'small err', role: 'alert' });
   const sh = sheet({
     title: 'List ' + (it.name || 'item'),
-    body: [h('div', { class: 'field' }, h('label', { for: 'price' }, 'Price'), h('div', { class: 'inputwrap' }, price, h('span', { class: 'suffix' }, 'ZEC')), h('div', { class: 'hint' }, 'At least 0.00005001 ZEC. The buyer pays the network fee.')), err],
+    body: [
+      h('div', { class: 'field' }, h('label', { for: 'price' }, 'Price'), h('div', { class: 'inputwrap' }, price, h('span', { class: 'suffix' }, 'ZEC')), h('div', { class: 'hint' }, 'At least 0.00005001 ZEC. The buyer pays the network fee.')),
+      h('div', { class: 'field' }, h('label', { for: 'desc' }, 'Description (optional)'), desc),
+      h('div', { class: 'field' }, h('div', { class: 'label' }, 'Icon (optional)'), h('div', { class: 'iconpicks', role: 'group', 'aria-label': 'Icon' }, picks)),
+      h('div', { class: 'hint' }, 'The description and icon go into your signed listings file, so buyers see them as you wrote them.'),
+      err,
+    ],
     foot: [
       h('button', {
         class: 'btn primary lg',
@@ -1290,7 +1340,7 @@ function listSheet(it) {
           const p = price.value.trim().replace(',', '.');
           if (!/^\d*\.?\d{0,8}$/.test(p) || !(Number(p) > 0.00005)) return (err.textContent = 'Enter a price above 0.00005 ZEC.');
           sh.setTitle('Listing ' + (it.name || 'item'));
-          await runInSheet(sh, '/api/publish', { note: it.note, name: it.name, price: p + ' zec' }, { total: 2, success: () => ({ title: 'Listed', text: (it.name || 'The item') + ' is for sale at ' + p + ' ZEC.' + (S.shop && S.shop.running ? '' : ' Open your shop so buyers can reach it.') }), failTitle: 'Not listed' });
+          await runInSheet(sh, '/api/publish', { note: it.note, name: it.name, price: p + ' zec', description: desc.value.trim(), icon: chosen }, { total: 2, success: () => ({ title: 'Listed', text: (it.name || 'The item') + ' is for sale at ' + p + ' ZEC.' + (S.shop && S.shop.running ? '' : ' Open your shop so buyers can reach it.') }), failTitle: 'Not listed' });
           loadView(true);
         },
       }, 'List for sale'),

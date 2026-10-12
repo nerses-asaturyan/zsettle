@@ -39,13 +39,53 @@ pub struct ListedItem {
     pub price_zat: u64,
     /// Maximum blocks the seller's signature may stay valid.
     pub max_expiry_delta: u32,
+    /// A short description for buyers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// One emoji shown as the item's picture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
+
+/// Longest item description, in characters.
+pub const MAX_DESCRIPTION_CHARS: usize = 280;
 
 impl ListedItem {
     /// Parse the note reference.
     pub fn note_ref(&self) -> Result<NoteRef> {
         self.note.parse()
     }
+
+    /// Check the description and icon: plain text of limited length, and an icon that is one
+    /// emoji (a few non-ASCII characters), never text or markup.
+    pub fn check_details(&self) -> Result<()> {
+        check_details(self.description.as_deref(), self.icon.as_deref())
+    }
+}
+
+/// See [`ListedItem::check_details`].
+pub fn check_details(description: Option<&str>, icon: Option<&str>) -> Result<()> {
+    if let Some(d) = description {
+        if d.trim().is_empty() || d.chars().count() > MAX_DESCRIPTION_CHARS {
+            return Err(anyhow!(
+                "a description has 1 to {MAX_DESCRIPTION_CHARS} characters"
+            ));
+        }
+        if d.chars().any(|c| c.is_control()) {
+            return Err(anyhow!("a description is one line of plain text"));
+        }
+    }
+    if let Some(i) = icon {
+        let n = i.chars().count();
+        if n == 0
+            || n > 8
+            || i.chars()
+                .any(|c| c.is_ascii() || c.is_control() || c.is_whitespace())
+        {
+            return Err(anyhow!("an icon is one emoji"));
+        }
+    }
+    Ok(())
 }
 
 /// A seller's published listings.
@@ -250,6 +290,8 @@ mod tests {
             item_birthday: 3_513_947,
             payout_address: "u1example".into(),
             items: vec![ListedItem {
+                description: None,
+                icon: None,
                 note: "00".repeat(32) + ":1",
                 name: "Item".into(),
                 price_zat: 5_001,
@@ -304,6 +346,30 @@ mod tests {
         assert!(l.signature.is_none());
         l.sign(&ask, 1).unwrap();
         l.verify_signature().unwrap();
+    }
+
+    #[test]
+    fn details_are_signed_and_checked() {
+        let (ask, fvk) = keys(9);
+        let mut l = sample(&fvk);
+        // An entry without details signs the same bytes as before details existed.
+        let before = l.signing_bytes().unwrap();
+        assert!(!String::from_utf8_lossy(&before).contains("description"));
+        l.items[0].description = Some("Front row, Saturday".into());
+        l.items[0].icon = Some("\u{1f39f}\u{fe0f}".into());
+        l.items[0].check_details().unwrap();
+        l.sign(&ask, 1).unwrap();
+        l.verify_signature().unwrap();
+        let mut edited = l.clone();
+        edited.items[0].description = Some("Back row".into());
+        assert!(edited.verify_signature().is_err());
+
+        assert!(check_details(Some(""), None).is_err());
+        assert!(check_details(Some("two\nlines"), None).is_err());
+        assert!(check_details(Some(&"x".repeat(MAX_DESCRIPTION_CHARS + 1)), None).is_err());
+        assert!(check_details(None, Some("<b>")).is_err());
+        assert!(check_details(None, Some("A")).is_err());
+        assert!(check_details(None, Some("\u{1f3b5}")).is_ok());
     }
 
     #[test]
