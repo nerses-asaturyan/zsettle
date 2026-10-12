@@ -21,6 +21,7 @@ use zcash_protocol::consensus::{BlockHeight, BranchId};
 use zsettle_core::broadcast::{check_consensus_at_tip_blocking, DEFAULT_SERVER};
 use zsettle_core::listing::{ListedItem, Listings};
 use zsettle_core::mint::{note_state, NoteState};
+use zsettle_core::ownership::{check_challenge, OwnershipProof};
 use zsettle_core::pczt as pczt_ops;
 use zsettle_core::policy::{
     check, check_public, describe, prepared_ivk, Approved, PolicyError, SellerPolicy,
@@ -286,6 +287,44 @@ enum Cmd {
         #[arg(long, default_value_t = 3)]
         min_confirmations: u32,
         /// lightwalletd server URL.
+        #[arg(long, default_value = DEFAULT_SERVER)]
+        server: String,
+        /// Skip the sync first (the wallet must be fresh).
+        #[arg(long)]
+        no_sync: bool,
+    },
+    /// Prove to a checker that you control an item note right now, bound to a challenge the
+    /// checker chose. Prints a signed proof for `zsettle check-proof`.
+    ///
+    /// The proof hands the checker the item account's viewing key: the checker can see every
+    /// item that account has held and its history. ZEC balances and the payout address live
+    /// in other accounts and stay hidden.
+    Prove {
+        /// Seller wallet directory.
+        #[arg(long, env = "ZSETTLE_WALLET")]
+        wallet: PathBuf,
+        /// UUID of the item account in this wallet.
+        #[arg(long, env = "ZSETTLE_ITEM_ACCOUNT")]
+        item_account: String,
+        /// ZIP 32 account index of the item account (used to derive its signing key).
+        #[arg(long, env = "ZSETTLE_ITEM_ACCOUNT_INDEX", default_value_t = 1)]
+        item_account_index: u32,
+        /// age identity file that decrypts the wallet's mnemonic. Omit it for a
+        /// passphrase-protected wallet: the passphrase is asked for, or taken from
+        /// ZSETTLE_PASSPHRASE.
+        #[arg(long, env = "ZSETTLE_IDENTITY")]
+        identity: Option<PathBuf>,
+        /// The item note, as <txid>:<output index>; it must be an unspent, mined note of the
+        /// item account.
+        #[arg(long)]
+        item_note: NoteRef,
+        /// The text the checker gave you (1 to 200 characters, no line breaks).
+        #[arg(long)]
+        challenge: String,
+        /// Also write the proof to this file.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// lightwalletd server URL for the sync that precedes the proof.
         #[arg(long, default_value = DEFAULT_SERVER)]
         server: String,
         /// Skip the sync first (the wallet must be fresh).
@@ -798,6 +837,80 @@ fn main() -> Result<()> {
                     "next": "once mined, `items` shows the item's new note; `publish --item-note` lists it again",
                 })
             );
+            Ok(())
+        }
+        Cmd::Prove {
+            wallet,
+            item_account,
+            item_account_index,
+            identity,
+            item_note,
+            challenge,
+            out,
+            server,
+            no_sync,
+        } => {
+            check_challenge(&challenge)?;
+            let wallet = Wallet::open(&wallet)?;
+            let mut db = wallet.db()?;
+            if !no_sync {
+                sync_blocking(&wallet, &mut db, &server)?;
+            }
+            let item_account = parse_account(&item_account)?;
+            let held = zsettle_core::mint::unspent_notes(&wallet, &db, item_account)?
+                .into_iter()
+                .find(|n| n.note == item_note);
+            match held {
+                Some(n) if n.mined_height.is_some() => {}
+                Some(_) => {
+                    return Err(anyhow!(
+                        "note {item_note} is not mined yet; a checker could not find it on chain. Wait for a block and try again"
+                    ))
+                }
+                None => {
+                    return Err(match note_state(&wallet, &db, item_note)? {
+                        NoteState::Spent { txid } => anyhow!(
+                            "note {item_note} was spent in {txid}; you no longer hold it there (`items` lists the notes you hold)"
+                        ),
+                        NoteState::Unspent { .. } => anyhow!(
+                            "note {item_note} is not a note of the item account {}",
+                            item_account.expose_uuid()
+                        ),
+                        NoteState::Unknown => anyhow!(
+                            "note {item_note} is not in this wallet; sync, or check the reference with `items`"
+                        ),
+                    });
+                }
+            }
+            if item_account_index == 0 {
+                eprintln!(
+                    "warning: account index 0 is a wallet's paying account; the proof hands its viewing key to the checker, exposing every payment it ever received"
+                );
+            }
+            let item_fvk = account_orchard_fvk(&db, item_account)?;
+            let ask = item_ask(
+                &wallet,
+                &db,
+                identity.as_deref(),
+                item_account,
+                item_account_index,
+            )?;
+            let mut proof = OwnershipProof::new(
+                wallet.network,
+                &item_fvk,
+                account_birthday(&db, item_account)?,
+                item_note,
+                &challenge,
+                max_scanned_height(&db)?.unwrap_or(0),
+            )?;
+            proof.sign(&ask)?;
+            proof.verify_signature()?;
+            let text = proof.to_json()?;
+            if let Some(path) = &out {
+                fs::write(path, format!("{text}\n"))
+                    .with_context(|| format!("writing {}", path.display()))?;
+            }
+            println!("{text}");
             Ok(())
         }
         Cmd::Sign {

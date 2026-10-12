@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Ownership proofs: `zsettle-seller prove` signs a proof that you control an item note right now, bound to a challenge the checker chose; `zsettle check-proof` verifies the signature and the challenge, then checks on chain that the note is unspent and owned by the proof's key. The proof reveals the item account's viewing key, not ZEC balances or the payout address.
 - Documentation book (`book/`, mdBook): guide, CLI, how it works, privacy, security, hosting and reference; published with the project page. App screenshots in the README.
 - Second review of hosted mode, all findings fixed: the faucet never loses a chance or pays twice, paused shops keep serving listings and buyers retry short outages, wrong tries count per visitor, state files are replaced whole, visitors counted by IPv4 address or IPv6 /64, unused wallets removed, job and proving limits checked under one lock.
 - App: the demo welcome explains a trade in three steps; the demo market lists its open shops first; a buy shows its fee and a sale its price in the activity log.

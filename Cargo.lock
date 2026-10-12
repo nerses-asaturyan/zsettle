@@ -4732,6 +4732,7 @@ dependencies = [
  "anyhow",
  "clap",
  "orchard",
+ "serde",
  "serde_json",
  "tracing",
  "tracing-subscriber",

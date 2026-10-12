@@ -21,6 +21,7 @@
 //! - [`mint`]: minting item notes and listing an account's unspent notes.
 //! - [`item`]: what an item is and its minimum value.
 //! - [`verify`]: provenance verification from chain data with viewing keys only.
+//! - [`ownership`]: signed proofs that the holder of an item account controls a note now.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -29,6 +30,7 @@ pub mod broadcast;
 pub mod item;
 pub mod listing;
 pub mod mint;
+pub mod ownership;
 pub mod pczt;
 pub mod policy;
 pub mod trade;
