@@ -368,8 +368,10 @@ fn parse_network(name: &str) -> Result<Network> {
 /// written `socks5h://`) must be usable, or the command stops: a proxy the transport cannot
 /// parse must never turn into a direct connection.
 fn http_agent() -> Result<ureq::Agent> {
+    // The loop below is the only reader of the proxy variables: an empty one means no proxy.
     let mut builder = ureq::builder()
         .redirects(0)
+        .try_proxy_from_env(false)
         .timeout(std::time::Duration::from_secs(30));
     for var in [
         "ALL_PROXY",
@@ -796,7 +798,10 @@ fn main() -> Result<()> {
                 p.push(".seller.pczt");
                 PathBuf::from(p)
             });
-            zsettle_core::wallet::write_owner_only(&seller_copy, &envelope)?;
+            // The redacted copy is made to be handed over, and a shared inbox may belong to
+            // another user: an ordinary file, unlike the full PCZT and the reply file.
+            fs::write(&seller_copy, &envelope)
+                .with_context(|| format!("writing {}", seller_copy.display()))?;
             reserve_note(&w, buyer_note, built.expiry_height)?;
             let stem = seller_copy
                 .file_stem()
