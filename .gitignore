@@ -22,3 +22,5 @@ outbox/
 Thumbs.db
 .idea/
 .vscode/
+# mdBook output
+book/build/

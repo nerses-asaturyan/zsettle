@@ -1,0 +1,16 @@
+/* zsettle accent, from crates/zsettle-app/web/style.css (--accent). */
+.navy,
+.coal,
+.ayu {
+  --links: #f4b728;
+  --sidebar-active: #f4b728;
+}
+.light,
+.rust {
+  --links: #b98306;
+  --sidebar-active: #b98306;
+}
+.content img {
+  max-width: 100%;
+  height: auto;
+}

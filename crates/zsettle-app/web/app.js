@@ -4,7 +4,7 @@
 
 const LINKS = {
   github: 'https://github.com/nerses-asaturyan/zsettle',
-  docs: 'https://github.com/nerses-asaturyan/zsettle/tree/main/docs',
+  docs: 'https://nerses-asaturyan.github.io/zsettle/book/',
   x: 'https://x.com/NAsaturyan',
 };
 // Transaction pages, per network. Opening one tells the explorer which transaction you look at.

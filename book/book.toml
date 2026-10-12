@@ -1,0 +1,22 @@
+[book]
+title = "zsettle"
+description = "Atomic item-for-ZEC trades in one shielded Zcash transaction"
+authors = ["Nerses Asaturyan"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "build"
+create-missing = false
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/nerses-asaturyan/zsettle"
+edit-url-template = "https://github.com/nerses-asaturyan/zsettle/edit/main/book/{path}"
+site-url = "/zsettle/book/"
+additional-css = ["theme/custom.css"]
+no-section-label = false
+
+[output.html.search]
+enable = true

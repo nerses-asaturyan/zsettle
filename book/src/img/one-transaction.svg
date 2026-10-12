@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 300" width="640" height="300" font-family="ui-sans-serif, system-ui, sans-serif" font-size="14">
+  <rect width="640" height="300" rx="14" fill="#151923"/>
+  <rect x="16" y="16" width="608" height="268" rx="12" fill="none" stroke="#f4b728" stroke-width="2"/>
+  <text x="32" y="42" fill="#f4b728" font-weight="700">One Ironwood transaction (one binding signature)</text>
+
+  <rect x="32" y="60" width="576" height="88" rx="10" fill="#1b2030" stroke="#3a4257"/>
+  <text x="48" y="84" fill="#eef0f6" font-weight="700">Action A: the item</text>
+  <text x="48" y="108" fill="#b4bbcc">spend: seller's item note</text>
+  <text x="330" y="108" fill="#b4bbcc">output: new item note, buyer's fresh address</text>
+  <text x="48" y="132" fill="#f4b728">signed by the seller (item account key)</text>
+
+  <rect x="32" y="160" width="576" height="88" rx="10" fill="#1b2030" stroke="#3a4257"/>
+  <text x="48" y="184" fill="#eef0f6" font-weight="700">Action B: the payment</text>
+  <text x="48" y="208" fill="#b4bbcc">spend: buyer's ZEC note</text>
+  <text x="330" y="208" fill="#b4bbcc">output: price to seller's payout address</text>
+  <text x="48" y="232" fill="#f4b728">signed by the buyer</text>
+
+  <text x="48" y="272" fill="#8a93a8">(optional action C: the buyer's change)</text>
+</svg>
