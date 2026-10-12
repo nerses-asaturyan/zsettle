@@ -694,14 +694,11 @@ async function shopCmd(path, body) {
 }
 
 const EVENT_TEXT = {
-  start: () => 'Shop started',
-  listening: (e) => 'Listening on ' + (e.address || ''),
   signed: (e) => 'Offer accepted and signed' + (e.name ? ' for ' + e.name : '') + (e.paid_zat ? ' · ' + zec(e.paid_zat) : ''),
   sold: (e) => 'Sold' + (e.name ? ': ' + e.name : '') + ' · removed from the list',
   rejected: (e) => 'Offer refused: ' + (e.reason || ''),
   deferred: () => 'Offer waiting for the next block',
   error: (e) => 'Problem: ' + (e.error || ''),
-  stopped: () => 'Shop closed',
 };
 
 function feedRows(events) {

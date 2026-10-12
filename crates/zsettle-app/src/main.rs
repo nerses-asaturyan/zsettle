@@ -497,6 +497,11 @@ impl App {
                 text.chars().take(800).collect()
             }));
         }
+        // One JSON document (some commands print it over several lines), or a last JSON
+        // line after other output, or plain text.
+        if let Ok(v) = serde_json::from_str::<Value>(stdout.trim()) {
+            return Ok(v);
+        }
         let last = stdout.lines().rev().find(|l| !l.trim().is_empty());
         Ok(last
             .and_then(|l| serde_json::from_str(l).ok())
@@ -726,6 +731,15 @@ impl App {
 
     fn start_sync(self: &Arc<Self>) -> Result<Value> {
         self.accounts()?;
+        if self.shop_running() {
+            // The open shop syncs the same wallet every few seconds; pausing it would only
+            // leave a gap in its service.
+            return Ok(self.job("sync", |app, id| {
+                app.step(id, "The open shop keeps the wallet in sync");
+                *app.last_sync.lock().unwrap() = json!({ "report": { "by": "shop" }, "at": now() });
+                Ok(json!({ "by": "shop" }))
+            }));
+        }
         Ok(self.job("sync", |app, id| {
             app.step(id, "Syncing with the network");
             app.exclusive(|| app.sync())
