@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Public demo: `zsettle-app --public` serves many visitors (their own wallets, passkey or code-and-passphrase sign-in, session cookies, a shop each behind a relay, a self-restocking house shop that hands out test coins once), with a one-command server setup (`deploy/setup.sh`, Caddy, systemd) and a project page in `docs/index.html`; backup words for passkey wallets.
 - `zsettle-app`: a local web page over the two binaries, with a wallet unlocked by a passkey (WebAuthn PRF) or a passphrase, a market that opens a seller's shop by address and checks its signature, one-click buying with live steps, minting, listing, the shop with its offer feed, item histories and an activity log; it listens on localhost only, behind a per-launch token, Host and Origin checks and a strict content security policy.
 - Two-party atomic settlement core: one Ironwood transaction with spends under two full viewing keys, proven by the buyer, signed per party, extracted and broadcast.
 - Buyer CLI: `list`, `sync`, `import-listing`, `buy`, `finish`, `broadcast`, `verify`.

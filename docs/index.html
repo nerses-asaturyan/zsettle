@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="zsettle: buy and sell items for ZEC in one shielded Zcash transaction. No escrow, no one in the middle.">
+<meta name="color-scheme" content="dark light">
+<title>zsettle · private trades on Zcash</title>
+<link rel="icon" href="logo.svg" type="image/svg+xml">
+<style>
+:root { --bg:#0b0d12; --bg2:#10131a; --surface:#151923; --surface2:#1b2030; --line:rgba(255,255,255,.08); --text:#eef0f6; --text2:#b4bbcc; --muted:#8a93a8; --accent:#f4b728; --ink:#1d1503; color-scheme: dark; }
+@media (prefers-color-scheme: light) { :root { --bg:#f6f7fb; --bg2:#eef0f6; --surface:#fff; --surface2:#f3f4f8; --line:rgba(15,23,42,.08); --text:#0f172a; --text2:#334155; --muted:#64748b; --accent:#e0a30e; color-scheme: light; } }
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); }
+body { font: 17px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; -webkit-font-smoothing: antialiased; }
+a { color: inherit; }
+.wrap { max-width: 1040px; margin: 0 auto; padding: 0 20px; }
+header { display: flex; align-items: center; gap: 12px; padding: 18px 0; }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 20px; letter-spacing: -.02em; text-decoration: none; }
+.brand .wm span { color: var(--accent); }
+.brand svg { width: 32px; height: 32px; }
+nav { margin-left: auto; display: flex; gap: 4px; flex-wrap: wrap; }
+nav a { text-decoration: none; color: var(--muted); font-weight: 650; font-size: 15px; padding: 10px 12px; border-radius: 10px; }
+nav a:hover { color: var(--text); background: var(--surface); }
+.hero { padding: 56px 0 40px; display: grid; gap: 40px; align-items: center; grid-template-columns: 1.1fr .9fr; }
+@media (max-width: 860px) { .hero { grid-template-columns: 1fr; padding-top: 24px; } .hero .mark { width: 120px; order: -1; justify-self: start; } }
+h1 { font-size: clamp(36px, 6vw, 58px); line-height: 1.05; letter-spacing: -.035em; margin: 0 0 16px; }
+h1 em { font-style: normal; color: var(--accent); }
+.lede { font-size: 19px; color: var(--text2); margin: 0 0 26px; max-width: 34em; }
+.cta { display: flex; gap: 12px; flex-wrap: wrap; }
+.btn { display: inline-flex; align-items: center; gap: 8px; min-height: 52px; padding: 0 22px; border-radius: 14px; font-weight: 700; text-decoration: none; border: 1px solid var(--line); background: var(--surface2); color: var(--text); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--ink); }
+.note { margin-top: 14px; font-size: 14px; color: var(--muted); }
+.mark { justify-self: center; width: min(320px, 70vw); }
+.mark svg { width: 100%; height: auto; filter: drop-shadow(0 20px 40px rgba(244,183,40,.18)); }
+section { padding: 36px 0; }
+h2 { font-size: 30px; letter-spacing: -.02em; margin: 0 0 18px; }
+.grid { display: grid; gap: 16px; grid-template-columns: repeat(3, 1fr); }
+@media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 20px; padding: 22px; }
+.card h3 { margin: 0 0 8px; font-size: 18px; }
+.card p { margin: 0; color: var(--text2); font-size: 16px; }
+ol.steps { counter-reset: s; list-style: none; padding: 0; margin: 0; display: grid; gap: 14px; }
+ol.steps li { counter-increment: s; display: grid; grid-template-columns: 44px 1fr; gap: 14px; align-items: start; background: var(--surface); border: 1px solid var(--line); border-radius: 18px; padding: 16px 18px; }
+ol.steps li::before { content: counter(s); width: 44px; height: 44px; border-radius: 13px; display: grid; place-items: center; background: rgba(244,183,40,.14); color: var(--accent); font-weight: 800; }
+ol.steps b { display: block; margin-bottom: 2px; }
+ol.steps span { color: var(--text2); font-size: 16px; }
+.compare { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--line); border-radius: 18px; overflow: hidden; font-size: 15px; }
+.compare th, .compare td { text-align: left; padding: 14px 16px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.compare th { color: var(--muted); font-weight: 650; }
+.compare tr:last-child td { border-bottom: 0; }
+.compare td:last-child { color: var(--text); font-weight: 650; }
+.scroll { overflow-x: auto; }
+.video { aspect-ratio: 16/9; border-radius: 20px; background: var(--surface); border: 1px solid var(--line); display: grid; place-items: center; color: var(--muted); }
+footer { padding: 36px 0 56px; color: var(--muted); font-size: 15px; display: flex; gap: 16px; flex-wrap: wrap; border-top: 1px solid var(--line); margin-top: 24px; }
+footer a { color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <a class="brand" href="#"><svg viewBox="0 0 64 64" aria-hidden="true"><defs><clipPath id="c"><rect width="64" height="64" rx="18"/></clipPath><mask id="m"><rect width="64" height="64" fill="#fff"/><path d="M-2 22H46L18 42H66" fill="none" stroke="#000" stroke-width="5" stroke-linejoin="round"/></mask></defs><g clip-path="url(#c)" mask="url(#m)"><path d="M0 0H64V42H18L46 22H0Z" fill="#F4B728"/><path d="M0 22H46L18 42H64V64H0Z" fill="currentColor"/></g></svg><span class="wm">z<span>settle</span></span></a>
+    <nav>
+      <a href="#how">How it works</a>
+      <a href="https://github.com/nerses-asaturyan/zsettle/tree/main/docs">Docs</a>
+      <a href="https://github.com/nerses-asaturyan/zsettle">GitHub</a>
+      <a href="https://x.com/NAsaturyan">X</a>
+    </nav>
+  </header>
+
+  <div class="hero">
+    <div>
+      <h1>Trade on Zcash <em>without trusting anyone</em> in the middle.</h1>
+      <p class="lede">zsettle moves an item and its payment in one shielded transaction that both sides sign. Either both happen, or nothing does. No escrow, no custodian, no marketplace database deciding who owns what.</p>
+      <div class="cta">
+        <a class="btn primary" id="demo" href="#">Try the live demo</a>
+        <a class="btn" href="https://github.com/nerses-asaturyan/zsettle/releases">Download</a>
+      </div>
+      <p class="note">The demo runs on the Zcash testnet: coins are free, and you get some when you sign up.</p>
+    </div>
+    <div class="mark"><svg viewBox="0 0 64 64" aria-hidden="true"><defs><clipPath id="c2"><rect width="64" height="64" rx="18"/></clipPath><mask id="m2"><rect width="64" height="64" fill="#fff"/><path d="M-2 22H46L18 42H66" fill="none" stroke="#000" stroke-width="5" stroke-linejoin="round"/></mask></defs><g clip-path="url(#c2)" mask="url(#m2)"><path d="M0 0H64V42H18L46 22H0Z" fill="#F4B728"/><path d="M0 22H46L18 42H64V64H0Z" fill="currentColor"/></g></svg></div>
+  </div>
+
+  <section>
+    <div class="grid">
+      <div class="card"><h3>Atomic</h3><p>The seller signs the item's half, the buyer signs the payment's half. Nothing is valid until both halves are in one transaction.</p></div>
+      <div class="card"><h3>Private</h3><p>Buyer and seller stay shielded. The seller sees only the price and the time of the sale, never the buyer's address or balance.</p></div>
+      <div class="card"><h3>Provable</h3><p>An item is a real shielded note. Anyone with the seller's viewing key can trace its history from the chain, without asking anyone.</p></div>
+    </div>
+  </section>
+
+  <section id="how">
+    <h2>How a trade works</h2>
+    <ol class="steps">
+      <li><div><b>The seller lists an item.</b><span>Items are shielded notes. The listing is signed with the item's key, so buyers know it is genuine.</span></div></li>
+      <li><div><b>The buyer builds the whole trade.</b><span>Both halves, the item moving to the buyer and the ZEC moving to the seller, proven with zero-knowledge proofs on the buyer's device.</span></div></li>
+      <li><div><b>The seller checks and signs only its half.</b><span>The seller's shop verifies the proof and the price, then signs the item half. It never sees the buyer's keys.</span></div></li>
+      <li><div><b>The buyer signs and broadcasts.</b><span>One transaction, settled by Zcash consensus. If the item was sold elsewhere first, the trade is invalid and the buyer's ZEC never moves.</span></div></li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>Why it is different</h2>
+    <div class="scroll">
+      <table class="compare">
+        <tr><th></th><th>Marketplace database</th><th>zsettle</th></tr>
+        <tr><td>What an item is</td><td>A row in the operator's database</td><td>A shielded note on chain</td></tr>
+        <tr><td>Who moves ownership</td><td>The operator</td><td>The trade itself, signed by both sides</td></tr>
+        <tr><td>Can the owner prove it</td><td>No, they trust the index</td><td>Yes, from the chain with viewing keys</td></tr>
+        <tr><td>Who holds the money</td><td>Often the venue, for a while</td><td>Nobody: payment and item move together</td></tr>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>See it in two minutes</h2>
+    <div class="video" id="video">The demo video appears here.</div>
+  </section>
+
+  <footer>
+    <span>zsettle · MIT or Apache-2.0</span>
+    <a href="https://github.com/nerses-asaturyan/zsettle">Source</a>
+    <a href="https://github.com/nerses-asaturyan/zsettle/blob/main/spec/THREAT_MODEL.md">Threat model</a>
+    <a href="https://x.com/NAsaturyan">@NAsaturyan</a>
+  </footer>
+</div>
+<script>
+  // Filled in when the demo server is up.
+  const DEMO_URL = '';
+  const demo = document.getElementById('demo');
+  if (DEMO_URL) demo.href = DEMO_URL;
+  else { demo.textContent = 'Live demo coming soon'; demo.removeAttribute('href'); demo.style.opacity = '.7'; }
+</script>
+</body>
+</html>
