@@ -186,8 +186,8 @@ enum Cmd {
         /// transaction, each at its own fresh address.
         #[arg(long = "name", required = true)]
         names: Vec<String>,
-        /// Item note value in zatoshis, for each.
-        #[arg(long, default_value_t = zsettle_core::item::MIN_ITEM_VALUE)]
+        /// Item note value for each, in zatoshis or ZEC.
+        #[arg(long, value_parser = zsettle_core::parse_zat, default_value_t = zsettle_core::item::MIN_ITEM_VALUE)]
         value: u64,
         /// lightwalletd server URL (default: the zec.rocks endpoint of the wallet's network).
         #[arg(long)]
@@ -229,8 +229,9 @@ enum Cmd {
         /// Display name.
         #[arg(long, default_value = "")]
         name: String,
-        /// Price in zatoshis (more than 5,000: smaller payments are dust no wallet spends).
-        #[arg(long)]
+        /// Price, in zatoshis or ZEC (`0.001`, `0.001 ZEC`); more than 5,000 zatoshis, since a
+        /// smaller payment is dust no wallet spends.
+        #[arg(long, value_parser = zsettle_core::parse_zat)]
         price: Option<u64>,
         /// Maximum blocks between the chain tip and the transaction expiry.
         #[arg(long, default_value_t = zsettle_core::DEFAULT_MAX_EXPIRY_DELTA)]
@@ -383,12 +384,19 @@ fn main() -> Result<()> {
                     "next": "send ZEC to `fund`, then `zsettle-seller sync`; `--payout-account` is the first UUID, `--item-account` the second (index 1)",
                 })
             );
-            eprintln!(
-                "# paste these so that later commands need no --wallet, --identity, --item-account or --payout-account:\nexport ZSETTLE_WALLET={}\nexport ZSETTLE_PAYOUT_ACCOUNT={}\nexport ZSETTLE_ITEM_ACCOUNT={}\nexport ZSETTLE_ITEM_ACCOUNT_INDEX=1{}",
+            let env = format!(
+                "export ZSETTLE_WALLET={}\nexport ZSETTLE_PAYOUT_ACCOUNT={}\nexport ZSETTLE_ITEM_ACCOUNT={}\nexport ZSETTLE_ITEM_ACCOUNT_INDEX=1{}\n",
                 wallet.display(),
                 created.accounts[0].account,
                 created.accounts[1].account,
                 identity.as_ref().map(|i| format!("\nexport ZSETTLE_IDENTITY={}", i.display())).unwrap_or_default()
+            );
+            let env_path = wallet.join("env.sh");
+            fs::write(&env_path, &env)
+                .with_context(|| format!("writing {}", env_path.display()))?;
+            eprintln!(
+                "# later commands need no --wallet, --identity, --item-account or --payout-account after:\nsource {}\n{env}",
+                env_path.display()
             );
             Ok(())
         }

@@ -41,7 +41,7 @@ This is the `zcash_client_backend` synchronizer with an in-memory block cache: i
 
 ## Funding
 
-Send ZEC to the address `init` printed, or to a fresh one from `zsettle address`. A note received from another wallet becomes spendable after ten confirmations (about 13 minutes on mainnet); the wallet's own change after three. `mint` and `buy` say so when asked too early. `init` prints `export` lines for `ZSETTLE_WALLET`, `ZSETTLE_IDENTITY` and the account UUIDs; with them set, the commands need none of those flags. A trade costs the price plus the ZIP 317 fee: 15,000 zat with a change output, 10,000 when the paying note is exact. A mint costs 10,000 zat plus 5,000 for every input beyond the first. Prices must be above 5,000 zat, since a smaller payment is dust that wallets refuse to spend. Everything in [TRADE.md](TRADE.md) was funded with 161,000 zat.
+Send ZEC to the address `init` printed, or to a fresh one from `zsettle address`. A note received from another wallet becomes spendable after ten confirmations (about 13 minutes on mainnet); the wallet's own change after three. `mint` and `buy` say so when asked too early. `init` writes `env.sh` into the wallet directory with `ZSETTLE_WALLET`, `ZSETTLE_IDENTITY` and the account UUIDs; after `source <wallet>/env.sh` the commands need none of those flags. Amounts can be given in ZEC (`--amount 0.001`) or zatoshis. A trade costs the price plus the ZIP 317 fee: 15,000 zat with a change output, 10,000 when the paying note is exact. A mint costs 10,000 zat plus 5,000 for every input beyond the first. Prices must be above 5,000 zat, since a smaller payment is dust that wallets refuse to spend. Everything in [TRADE.md](TRADE.md) was funded with 161,000 zat.
 
 ## Taking money out
 

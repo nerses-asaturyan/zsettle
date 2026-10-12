@@ -46,7 +46,7 @@ zsettle-seller sync    --wallet S
 zsettle-seller mint    --wallet S --item-account I --payout-account P --identity ~/seller.key --name "Item #1" --name "Item #2"   # one transaction; prints each note as <txid>:<idx>
 # wait for that block (about 75 seconds), then
 zsettle-seller sync    --wallet S
-zsettle-seller publish --wallet S --item-account I --payout-account P --identity ~/seller.key --listings listings.json --item-note <txid>:<idx> --name "Item #1" --price 100000
+zsettle-seller publish --wallet S --item-account I --payout-account P --identity ~/seller.key --listings listings.json --item-note <txid>:<idx> --name "Item #1" --price 0.001
 zsettle-seller serve   --wallet S --item-account I --payout-account P --identity ~/seller.key --listings listings.json --inbox inbox --outbox outbox --listen 0.0.0.0:8900
 # buyer (gets listings.json from the seller, or from http://seller:8900/listings)
 zsettle import-listing --wallet B --listings listings.json
@@ -59,7 +59,7 @@ zsettle verify --listings listings.json --item <txid>:<idx>
 
 Without a network between them, the parties share a folder instead: `buy --seller-copy inbox/trade.pczt` and `finish --signed outbox/trade.<tag>.signed.pczt`.
 
-`S`, `B` are wallet directories, `I`, `P`, `A` the account UUIDs `init` prints (`accounts` lists them again); `init` also prints `export` lines, and with those set the commands need none of these flags. No other tool is needed; `zsettle pay` sends ZEC out to any address, your phone wallet included. Prices are in zatoshis; `list` shows them in ZEC too. Commands that act print one JSON line; `list`, `notes` and `items` print tables; `zsettle notes --wallet B --account A` shows what a wallet holds.
+`S`, `B` are wallet directories, `I`, `P`, `A` the account UUIDs `init` prints (`accounts` lists them again); `init` also writes `env.sh` into the wallet directory; after `source S/env.sh` the commands need none of these flags. No other tool is needed; `zsettle pay` sends ZEC out to any address, your phone wallet included. Amounts are zatoshis or ZEC with a decimal point (`--price 0.001`); `list` shows both. Commands that act print one JSON line; `list`, `notes` and `items` print tables; `zsettle notes --wallet B --account A` shows what a wallet holds.
 
 See [docs/SETUP.md](docs/SETUP.md) for wallets, [docs/TRADE.md](docs/TRADE.md) for the full flow including resale, [spec/PROTOCOL.md](spec/PROTOCOL.md) and [spec/THREAT_MODEL.md](spec/THREAT_MODEL.md) for the design.
 
@@ -86,7 +86,7 @@ See [docs/SETUP.md](docs/SETUP.md) for wallets, [docs/TRADE.md](docs/TRADE.md) f
 - Light server: the wallet's transparent addresses are never sent to it (the library's UTXO refresh is answered inside the process); what it does learn is in the threat model.
 - Network upgrades: build, mint and broadcast stop with a message when the server's consensus branch is not the one this build signs for.
 - Wallets: created by the tools themselves (`init`), in the zcash-devtool layout; no other software is needed. `pay` sends ZEC out.
-- Binaries: the release workflow builds Linux, macOS and Windows binaries for every `v*` tag and on demand (Actions, "release").
+- Binaries: every `v*` tag publishes a GitHub Release with Linux, macOS and Windows binaries; the same workflow runs on demand from Actions for testers.
 - Tests: the proven settlement core, action pairing, redaction and proof checks, twelve seller-policy cases, the rotation transfer, listings signatures.
 - Reviewed for privacy and soundness in several independent passes; the findings and what was done about each are in the changelog, and what remains by design is in the threat model.
 

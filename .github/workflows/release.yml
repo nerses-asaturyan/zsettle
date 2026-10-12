@@ -5,6 +5,9 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     strategy:
@@ -34,7 +37,20 @@ jobs:
           cp "target/release/zsettle$ext" "target/release/zsettle-seller$ext" dist/
           cp README.md dist/
           cp LICENSE-* dist/ 2>/dev/null || true
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "zsettle-${{ matrix.name }}.zip" ./dist/* > /dev/null
+          else
+            tar -C dist -czf "zsettle-${{ matrix.name }}.tar.gz" .
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: zsettle-${{ matrix.name }}
           path: dist/
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            zsettle-${{ matrix.name }}.tar.gz
+            zsettle-${{ matrix.name }}.zip

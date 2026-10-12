@@ -167,8 +167,8 @@ enum Cmd {
         /// Seller's unified address (taken from the listings when omitted).
         #[arg(long)]
         seller: Option<String>,
-        /// Price in zatoshis (taken from the listings when omitted).
-        #[arg(long)]
+        /// Price to pay, in zatoshis or ZEC (`0.001`, `0.001 ZEC`); defaults to the listed price.
+        #[arg(long, value_parser = zsettle_core::parse_zat)]
         price: Option<u64>,
         /// Blocks until the transaction expires (taken from the listings when omitted).
         #[arg(long)]
@@ -522,11 +522,21 @@ fn main() -> Result<()> {
                     "next": "send ZEC to `fund`, then `zsettle sync`; `--buyer-account` is the first UUID, `--receive-account` the second",
                 })
             );
-            eprintln!(
-                "# paste these so that later commands need no --wallet, --identity or --buyer-account:\nexport ZSETTLE_WALLET={}\nexport ZSETTLE_BUYER_ACCOUNT={}{}",
+            let env = format!(
+                "export ZSETTLE_WALLET={}\nexport ZSETTLE_BUYER_ACCOUNT={}{}\n",
                 wallet.display(),
                 created.accounts[0].account,
-                identity.as_ref().map(|i| format!("\nexport ZSETTLE_IDENTITY={}", i.display())).unwrap_or_default()
+                identity
+                    .as_ref()
+                    .map(|i| format!("\nexport ZSETTLE_IDENTITY={}", i.display()))
+                    .unwrap_or_default()
+            );
+            let env_path = wallet.join("env.sh");
+            fs::write(&env_path, &env)
+                .with_context(|| format!("writing {}", env_path.display()))?;
+            eprintln!(
+                "# later commands need no --wallet, --identity or --buyer-account after:\nsource {}\n{env}",
+                env_path.display()
             );
             Ok(())
         }

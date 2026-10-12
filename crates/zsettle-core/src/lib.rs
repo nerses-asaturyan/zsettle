@@ -54,6 +54,44 @@ pub const MIN_PRICE_ZAT: u64 = ZIP317_MARGINAL_FEE + 1;
 /// Largest trade envelope the seller service reads. A real one is about 10 KB with its proof.
 pub const MAX_ENVELOPE_BYTES: u64 = 1 << 20;
 
+/// Parse an amount typed by a person: zatoshis as a whole number (`100000`, `100000 zat`), or
+/// ZEC with a decimal point or a unit (`0.001`, `0.001 ZEC`, `1zec`), at most eight decimals.
+pub fn parse_zat(text: &str) -> Result<u64, String> {
+    let lower = text.trim().to_ascii_lowercase();
+    let (number, zec) = if let Some(n) = lower.strip_suffix("zec") {
+        (n.trim(), true)
+    } else if let Some(n) = lower.strip_suffix("zat") {
+        (n.trim(), false)
+    } else {
+        (lower.as_str(), lower.contains('.'))
+    };
+    let bad = || format!("not an amount: {text:?} (zatoshis, or ZEC such as 0.001)");
+    if number.is_empty() {
+        return Err(bad());
+    }
+    if !zec {
+        return number.parse::<u64>().map_err(|_| bad());
+    }
+    let (whole, frac) = number.split_once('.').unwrap_or((number, ""));
+    if frac.len() > 8 || !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!("not an amount: {text:?} (at most eight decimals)"));
+    }
+    let whole: u64 = if whole.is_empty() {
+        0
+    } else {
+        whole.parse().map_err(|_| bad())?
+    };
+    let frac: u64 = if frac.is_empty() {
+        0
+    } else {
+        format!("{frac:0<8}").parse().map_err(|_| bad())?
+    };
+    whole
+        .checked_mul(100_000_000)
+        .and_then(|w| w.checked_add(frac))
+        .ok_or_else(|| format!("amount too large: {text:?}"))
+}
+
 /// Conventional ZIP 317 fee for a bundle with `actions` logical actions.
 pub fn zip317_fee(actions: u64) -> u64 {
     ZIP317_MARGINAL_FEE * actions.max(ZIP317_GRACE_ACTIONS)
@@ -61,6 +99,21 @@ pub fn zip317_fee(actions: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn amounts_in_zatoshis_or_zec() {
+        use super::parse_zat;
+        assert_eq!(parse_zat("100000"), Ok(100_000));
+        assert_eq!(parse_zat(" 100000 zat "), Ok(100_000));
+        assert_eq!(parse_zat("0.001"), Ok(100_000));
+        assert_eq!(parse_zat("0.001 ZEC"), Ok(100_000));
+        assert_eq!(parse_zat("1zec"), Ok(100_000_000));
+        assert_eq!(parse_zat(".5"), Ok(50_000_000));
+        assert_eq!(parse_zat("2.00000001"), Ok(200_000_001));
+        assert!(parse_zat("0.000000001").is_err());
+        assert!(parse_zat("abc").is_err());
+        assert!(parse_zat("").is_err());
+    }
+
     use super::*;
 
     #[test]
