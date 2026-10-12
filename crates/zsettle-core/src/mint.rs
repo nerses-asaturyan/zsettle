@@ -351,7 +351,7 @@ pub fn pay(
     );
     if !shielded {
         return Err(anyhow!(
-            "zsettle pays Orchard receivers only: give a unified address with an Orchard receiver"
+            "zsettle pays Orchard receivers only: give a unified address of this network with an Orchard receiver"
         ));
     }
     let payment = Payment::new(

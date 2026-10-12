@@ -54,6 +54,9 @@ const MAX_REASON_FILES: usize = 10_000;
 const MAX_TRADE_ACTIONS: usize = 3;
 /// Connections the HTTP endpoint serves at once.
 const MAX_HTTP_CONNECTIONS: usize = 32;
+/// Envelopes one pass may leave waiting for a later pass; beyond this they are refused, so a
+/// flood of unproven envelopes cannot fill the inbox up to its cap.
+const MAX_DEFERRED: usize = 100;
 /// Content tags whose proof was verified, kept in memory; cleared when this many.
 const MAX_VERIFIED_TAGS: usize = 10_000;
 /// Filed envelopes and signed replies carry buyers' note nullifiers: deleted after this long.
@@ -870,6 +873,7 @@ fn main() -> Result<()> {
                 no_sync,
                 sync_cmd: sync_cmd.as_deref(),
                 verified: RefCell::new(HashSet::new()),
+                deferred: std::cell::Cell::new(0),
             };
             if let Some(addr) = listen {
                 let listener = std::net::TcpListener::bind(&addr)
@@ -923,6 +927,8 @@ struct Service<'a> {
     /// Content tags whose proof this process has verified: a deferred envelope is not
     /// verified again.
     verified: RefCell<HashSet<String>>,
+    /// Envelopes deferred in the current pass.
+    deferred: std::cell::Cell<usize>,
 }
 
 impl Service<'_> {
@@ -941,12 +947,19 @@ impl Service<'_> {
         // Filed envelopes and signed replies are kept only as long as a buyer or a restart
         // could need them.
         let now = SystemTime::now();
-        for dir in [self.inbox.join("done"), self.outbox.to_path_buf()] {
+        for dir in [
+            self.inbox.join("done"),
+            self.outbox.to_path_buf(),
+            self.inbox.join("rejected"),
+        ] {
             let Ok(entries) = fs::read_dir(&dir) else {
                 continue;
             };
             for entry in entries.flatten() {
-                let old = entry.path().extension().is_some_and(|x| x == "pczt")
+                let old = entry
+                    .path()
+                    .extension()
+                    .is_some_and(|x| x == "pczt" || x == "txt")
                     && entry
                         .metadata()
                         .and_then(|m| m.modified())
@@ -958,6 +971,7 @@ impl Service<'_> {
                 }
             }
         }
+        self.deferred.set(0);
         let anchors = recent_ironwood_anchors(&mut db, ANCHOR_DEPTH)?;
         let mut l = Listings::read_verified(self.listings)?;
         if reconcile(&wallet, &db, &mut l)? {
@@ -1040,6 +1054,14 @@ impl Service<'_> {
             }
             Err(Refusal::Reject(reason)) => self.reject(path, reason),
             Err(Refusal::Defer(reason)) => {
+                if self.deferred.get() >= MAX_DEFERRED {
+                    return self.reject(
+                        path,
+                        "refused: too many offers are waiting for a later pass; send it again later"
+                            .into(),
+                    );
+                }
+                self.deferred.set(self.deferred.get() + 1);
                 println!(
                     "{}",
                     serde_json::json!({ "event": "deferred", "file": path, "reason": reason })
@@ -1114,7 +1136,9 @@ impl Service<'_> {
             // A failure of this pass rather than of the envelope: keep it while its
             // transaction can still be mined. The detail stays in this log.
             Err(e)
-                if expiry != 0 && expiry > tip_now && expiry <= tip_now.saturating_add(horizon) =>
+                if expiry != 0
+                    && (tip_now == 0
+                        || (expiry > tip_now && expiry <= tip_now.saturating_add(horizon))) =>
             {
                 eprintln!("could not judge an envelope this pass: {e:#}");
                 return Err(Refusal::Defer(
@@ -1367,7 +1391,7 @@ fn check_payout(
     network: zcash_protocol::consensus::Network,
 ) -> Result<()> {
     let addr = listed_payout(l, network)?;
-    if payout_fvk.scope_for_address(&addr).is_none() {
+    if payout_fvk.scope_for_address(&addr) != Some(orchard::keys::Scope::External) {
         return Err(anyhow!(
             "the listings payout address does not belong to --payout-account; payments would never be recognised"
         ));
@@ -1583,7 +1607,7 @@ fn handle_http(mut stream: std::net::TcpStream, inbox: &Path, outbox: &Path, lis
                     &mut stream,
                     410,
                     "text/plain",
-                    b"refused (the reason was not kept), or never received",
+                    b"no longer available: refused with its reason not kept, expired from the service's files, or never received",
                 );
             }
         }
