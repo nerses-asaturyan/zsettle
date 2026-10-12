@@ -392,3 +392,7 @@ ol.steps li.failed .mark { background: var(--err); border-color: var(--err); }
 .iconbtn.sm { width: 32px; height: 32px; border-radius: 8px; }
 .iconbtn.sm svg.i { width: 15px; height: 15px; }
 .li .sub .txlink a { font-size: 12px; min-height: 0; }
+ol.words { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px 16px; margin: 4px 0; padding-left: 28px; font-family: var(--mono); font-size: 15px; }
+@media (min-width: 480px) { ol.words { grid-template-columns: repeat(3, 1fr); } }
+ol.words li { padding: 4px 0; }
+.card.row .ico { width: 42px; height: 42px; border-radius: 13px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); flex: none; }

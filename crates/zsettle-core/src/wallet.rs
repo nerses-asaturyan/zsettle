@@ -198,8 +198,9 @@ impl Wallet {
         Ok(seed)
     }
 
-    /// Check that `passphrase` decrypts this wallet's mnemonic; nothing is kept.
-    pub fn check_passphrase(&self, passphrase: &str) -> Result<()> {
+    /// The wallet's 24 recovery words, decrypted with `passphrase`. The caller shows them to
+    /// their owner and drops them; they are zeroized when the value goes out of scope.
+    pub fn mnemonic_phrase(&self, passphrase: &str) -> Result<zeroize::Zeroizing<String>> {
         let ciphertext = self
             .mnemonic_ciphertext
             .as_deref()
@@ -219,7 +220,13 @@ impl Wallet {
                 e => anyhow!("age decrypt: {e}"),
             })?
             .read_to_end(&mut buf)?;
-        Ok(())
+        let phrase = std::str::from_utf8(&buf).context("the mnemonic is not text")?;
+        Ok(zeroize::Zeroizing::new(phrase.trim().to_string()))
+    }
+
+    /// Check that `passphrase` decrypts this wallet's mnemonic; nothing is kept.
+    pub fn check_passphrase(&self, passphrase: &str) -> Result<()> {
+        self.mnemonic_phrase(passphrase).map(|_| ())
     }
 
     /// Derive the unified spending key of a ZIP 32 account of this wallet.
