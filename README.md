@@ -20,7 +20,7 @@ The buyer builds and proves the whole transaction holding only viewing keys. The
 | Crate | Role |
 |---|---|
 | `zsettle-core` | library: items, signed listings, two-party bundle, PCZT roles, seller policy, proof check, wallet sync, provenance verifier, lightwalletd client |
-| `zsettle` | buyer and verifier CLI: `init`, `accounts`, `address`, `list`, `sync`, `import-listing`, `buy`, `finish`, `broadcast`, `rotate`, `consolidate`, `notes`, `verify` |
+| `zsettle` | buyer and verifier CLI: `init`, `accounts`, `address`, `pay`, `list`, `sync`, `import-listing`, `buy`, `finish`, `broadcast`, `rotate`, `consolidate`, `notes`, `verify` |
 | `zsettle-seller` | seller service: `init`, `accounts`, `address`, `sync`, `new-item-account`, `mint`, `items`, `publish`, `cancel`, `sign`, `serve` (syncs, reconciles listings with the chain, verifies proofs, signs only the item action) |
 
 This branch targets the Zcash testnet (NU7) with the pre-release crates; see [docs/TESTNET.md](docs/TESTNET.md). The `main` branch targets mainnet.
@@ -43,7 +43,9 @@ zsettle init        --wallet B --identity ~/buyer.key      # prints A (buyer) an
 # fund both addresses; a note received from another wallet is spendable after ten confirmations (about 13 minutes)
 # seller
 zsettle-seller sync    --wallet S
-zsettle-seller mint    --wallet S --item-account I --payout-account P --identity ~/seller.key --name "Item #1"     # prints the note as <txid>:<idx>
+zsettle-seller mint    --wallet S --item-account I --payout-account P --identity ~/seller.key --name "Item #1" --name "Item #2"   # one transaction; prints each note as <txid>:<idx>
+# wait for that block (about 75 seconds), then
+zsettle-seller sync    --wallet S
 zsettle-seller publish --wallet S --item-account I --payout-account P --identity ~/seller.key --listings listings.json --item-note <txid>:<idx> --name "Item #1" --price 100000
 zsettle-seller serve   --wallet S --item-account I --payout-account P --identity ~/seller.key --listings listings.json --inbox inbox --outbox outbox --listen 0.0.0.0:8900
 # buyer (gets listings.json from the seller, or from http://seller:8900/listings)
@@ -57,7 +59,7 @@ zsettle verify --listings listings.json --item <txid>:<idx>
 
 Without a network between them, the parties share a folder instead: `buy --seller-copy inbox/trade.pczt` and `finish --signed outbox/trade.<tag>.signed.pczt`.
 
-`S`, `B` are wallet directories, `I`, `P`, `A` the account UUIDs `init` prints (`accounts` lists them again). No other tool is needed; `zsettle pay` sends ZEC out to any address, your phone wallet included. Prices are in zatoshis; `list` shows them in ZEC too. Commands that act print one JSON line; `list`, `notes` and `items` print tables; `zsettle notes --wallet B --account A` shows what a wallet holds.
+`S`, `B` are wallet directories, `I`, `P`, `A` the account UUIDs `init` prints (`accounts` lists them again); `init` also prints `export` lines, and with those set the commands need none of these flags. No other tool is needed; `zsettle pay` sends ZEC out to any address, your phone wallet included. Prices are in zatoshis; `list` shows them in ZEC too. Commands that act print one JSON line; `list`, `notes` and `items` print tables; `zsettle notes --wallet B --account A` shows what a wallet holds.
 
 See [docs/SETUP.md](docs/SETUP.md) for wallets, [docs/TRADE.md](docs/TRADE.md) for the full flow including resale, [spec/PROTOCOL.md](spec/PROTOCOL.md) and [spec/THREAT_MODEL.md](spec/THREAT_MODEL.md) for the design.
 

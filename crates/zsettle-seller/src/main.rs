@@ -26,9 +26,10 @@ use zsettle_core::policy::{
     check, check_public, describe, prepared_ivk, Approved, PolicyError, SellerPolicy,
 };
 use zsettle_core::wallet::{
-    account_birthday, account_orchard_fvk, create_account, heights, init_wallet, ironwood_note,
-    largest_spendable_note, list_accounts, max_scanned_height, next_orchard_address, parse_account,
-    recent_ironwood_anchors, sync_blocking, unspent_ironwood_nullifiers, Db, NoteRef, Wallet,
+    account_birthday, account_orchard_fvk, account_unspent_nullifiers, create_account, heights,
+    init_wallet, ironwood_note, largest_spendable_note, list_accounts, max_scanned_height,
+    next_orchard_address, parse_account, recent_ironwood_anchors, sync_blocking, Db, NoteRef,
+    Wallet,
 };
 use zsettle_core::DEFAULT_MAX_EXPIRY_DELTA;
 use zsettle_core::ZIP317_MARGINAL_FEE;
@@ -53,7 +54,9 @@ const MAX_REASON_FILES: usize = 10_000;
 const MAX_TRADE_ACTIONS: usize = 3;
 /// Connections the HTTP endpoint serves at once.
 const MAX_HTTP_CONNECTIONS: usize = 32;
-/// Filed envelopes carry buyers' note nullifiers: they are deleted after this long.
+/// Content tags whose proof was verified, kept in memory; cleared when this many.
+const MAX_VERIFIED_TAGS: usize = 10_000;
+/// Filed envelopes and signed replies carry buyers' note nullifiers: deleted after this long.
 const MAX_DONE_AGE_SECS: u64 = 24 * 60 * 60;
 /// Request head the HTTP endpoint reads at most.
 const MAX_HTTP_HEAD: usize = 8 * 1024;
@@ -74,17 +77,17 @@ struct Cli {
 /// Arguments shared by every command that touches the seller wallet.
 #[derive(clap::Args, Clone)]
 struct WalletArgs {
-    /// Seller wallet directory (devtool layout).
-    #[arg(long)]
+    /// Seller wallet directory.
+    #[arg(long, env = "ZSETTLE_WALLET")]
     wallet: PathBuf,
     /// UUID of the item account in this wallet.
-    #[arg(long)]
+    #[arg(long, env = "ZSETTLE_ITEM_ACCOUNT")]
     item_account: String,
     /// ZIP 32 account index of the item account (used to derive its signing key).
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, env = "ZSETTLE_ITEM_ACCOUNT_INDEX", default_value_t = 1)]
     item_account_index: u32,
     /// UUID of the account that receives payments.
-    #[arg(long)]
+    #[arg(long, env = "ZSETTLE_PAYOUT_ACCOUNT")]
     payout_account: String,
 }
 
@@ -103,7 +106,7 @@ enum Cmd {
         /// keep it, it is the only way to decrypt the mnemonic. Omit it to protect the
         /// mnemonic with a passphrase instead (asked for twice, or taken from
         /// ZSETTLE_PASSPHRASE).
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_IDENTITY")]
         identity: Option<PathBuf>,
         /// `main` or `test`.
         #[arg(long, default_value = "main")]
@@ -115,14 +118,14 @@ enum Cmd {
     /// List the wallet's accounts: name, UUID, ZIP 32 index, birthday.
     Accounts {
         /// Wallet directory.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_WALLET")]
         wallet: PathBuf,
     },
     /// Print a fresh receiving address of an account (Orchard only). Each call gives a new
     /// one; reuse links payments.
     Address {
         /// Wallet directory.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_WALLET")]
         wallet: PathBuf,
         /// Account UUID.
         #[arg(long)]
@@ -131,7 +134,7 @@ enum Cmd {
     /// Sync the wallet with a lightwalletd server (no other tool needed).
     Sync {
         /// Wallet directory.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_WALLET")]
         wallet: PathBuf,
         /// lightwalletd server URL (default: the zec.rocks endpoint of the wallet's network).
         #[arg(long)]
@@ -150,12 +153,12 @@ enum Cmd {
     /// that item alone: whoever holds its listing sees nothing of your other items.
     NewItemAccount {
         /// Wallet directory.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_WALLET")]
         wallet: PathBuf,
         /// age identity file that decrypts the wallet's mnemonic. Omit it for a
         /// passphrase-protected wallet: the passphrase is asked for, or taken from
         /// ZSETTLE_PASSPHRASE.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_IDENTITY")]
         identity: Option<PathBuf>,
         /// Account name.
         #[arg(long)]
@@ -171,15 +174,16 @@ enum Cmd {
         /// age identity file that decrypts the wallet's mnemonic. Omit it for a
         /// passphrase-protected wallet: the passphrase is asked for, or taken from
         /// ZSETTLE_PASSPHRASE.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_IDENTITY")]
         identity: Option<PathBuf>,
         /// ZIP 32 account index of the payout account.
         #[arg(long, default_value_t = 0)]
         payout_account_index: u32,
-        /// Item name (goes into the memo).
-        #[arg(long)]
-        name: String,
-        /// Item note value in zatoshis.
+        /// Item name (goes into the memo). Repeat it to mint several items in one
+        /// transaction, each at its own fresh address.
+        #[arg(long = "name", required = true)]
+        names: Vec<String>,
+        /// Item note value in zatoshis, for each.
         #[arg(long, default_value_t = zsettle_core::item::MIN_ITEM_VALUE)]
         value: u64,
         /// lightwalletd server URL (default: the zec.rocks endpoint of the wallet's network).
@@ -189,7 +193,7 @@ enum Cmd {
     /// List the item account's unspent notes (the references to publish).
     Items {
         /// Wallet directory.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_WALLET")]
         wallet: PathBuf,
         /// UUID of the item account.
         #[arg(long)]
@@ -202,10 +206,10 @@ enum Cmd {
         /// age identity file that decrypts the wallet's mnemonic. Omit it for a
         /// passphrase-protected wallet: the passphrase is asked for, or taken from
         /// ZSETTLE_PASSPHRASE.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_IDENTITY")]
         identity: Option<PathBuf>,
         /// Listings file to create or update.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_LISTINGS")]
         listings: PathBuf,
         /// Item note to list, as <txid>:<output index>. Without it, the existing file is
         /// checked and signed again.
@@ -238,7 +242,7 @@ enum Cmd {
         /// age identity file that decrypts the wallet's mnemonic. Omit it for a
         /// passphrase-protected wallet: the passphrase is asked for, or taken from
         /// ZSETTLE_PASSPHRASE.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_IDENTITY")]
         identity: Option<PathBuf>,
         /// The listed item note, as <txid>:<output index>.
         #[arg(long)]
@@ -266,7 +270,7 @@ enum Cmd {
         /// age identity file that decrypts the wallet's mnemonic. Omit it for a
         /// passphrase-protected wallet: the passphrase is asked for, or taken from
         /// ZSETTLE_PASSPHRASE.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_IDENTITY")]
         identity: Option<PathBuf>,
         /// Listings file.
         #[arg(long)]
@@ -300,7 +304,7 @@ enum Cmd {
         /// age identity file that decrypts the wallet's mnemonic. Omit it for a
         /// passphrase-protected wallet: the passphrase is asked for, or taken from
         /// ZSETTLE_PASSPHRASE.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_IDENTITY")]
         identity: Option<PathBuf>,
         /// Listings file (kept in sync with the chain: sold items removed).
         #[arg(long)]
@@ -376,6 +380,13 @@ fn main() -> Result<()> {
                     "next": "send ZEC to `fund`, then `zsettle-seller sync`; `--payout-account` is the first UUID, `--item-account` the second (index 1)",
                 })
             );
+            eprintln!(
+                "# paste these so that later commands need no --wallet, --identity, --item-account or --payout-account:\nexport ZSETTLE_WALLET={}\nexport ZSETTLE_PAYOUT_ACCOUNT={}\nexport ZSETTLE_ITEM_ACCOUNT={}\nexport ZSETTLE_ITEM_ACCOUNT_INDEX=1{}",
+                wallet.display(),
+                created.accounts[0].account,
+                created.accounts[1].account,
+                identity.as_ref().map(|i| format!("\nexport ZSETTLE_IDENTITY={}", i.display())).unwrap_or_default()
+            );
             Ok(())
         }
         Cmd::Accounts { wallet } => {
@@ -433,7 +444,7 @@ fn main() -> Result<()> {
             w,
             identity,
             payout_account_index,
-            name,
+            names,
             value,
             server,
         } => {
@@ -447,16 +458,24 @@ fn main() -> Result<()> {
                 from_account_index: payout_account_index,
                 item_account: parse_account(&w.item_account)?,
                 value_zat: value,
-                name: name.clone(),
+                names: names.clone(),
             };
-            let (bytes, txid, index) = zsettle_core::mint::mint(&wallet, &mut db, &seed, &req)?;
+            let (bytes, txid, indices) = zsettle_core::mint::mint(&wallet, &mut db, &seed, &req)
+                .map_err(|e| {
+                    let text = format!("{e:#}");
+                    if text.contains("Insufficient balance") {
+                        anyhow!("{text}: the payout account has no spendable note for this; a note received from another wallet is spendable after 10 confirmations, the wallet's own change after 3")
+                    } else {
+                        e
+                    }
+                })?;
             let response = zsettle_core::broadcast::send_raw_transaction_blocking(&server, bytes)?;
             println!(
                 "{}",
                 serde_json::json!({
-                    "txid": txid, "name": name, "value_zat": value, "broadcast": response,
-                    "note": index.map(|i| format!("{txid}:{i}")),
-                    "next": "once mined (and synced): publish --item-note <note>",
+                    "txid": txid, "names": names, "value_zat": value, "broadcast": response,
+                    "notes": indices.iter().map(|i| i.map(|i| format!("{txid}:{i}"))).collect::<Vec<_>>(),
+                    "next": "once mined and synced: publish --item-note <note> for each",
                 })
             );
             Ok(())
@@ -919,16 +938,21 @@ impl Service<'_> {
         if self.sync_cmd.is_none() && !self.no_sync {
             sync_blocking(&wallet, &mut db, self.server).context("syncing the seller wallet")?;
         }
-        // Filed envelopes are kept only as long as a restart could need them.
-        if let Ok(dir) = fs::read_dir(self.inbox.join("done")) {
-            let now = SystemTime::now();
-            for entry in dir.flatten() {
-                let old = entry
-                    .metadata()
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|t| now.duration_since(t).ok())
-                    .is_some_and(|age| age > Duration::from_secs(MAX_DONE_AGE_SECS));
+        // Filed envelopes and signed replies are kept only as long as a buyer or a restart
+        // could need them.
+        let now = SystemTime::now();
+        for dir in [self.inbox.join("done"), self.outbox.to_path_buf()] {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let old = entry.path().extension().is_some_and(|x| x == "pczt")
+                    && entry
+                        .metadata()
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| now.duration_since(t).ok())
+                        .is_some_and(|age| age > Duration::from_secs(MAX_DONE_AGE_SECS));
                 if old {
                     let _ = fs::remove_file(entry.path());
                 }
@@ -1075,16 +1099,40 @@ impl Service<'_> {
         let expiry = *pczt.global().expiry_height();
         // Stage one: public data only (branch, expiry, anchor, the listed item's spend). A
         // refusal here tells the sender nothing the listings file does not already give.
+        // No envelope waits longer than the longest listed expiry allows: an envelope that
+        // can never settle must not sit in the inbox forever.
+        let horizon = l
+            .items
+            .iter()
+            .map(|i| i.max_expiry_delta)
+            .max()
+            .unwrap_or(DEFAULT_MAX_EXPIRY_DELTA)
+            .saturating_add(1 + LAG_SLACK);
+        let tip_now = last_tip(db);
         let outcome = match process(db, self.w, self.network, l, &pczt, anchors, false) {
             Ok(outcome) => outcome,
             // A failure of this pass rather than of the envelope: keep it while its
-            // transaction can still be mined.
-            Err(e) if expiry != 0 && expiry > last_tip(db) => {
-                return Err(Refusal::Defer(format!("error: {e:#}")))
+            // transaction can still be mined. The detail stays in this log.
+            Err(e)
+                if expiry != 0 && expiry > tip_now && expiry <= tip_now.saturating_add(horizon) =>
+            {
+                eprintln!("could not judge an envelope this pass: {e:#}");
+                return Err(Refusal::Defer(
+                    "error: this pass could not judge the envelope; it will be judged again".into(),
+                ));
             }
-            Err(e) => return Err(Refusal::Reject(format!("error: {e:#}"))),
+            Err(e) => {
+                eprintln!("could not judge an envelope: {e:#}");
+                return Err(Refusal::Reject(
+                    "error: this envelope could not be judged".into(),
+                ));
+            }
         };
-        if outcome.item.is_none() && outcome.unavailable > 0 && expiry > outcome.tip {
+        if outcome.item.is_none()
+            && outcome.unavailable > 0
+            && expiry > outcome.tip
+            && expiry <= outcome.tip.saturating_add(horizon)
+        {
             return Err(Refusal::Defer(format!(
                 "spends no listed item this wallet can spend, and {} listed items are not spendable here yet (unscanned or too recent)",
                 outcome.unavailable
@@ -1119,7 +1167,11 @@ impl Service<'_> {
         if !self.verified.borrow().contains(&tag) {
             pczt_ops::verify_proof(&pczt, self.vk)
                 .map_err(|e| Refusal::Reject(format!("refused: {e:#}")))?;
-            self.verified.borrow_mut().insert(tag);
+            let mut verified = self.verified.borrow_mut();
+            if verified.len() >= MAX_VERIFIED_TAGS {
+                verified.clear();
+            }
+            verified.insert(tag);
         }
         // Stage three: the checks that use the seller's own keys. With a valid proof the
         // sender knows every note in the bundle, so these cannot be answered about anyone
@@ -1128,7 +1180,12 @@ impl Service<'_> {
             Ok(full) => full
                 .result
                 .map_err(|e| Refusal::Reject(format!("refused: {e}")))?,
-            Err(e) => return Err(Refusal::Reject(format!("error: {e:#}"))),
+            Err(e) => {
+                eprintln!("could not judge an envelope: {e:#}");
+                return Err(Refusal::Reject(
+                    "error: this envelope could not be judged".into(),
+                ));
+            }
         };
         let signed = pczt_ops::sign_ironwood_action(pczt, approved.item_action_index, self.ask)
             .map_err(|e| Refusal::Reject(format!("signing failed: {e:#}")))?;
@@ -1215,7 +1272,10 @@ fn process(
     let tip: u32 =
         u32::from(zcash_protocol::consensus::BlockHeight::from(target)).saturating_sub(1);
     let item_fvk = account_orchard_fvk(db, parse_account(&w.item_account)?)?;
-    let seller_nfs = unspent_ironwood_nullifiers(db)?;
+    let item_account = parse_account(&w.item_account)?;
+    // Only the listed account's own notes: a listings holder can derive these, so the
+    // decision reveals nothing about the rest of the wallet.
+    let seller_nfs = account_unspent_nullifiers(db, item_account)?;
     let trade_nfs = pczt_ops::action_nullifiers(pczt)?;
     // Which listed item does this trade spend?
     let mut matched: Option<(ListedItem, Nullifier)> = None;
@@ -1249,6 +1309,7 @@ fn process(
         max_expiry_delta: item.max_expiry_delta,
         tip,
         branch_id: u32::from(BranchId::for_height(&network, BlockHeight::from(tip + 1))),
+        payout: listed_payout(l, network)?,
     };
     let result = if with_secrets {
         check(pczt, &nf, &seller_nfs, &ivk, &policy, anchors)
@@ -1286,18 +1347,26 @@ fn item_ask(
 
 /// The listings' payout address must belong to the payout account this service decrypts
 /// payments with; otherwise every offer would be refused as unpaid.
-fn check_payout(
+/// The Orchard receiver of the listed payout address.
+fn listed_payout(
     l: &Listings,
-    payout_fvk: &FullViewingKey,
     network: zcash_protocol::consensus::Network,
-) -> Result<()> {
-    let addr = match Address::decode(&network, &l.payout_address) {
+) -> Result<orchard::Address> {
+    match Address::decode(&network, &l.payout_address) {
         Some(Address::Unified(ua)) => ua.orchard().copied(),
         _ => None,
     }
     .ok_or_else(|| {
         anyhow!("the listings payout address is not a unified address with an Orchard receiver")
-    })?;
+    })
+}
+
+fn check_payout(
+    l: &Listings,
+    payout_fvk: &FullViewingKey,
+    network: zcash_protocol::consensus::Network,
+) -> Result<()> {
+    let addr = listed_payout(l, network)?;
     if payout_fvk.scope_for_address(&addr).is_none() {
         return Err(anyhow!(
             "the listings payout address does not belong to --payout-account; payments would never be recognised"
@@ -1505,8 +1574,17 @@ fn handle_http(mut stream: std::net::TcpStream, inbox: &Path, outbox: &Path, lis
                 let _ = respond(&mut stream, 200, "application/octet-stream", &bytes);
             } else if let Ok(why) = fs::read_to_string(&reason) {
                 let _ = respond(&mut stream, 410, "text/plain", why.as_bytes());
-            } else {
+            } else if inbox.join(format!("{tag}.pczt")).exists()
+                || inbox.join("done").join(format!("{tag}.pczt")).exists()
+            {
                 let _ = respond(&mut stream, 202, "text/plain", b"pending");
+            } else {
+                let _ = respond(
+                    &mut stream,
+                    410,
+                    "text/plain",
+                    b"refused (the reason was not kept), or never received",
+                );
             }
         }
         _ => {
