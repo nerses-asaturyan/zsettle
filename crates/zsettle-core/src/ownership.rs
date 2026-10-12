@@ -277,6 +277,8 @@ mod tests {
             item_birthday: 3_513_000,
             payout_address: "u1example".into(),
             items: vec![ListedItem {
+                description: None,
+                icon: None,
                 note: note().to_string(),
                 name: "Item".into(),
                 price_zat: 5_001,

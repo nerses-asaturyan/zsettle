@@ -1202,6 +1202,8 @@ fn api(app: &Arc<App>, req: &Request) -> Result<Value> {
         ("POST", "/api/market") => app.market(&body),
         ("POST", "/api/buy") => app.start_buy(&body),
         ("POST", "/api/verify") => app.start_verify(&body),
+        ("POST", "/api/prove") => app.start_prove(&body),
+        ("POST", "/api/check-proof") => app.start_check_proof(&body),
         ("GET", "/api/activity") => {
             app.absorb_sales();
             Ok(json!(app.cfg.lock().unwrap().activity))
@@ -1780,7 +1782,7 @@ impl App {
         // Commands that open the seed and prove take a few hundred MB each: a few at a time.
         let heavy = matches!(
             args.first().map(String::as_str),
-            Some("init" | "pay" | "mint" | "publish" | "cancel" | "buy")
+            Some("init" | "pay" | "mint" | "publish" | "cancel" | "buy" | "prove")
         );
         let _slot = if heavy {
             Some(
@@ -1823,6 +1825,40 @@ impl App {
         Ok(last
             .and_then(|l| serde_json::from_str(l).ok())
             .unwrap_or_else(|| Value::String(stdout.to_string())))
+    }
+
+    /// Run a command that prints its JSON report whether or not it succeeds (exit status 1
+    /// with a report means "checked, and the answer is no").
+    fn run_report(&self, bin: &Path, args: &[String]) -> Result<Value> {
+        let mut cmd = Command::new(bin);
+        cmd.args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for v in ENV_VARS {
+            cmd.env_remove(v);
+        }
+        let out = cmd.output().context("running the check")?;
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if let Ok(v) = serde_json::from_str::<Value>(stdout.trim()) {
+            return Ok(v);
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let mut text: String = stderr
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with("warning:"))
+            .collect::<Vec<_>>()
+            .join(" ")
+            .replace("Error: ", "");
+        if self.hosted() {
+            text = text.replace(&self.dir.display().to_string(), "");
+        }
+        Err(anyhow!(if text.is_empty() {
+            "the check failed".to_string()
+        } else {
+            text.chars().take(800).collect()
+        }))
     }
 
     fn seller(&self, args: &[&str]) -> Result<Value> {
@@ -2459,6 +2495,75 @@ impl App {
                 app.add_activity(json!({ "kind": "cancel", "txid": r["txid"], "text": format!("Cancelled the offers on {note}") }));
                 Ok(r)
             })
+        }))
+    }
+
+    /// Prove that this wallet holds an item right now, answering a checker's challenge.
+    fn start_prove(self: &Arc<Self>, body: &Value) -> Result<Value> {
+        self.require_unlocked()?;
+        let note = note_field(body, "note")?;
+        let challenge = field(body, "challenge")?;
+        let n = challenge.chars().count();
+        if n > 200 || challenge.chars().any(char::is_control) {
+            return Err(anyhow!("a challenge is one line of at most 200 characters"));
+        }
+        let (_, item) = self.accounts()?;
+        Ok(self.job("prove", move |app, id| {
+            app.exclusive(|| {
+                app.step(id, "Syncing with the network");
+                app.step(id, "Signing the proof with the item's key");
+                let args = vec![
+                    "prove".to_string(),
+                    "--wallet".into(),
+                    app.w(),
+                    "--item-account".into(),
+                    item.clone(),
+                    "--item-account-index".into(),
+                    "1".into(),
+                    format!("--item-note={note}"),
+                    format!("--challenge={challenge}"),
+                ];
+                let proof = app.run(&app.seller_bin, &args)?;
+                app.add_activity(json!({ "kind": "prove", "text": format!("Made an ownership proof for {}", app.item_names().get(&note).cloned().unwrap_or_else(|| note.clone())) }));
+                Ok(json!({ "proof": proof }))
+            })
+        }))
+    }
+
+    /// Check an ownership proof someone gave, against the challenge given them. The proof is
+    /// read from a file: the app never fetches a proof from an address.
+    fn start_check_proof(self: &Arc<Self>, body: &Value) -> Result<Value> {
+        let proof = field(body, "proof")?;
+        if proof.len() > 16 * 1024 {
+            return Err(anyhow!("that proof is too large"));
+        }
+        serde_json::from_str::<Value>(&proof)
+            .map_err(|_| anyhow!("that is not an ownership proof"))?;
+        let challenge = field(body, "challenge")?;
+        let network = self
+            .cfg
+            .lock()
+            .unwrap()
+            .network
+            .clone()
+            .unwrap_or_else(|| "main".into());
+        let path = self.dir.join("trades").join(format!(
+            "proof-{}.json",
+            hex::encode(rand::random::<[u8; 6]>())
+        ));
+        zsettle_core::wallet::write_owner_only(&path, proof.as_bytes())?;
+        Ok(self.job("check-proof", move |app, id| {
+            app.step(id, "Checking the signature and the challenge");
+            app.step(id, "Looking on the chain whether the item is still held");
+            let args = vec![
+                "check-proof".to_string(),
+                format!("--proof={}", path.display()),
+                format!("--challenge={challenge}"),
+                format!("--network={network}"),
+            ];
+            let r = app.run_report(&app.buyer_bin, &args);
+            let _ = fs::remove_file(&path);
+            r
         }))
     }
 

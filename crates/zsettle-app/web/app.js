@@ -981,7 +981,112 @@ function openOwnItem(it) {
       it.description ? h('p', { class: 'desc' }, it.description) : null,
       h('div', { class: 'summary' }, h('div', { class: 'r' }, h('span', null, 'Status'), h('span', null, it.listed_zat ? 'Listed for ' + zec(it.listed_zat) : it.mined ? 'In your wallet' : 'Arriving')), h('div', { class: 'r' }, h('span', null, 'Note'), h('span', { class: 'mono' }, short(it.note, 10)))),
     ],
-    foot: [h('button', { class: 'btn', onclick: () => { sh.close(); openHistory(null, it.note, it.name); } }, icon('history'), 'History'), h('button', { class: 'btn primary', onclick: () => { sh.close(); go('sell'); } }, icon('tag'), 'Sell')],
+    foot: [
+      h('button', { class: 'btn', onclick: () => { sh.close(); openHistory(null, it.note, it.name); } }, icon('history'), 'History'),
+      it.mined ? h('button', { class: 'btn', onclick: () => { sh.close(); openProve(it); } }, icon('shield'), 'Prove I own it') : null,
+      h('button', { class: 'btn primary', onclick: () => { sh.close(); go('sell'); } }, icon('tag'), 'Sell'),
+    ],
+  });
+}
+
+// ------------------------------------------------------------ ownership proofs
+
+/** A fresh challenge for a checker to hand out: short, random, easy to read aloud. */
+function newChallenge() {
+  const A = 'abcdefghjkmnpqrstuvwxyz23456789';
+  const r = crypto.getRandomValues(new Uint8Array(8));
+  return 'zs-' + [...r].map((b) => A[b % A.length]).join('').replace(/^(.{4})/, '$1-');
+}
+
+function openProve(it) {
+  const ch = h('input', { class: 'input', id: 'challenge', maxlength: '200', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', placeholder: 'zs-abcd-efgh' });
+  const err = h('p', { class: 'small err', role: 'alert' });
+  const sh = sheet({
+    title: 'Prove you own ' + (it.name || 'this item'),
+    body: [
+      h('p', { class: 'small muted' }, 'Ask the person checking for a challenge (a short code), and type it here. The proof shows that you hold this item right now. It does not show your address or your balance.'),
+      h('div', { class: 'field' }, h('label', { for: 'challenge' }, 'Their challenge'), ch),
+      h('div', { class: 'callout info' }, icon('info'), h('span', null, 'The checker learns the viewing key of your item account: which items it has held. Your ZEC sits in another account and stays private.')),
+      err,
+    ],
+    foot: [
+      h('button', {
+        class: 'btn primary lg',
+        onclick: async () => {
+          const c = ch.value.trim();
+          if (!c) return (err.textContent = 'Type the challenge the checker gave you.');
+          sh.setTitle('Making the proof');
+          await runInSheet(sh, '/api/prove', { note: it.note, challenge: c }, {
+            total: 2,
+            success: (r) => {
+              const text = JSON.stringify(r.proof, null, 2);
+              const box = h('textarea', { class: 'input mono proof', readonly: true, rows: '6', 'aria-label': 'Ownership proof' });
+              box.value = text;
+              return {
+                title: 'Proof ready',
+                text: 'Send this to the checker. It stops working once the item leaves your wallet.',
+                extra: box,
+                actions: [
+                  h('button', { class: 'btn', onclick: () => copy(text, 'Proof copied') }, icon('copy'), 'Copy'),
+                  h('button', { class: 'btn', onclick: () => download('ownership-proof.json', text) }, icon('down'), 'Save'),
+                  h('button', { class: 'btn primary', onclick: () => sh.close() }, 'Done'),
+                ],
+              };
+            },
+            failTitle: 'No proof made',
+          });
+        },
+      }, icon('shield'), 'Make the proof'),
+    ],
+  });
+}
+
+function download(name, text) {
+  const a = h('a', { href: URL.createObjectURL(new Blob([text], { type: 'application/json' })), download: name });
+  document.body.append(a);
+  a.click();
+  setTimeout(() => {
+    URL.revokeObjectURL(a.href);
+    a.remove();
+  }, 1000);
+}
+
+function openCheckProof() {
+  const challenge = newChallenge();
+  const proof = h('textarea', { class: 'input mono proof', id: 'proof', rows: '6', placeholder: '{ "version": 1, ... }', spellcheck: 'false' });
+  const err = h('p', { class: 'small err', role: 'alert' });
+  const sh = sheet({
+    title: 'Check that someone owns an item',
+    body: [
+      h('ol', { class: 'small muted plainlist' }, h('li', null, 'Give the holder this challenge.'), h('li', null, 'They make a proof in their wallet and send it to you.'), h('li', null, 'Paste it below.')),
+      h('div', { class: 'summary' }, h('div', { class: 'r' }, h('span', null, 'Challenge'), h('b', { class: 'mono' }, challenge)), h('div', { class: 'r' }, h('span', null, ''), h('button', { class: 'linkbtn', onclick: () => copy(challenge, 'Challenge copied') }, 'Copy'))),
+      h('div', { class: 'field' }, h('label', { for: 'proof' }, 'Their proof'), proof),
+      err,
+    ],
+    foot: [
+      h('button', {
+        class: 'btn primary lg',
+        onclick: async () => {
+          const text = proof.value.trim();
+          if (!text) return (err.textContent = 'Paste the proof first.');
+          sh.setTitle('Checking the proof');
+          await runInSheet(sh, '/api/check-proof', { proof: text, challenge }, {
+            total: 2,
+            success: (r) => {
+              const ok = r.valid && r.held;
+              return {
+                title: ok ? 'They hold it' : 'Not proven',
+                text: ok
+                  ? (r.name ? r.name + ' is' : 'The item is') + ' held right now by whoever made this proof (checked up to block ' + r.scanned_to + ').'
+                  : human(r.reason || 'The proof does not hold.'),
+                extra: h('div', { class: 'summary' }, h('div', { class: 'r' }, h('span', null, 'Item note'), h('span', { class: 'mono' }, short(r.note || '', 8))), h('div', { class: 'r' }, h('span', null, 'Signature and challenge'), h('span', null, r.valid ? 'Good' : 'Not good'))),
+              };
+            },
+            failTitle: 'Could not check',
+          });
+        },
+      }, icon('shield'), 'Check'),
+    ],
   });
 }
 
@@ -1109,6 +1214,8 @@ function viewMarket() {
     S.hosted && openShops.length ? h('div', { class: 'section-title' }, 'Or open a shop by its address') : null,
     h('div', { class: 'card stack' }, h('div', { class: 'field' }, h('label', { for: 'shopurl' }, 'Shop address'), h('div', { class: 'inputwrap' }, input, openBtn)), err, recent.length ? h('div', null, h('div', { class: 'small muted', style: null }, 'Recent shops'), h('div', { class: 'list' }, recent.slice(0, 4).map((s) => h('button', { class: 'li', onclick: () => open(s) }, avatar(s, 'ico'), h('span', { class: 'grow' }, h('div', { class: 'title' }, s.replace(/^https?:\/\//, '')), h('div', { class: 'sub' }, 'Opened before')), icon('chevron'))))) : null),
     S.market ? viewShopFront() : null,
+    h('div', { class: 'section-title' }, 'Ownership'),
+    h('div', { class: 'card row nowrap' }, h('span', { class: 'ico' }, icon('shield')), h('div', { class: 'grow' }, h('b', null, 'Check that someone owns an item'), h('div', { class: 'small muted' }, 'For a door check or a members area: they prove it without showing their address or balance.')), h('button', { class: 'btn', onclick: openCheckProof }, 'Check')),
   );
 }
 
@@ -1429,6 +1536,7 @@ const KIND = {
   pay: ['out', 'up'],
   wallet: ['acc', 'shield'],
   faucet: ['in', 'down'],
+  prove: ['acc', 'shield'],
 };
 function activityList(items) {
   return h(
