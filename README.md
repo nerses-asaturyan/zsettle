@@ -37,14 +37,18 @@ To build instead: Rust 1.93 and `cargo build --release --locked` ([docs/SETUP.md
 
 ## The app
 
-`zsettle-app` is the same tool with a page in your browser: a wallet unlocked by a passkey (or a passphrase), a market where you open a seller's shop by its address, one-click buying with a live progress view, and a seller tab to mint items, set prices, open the shop and watch offers arrive.
+`zsettle-app` is the same tool in a browser, on a phone or a desktop: a wallet unlocked by a passkey (or a passphrase), a market where you open a shop by its address, buying with a review step and live progress, a seller tab to mint items, set prices and open your shop, item histories from the chain, a QR code to receive, and backup words. Every transaction links to the ZecBlock explorer.
 
 ```
-zsettle-app                        # prints a http://localhost:7070/#token=… link to open
-zsettle-app --profile bob --port 7071   # a second profile, to play buyer and seller on one machine
+zsettle-app                              # prints a http://localhost:7070/#token=... link to open
+zsettle-app --profile bob --port 7071    # a second profile, to play buyer and seller on one machine
 ```
 
-It listens on this machine only, keeps the wallet in `~/.zsettle-app/<profile>`, and runs the `zsettle` and `zsettle-seller` binaries next to it for every action, so it adds no cryptography of its own. The passkey's PRF output is the wallet's passphrase: the browser derives it on each unlock and nothing stores it. Losing the passkey loses the wallet, so keep amounts small.
+It listens on this machine only, keeps the wallet in `~/.zsettle-app/<profile>`, and runs the `zsettle` and `zsettle-seller` binaries next to it for every action, so it adds no cryptography of its own. The passkey's PRF output is the wallet's passphrase: the browser derives it on each unlock and nothing stores it.
+
+### Public demo
+
+`zsettle-app --public https://<domain>` serves many people from one server on the testnet: each visitor makes a wallet of their own, gets free test coins once, buys from any open shop, and can open a shop of their own; a house shop keeps items in stock. [docs/HOSTING.md](docs/HOSTING.md) sets it up in one command. The demo server holds the demo wallets, so it is for test coins only.
 
 ## One minute, no wallet
 
