@@ -32,6 +32,9 @@ const APP_JS: &str = include_str!("../web/app.js");
 const STYLE_CSS: &str = include_str!("../web/style.css");
 const QR_JS: &str = include_str!("../web/qr.js");
 const FAVICON_SVG: &str = include_str!("../web/favicon.svg");
+const MANIFEST: &str = include_str!("../web/manifest.webmanifest");
+const ICON_192: &[u8] = include_bytes!("../web/icon-192.png");
+const ICON_512: &[u8] = include_bytes!("../web/icon-512.png");
 
 /// Largest request body the page sends (JSON forms).
 const MAX_BODY: usize = 64 * 1024;
@@ -782,7 +785,7 @@ fn respond_with(stream: &mut TcpStream, status: u16, ctype: &str, body: &[u8], e
         _ => "Error",
     };
     let head = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'\r\n{extra}Connection: close\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'\r\n{extra}Connection: close\r\n\r\n",
         body.len()
     );
     let _ = stream.write_all(head.as_bytes());
@@ -797,6 +800,10 @@ fn static_file(path: &str) -> Option<(&'static str, &'static [u8])> {
         "/qr.js" => ("text/javascript; charset=utf-8", QR_JS.as_bytes()),
         "/style.css" => ("text/css; charset=utf-8", STYLE_CSS.as_bytes()),
         "/favicon.svg" => ("image/svg+xml", FAVICON_SVG.as_bytes()),
+        // The page can be added to a phone's home screen and opens like an app.
+        "/manifest.webmanifest" => ("application/manifest+json", MANIFEST.as_bytes()),
+        "/icon-192.png" => ("image/png", ICON_192),
+        "/icon-512.png" => ("image/png", ICON_512),
         _ => return None,
     })
 }
