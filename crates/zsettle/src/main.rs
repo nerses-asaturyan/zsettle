@@ -114,8 +114,8 @@ enum Cmd {
         /// Recipient unified address.
         #[arg(long)]
         to: String,
-        /// Amount in zatoshis.
-        #[arg(long)]
+        /// Amount, in zatoshis or ZEC (`0.001`, `0.001 ZEC`).
+        #[arg(long, value_parser = zsettle_core::parse_zat)]
         amount: u64,
         /// Optional memo.
         #[arg(long)]
