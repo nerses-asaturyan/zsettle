@@ -1232,7 +1232,25 @@ impl Hub {
         let hub = self.clone();
         Ok(app.job("faucet", move |app, id| {
             app.step(id, "Sending free test coins from the demo faucet");
-            match house.faucet_pay(&addr, FAUCET_ZAT) {
+            // The house's coins may be confirming after a restock: wait for them a while
+            // rather than fail at once.
+            let started = now();
+            let mut said = false;
+            let paid = loop {
+                match house.faucet_pay(&addr, FAUCET_ZAT) {
+                    Ok(r) => break Ok(r),
+                    Err(e) if now() < started + 600 => {
+                        if !said {
+                            app.step(id, "Waiting for the faucet's coins to confirm (a few minutes)");
+                            said = true;
+                        }
+                        house.push_event(json!({ "event": "log", "text": format!("faucet waits: {e:#}") }));
+                        thread::sleep(Duration::from_secs(30));
+                    }
+                    Err(e) => break Err(e),
+                }
+            };
+            match paid {
                 Ok(r) => {
                     app.add_activity(json!({ "kind": "faucet", "txid": r["txid"], "amount_zat": FAUCET_ZAT, "text": "Received free test coins" }));
                     Ok(json!({ "txid": r["txid"], "amount_zat": FAUCET_ZAT }))
@@ -2026,9 +2044,12 @@ impl App {
         if self.listings_path().exists() && !self.shop_running() {
             self.shop_start(&json!({}))?;
         }
-        if listed + ready.len() + pending < HOUSE_STOCK {
+        // Make new items in one batch when stock runs low, not one by one after each sale:
+        // every mint spends the house's coins for a few blocks.
+        let have = listed + ready.len() + pending;
+        if have <= 2 {
             let n = self.cfg.lock().unwrap().minted;
-            let names: Vec<String> = (1..=(HOUSE_STOCK - listed - ready.len() - pending) as u64)
+            let names: Vec<String> = (1..=(HOUSE_STOCK - have) as u64)
                 .map(|i| format!("Ticket #{}", n + i))
                 .collect();
             self.mint_now(None, &names)?;
