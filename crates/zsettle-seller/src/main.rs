@@ -57,6 +57,9 @@ const MAX_HTTP_CONNECTIONS: usize = 32;
 /// Envelopes one pass may leave waiting for a later pass; beyond this they are refused, so a
 /// flood of unproven envelopes cannot fill the inbox up to its cap.
 const MAX_DEFERRED: usize = 100;
+/// Blocks a deferred envelope may wait for the chain view to catch up with it; every honest
+/// reason to defer resolves within a few blocks, so a longer wait is given up.
+const DEFER_MAX_BLOCKS: u32 = 10;
 /// Content tags whose proof was verified, kept in memory; cleared when this many.
 const MAX_VERIFIED_TAGS: usize = 10_000;
 /// Filed envelopes and signed replies carry buyers' note nullifiers: deleted after this long.
@@ -925,6 +928,7 @@ fn main() -> Result<()> {
                 sync_cmd: sync_cmd.as_deref(),
                 verified: RefCell::new(HashSet::new()),
                 deferred: std::cell::Cell::new(0),
+                deferred_since: RefCell::new(std::collections::HashMap::new()),
             };
             if let Some(addr) = listen {
                 let listener = std::net::TcpListener::bind(&addr)
@@ -980,6 +984,8 @@ struct Service<'a> {
     verified: RefCell<HashSet<String>>,
     /// Envelopes deferred in the current pass.
     deferred: std::cell::Cell<usize>,
+    /// Chain tip at which each waiting envelope (by file name) was first deferred.
+    deferred_since: RefCell<std::collections::HashMap<String, u32>>,
 }
 
 impl Service<'_> {
@@ -1029,7 +1035,17 @@ impl Service<'_> {
             l.sign(self.ask, max_scanned_height(&db)?.unwrap_or(0))?;
             l.write(self.listings)?;
         }
-        for path in self.envelopes()? {
+        let paths = self.envelopes()?;
+        {
+            let names: HashSet<String> = paths
+                .iter()
+                .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_string))
+                .collect();
+            self.deferred_since
+                .borrow_mut()
+                .retain(|name, _| names.contains(name));
+        }
+        for path in paths {
             if let Err(e) = self.handle(&db, &l, &anchors, &path) {
                 println!(
                     "{}",
@@ -1040,7 +1056,8 @@ impl Service<'_> {
         Ok(())
     }
 
-    /// Envelopes waiting in the inbox, oldest name first, skipping files still being written.
+    /// Envelopes waiting in the inbox, in arrival order (then by name), skipping files still
+    /// being written.
     fn envelopes(&self) -> Result<Vec<PathBuf>> {
         let now = SystemTime::now();
         let mut paths: Vec<PathBuf> = fs::read_dir(self.inbox)
@@ -1052,7 +1069,7 @@ impl Service<'_> {
             .filter(|e| settled(e, now))
             .map(|e| e.path())
             .collect();
-        paths.sort();
+        paths.sort_by_cached_key(|p| (fs::metadata(p).and_then(|m| m.modified()).ok(), p.clone()));
         Ok(paths)
     }
 
@@ -1105,6 +1122,19 @@ impl Service<'_> {
             }
             Err(Refusal::Reject(reason)) => self.reject(path, reason),
             Err(Refusal::Defer(reason)) => {
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("envelope")
+                    .to_string();
+                let tip = last_tip(db);
+                let since = *self.deferred_since.borrow_mut().entry(name).or_insert(tip);
+                if tip > since.saturating_add(DEFER_MAX_BLOCKS) {
+                    return self.reject(
+                        path,
+                        format!("refused: waited {DEFER_MAX_BLOCKS} blocks for the chain view to catch up with this offer, and it did not; build the offer again"),
+                    );
+                }
                 if self.deferred.get() >= MAX_DEFERRED {
                     return self.reject(
                         path,
@@ -1137,12 +1167,8 @@ impl Service<'_> {
             .to_string();
         let kept = fs::read_dir(&rejected).map(|d| d.count()).unwrap_or(0);
         if kept < MAX_REASON_FILES {
-            let mut why = rejected.join(format!("{name}.reason.txt"));
-            let mut n = 1u32;
-            while why.exists() {
-                why = rejected.join(format!("{name}.{n}.reason.txt"));
-                n += 1;
-            }
+            // The latest judgement of these bytes is the one served.
+            let why = rejected.join(format!("{name}.reason.txt"));
             fs::write(&why, &reason).with_context(|| format!("writing {}", why.display()))?;
         }
         fs::remove_file(path).with_context(|| format!("removing {}", path.display()))?;
@@ -1605,6 +1631,12 @@ fn handle_http(mut stream: std::net::TcpStream, inbox: &Path, outbox: &Path, lis
             let stored = if file.exists() {
                 Ok(())
             } else {
+                // A refusal of an earlier copy of these bytes must not answer for this one.
+                let _ = fs::remove_file(
+                    inbox
+                        .join("rejected")
+                        .join(format!("{tag}.pczt.reason.txt")),
+                );
                 write_atomic(&file, &body)
             };
             match stored {
@@ -1619,11 +1651,12 @@ fn handle_http(mut stream: std::net::TcpStream, inbox: &Path, outbox: &Path, lis
                     );
                 }
                 Err(e) => {
+                    eprintln!("cannot store an offer: {e:#}");
                     let _ = respond(
                         &mut stream,
                         500,
                         "text/plain",
-                        format!("cannot store the offer: {e:#}").as_bytes(),
+                        b"cannot store the offer now; send it again later",
                     );
                 }
             }
@@ -1652,12 +1685,13 @@ fn handle_http(mut stream: std::net::TcpStream, inbox: &Path, outbox: &Path, lis
                 .join(format!("{tag}.pczt.reason.txt"));
             if let Ok(bytes) = fs::read(&signed) {
                 let _ = respond(&mut stream, 200, "application/octet-stream", &bytes);
-            } else if let Ok(why) = fs::read_to_string(&reason) {
-                let _ = respond(&mut stream, 410, "text/plain", why.as_bytes());
             } else if inbox.join(format!("{tag}.pczt")).exists()
                 || inbox.join("done").join(format!("{tag}.pczt")).exists()
             {
+                // An envelope under judgement wins over a stale reason from an earlier copy.
                 let _ = respond(&mut stream, 202, "text/plain", b"pending");
+            } else if let Ok(why) = fs::read_to_string(&reason) {
+                let _ = respond(&mut stream, 410, "text/plain", why.as_bytes());
             } else {
                 let _ = respond(
                     &mut stream,

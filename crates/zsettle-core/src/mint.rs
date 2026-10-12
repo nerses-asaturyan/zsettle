@@ -255,6 +255,12 @@ pub fn mint(
     if names.is_empty() {
         return Err(anyhow!("nothing to mint: give at least one --name"));
     }
+    if value_zat < crate::item::MIN_ITEM_VALUE {
+        return Err(anyhow!(
+            "item value {value_zat} zat is below the minimum of {} (a smaller note could never be traded)",
+            crate::item::MIN_ITEM_VALUE
+        ));
+    }
     let mut payments = Vec::with_capacity(names.len());
     for name in &names {
         let to = item_address(db, wallet.network, item_account)?;

@@ -57,7 +57,7 @@ pub enum PolicyError {
     #[error("the transaction has no expiry height; a signature would never lapse")]
     NoExpiry,
     /// The expiry height is not after the chain tip the seller sees.
-    #[error("expiry height {expiry} is not after the chain tip {tip}")]
+    #[error("expiry height {expiry} is not after the chain tip")]
     Expired {
         /// Expiry height in the PCZT.
         expiry: u32,
@@ -65,7 +65,7 @@ pub enum PolicyError {
         tip: u32,
     },
     /// Expiry too far in the future (free option for the buyer).
-    #[error("expiry height {expiry} exceeds tip {tip} by more than {max_delta} blocks")]
+    #[error("expiry height {expiry} is more than {max_delta} blocks past the chain tip")]
     ExpiryTooLong {
         /// Expiry height in the PCZT.
         expiry: u32,
