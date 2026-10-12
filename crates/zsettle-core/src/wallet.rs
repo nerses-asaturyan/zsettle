@@ -571,6 +571,25 @@ pub fn init_wallet(
     })
 }
 
+/// Write `env.sh` (export lines for `source`) and `env.ps1` (PowerShell assignments) into the
+/// wallet directory, so that later commands need none of the flags these variables stand for.
+/// Returns the path of `env.sh` and its text.
+pub fn write_env_files(wallet: &Path, vars: &[(&str, String)]) -> Result<(PathBuf, String)> {
+    let sh: String = vars
+        .iter()
+        .map(|(k, v)| format!("export {k}='{}'\n", v.replace('\'', "'\\''")))
+        .collect();
+    let ps1: String = vars
+        .iter()
+        .map(|(k, v)| format!("$env:{k} = '{}'\n", v.replace('\'', "''")))
+        .collect();
+    let sh_path = wallet.join("env.sh");
+    fs::write(&sh_path, &sh).with_context(|| format!("writing {}", sh_path.display()))?;
+    let ps1_path = wallet.join("env.ps1");
+    fs::write(&ps1_path, &ps1).with_context(|| format!("writing {}", ps1_path.display()))?;
+    Ok((sh_path, sh))
+}
+
 /// Write a file readable by its owner only (on Unix), replacing any previous content.
 pub fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut options = fs::OpenOptions::new();

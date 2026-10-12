@@ -134,6 +134,35 @@ enum Cmd {
         #[arg(long)]
         account: String,
     },
+    /// Send ZEC from the payout account to any address: cash out, or fund a counterparty.
+    Pay {
+        /// Wallet directory.
+        #[arg(long, env = "ZSETTLE_WALLET")]
+        wallet: PathBuf,
+        /// UUID of the paying account.
+        #[arg(long, env = "ZSETTLE_PAYOUT_ACCOUNT")]
+        account: String,
+        /// ZIP 32 account index of the paying account.
+        #[arg(long, default_value_t = 0)]
+        account_index: u32,
+        /// age identity file that decrypts the wallet's mnemonic. Omit it for a
+        /// passphrase-protected wallet: the passphrase is asked for, or taken from
+        /// ZSETTLE_PASSPHRASE.
+        #[arg(long, env = "ZSETTLE_IDENTITY")]
+        identity: Option<PathBuf>,
+        /// Recipient unified address.
+        #[arg(long)]
+        to: String,
+        /// Amount, in zatoshis or ZEC (`0.001`, `0.001 ZEC`).
+        #[arg(long, value_parser = zsettle_core::parse_zat)]
+        amount: u64,
+        /// Optional memo.
+        #[arg(long)]
+        memo: Option<String>,
+        /// lightwalletd server URL.
+        #[arg(long, default_value = DEFAULT_SERVER)]
+        server: String,
+    },
     /// Sync the wallet with a lightwalletd server (no other tool needed).
     Sync {
         /// Wallet directory.
@@ -246,7 +275,7 @@ enum Cmd {
         #[arg(long, default_value_t = 0)]
         payout_account_index: u32,
         /// Listings file to drop the item from (signed again).
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_LISTINGS")]
         listings: Option<PathBuf>,
         /// Confirmations required on the notes.
         #[arg(long, default_value_t = 3)]
@@ -268,7 +297,7 @@ enum Cmd {
         #[arg(long, env = "ZSETTLE_IDENTITY")]
         identity: Option<PathBuf>,
         /// Listings file.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_LISTINGS")]
         listings: PathBuf,
         /// Incoming (redacted) trade PCZT.
         #[arg(long)]
@@ -302,7 +331,7 @@ enum Cmd {
         #[arg(long, env = "ZSETTLE_IDENTITY")]
         identity: Option<PathBuf>,
         /// Listings file (kept in sync with the chain: sold items removed).
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_LISTINGS")]
         listings: PathBuf,
         /// Directory watched for `*.pczt` envelopes.
         #[arg(long)]
@@ -373,19 +402,30 @@ fn main() -> Result<()> {
                     "next": "send ZEC to `fund`, then `zsettle-seller sync`; `--payout-account` is the first UUID, `--item-account` the second (index 1)",
                 })
             );
-            let env = format!(
-                "export ZSETTLE_WALLET={}\nexport ZSETTLE_PAYOUT_ACCOUNT={}\nexport ZSETTLE_ITEM_ACCOUNT={}\nexport ZSETTLE_ITEM_ACCOUNT_INDEX=1{}\n",
-                wallet.display(),
-                created.accounts[0].account,
-                created.accounts[1].account,
-                identity.as_ref().map(|i| format!("\nexport ZSETTLE_IDENTITY={}", i.display())).unwrap_or_default()
-            );
-            let env_path = wallet.join("env.sh");
-            fs::write(&env_path, &env)
-                .with_context(|| format!("writing {}", env_path.display()))?;
+            let mut vars = vec![
+                ("ZSETTLE_WALLET", wallet.display().to_string()),
+                (
+                    "ZSETTLE_PAYOUT_ACCOUNT",
+                    created.accounts[0].account.to_string(),
+                ),
+                (
+                    "ZSETTLE_ITEM_ACCOUNT",
+                    created.accounts[1].account.to_string(),
+                ),
+                ("ZSETTLE_ITEM_ACCOUNT_INDEX", "1".to_string()),
+                (
+                    "ZSETTLE_LISTINGS",
+                    wallet.join("listings.json").display().to_string(),
+                ),
+            ];
+            if let Some(i) = &identity {
+                vars.push(("ZSETTLE_IDENTITY", i.display().to_string()));
+            }
+            let (env_path, env) = zsettle_core::wallet::write_env_files(&wallet, &vars)?;
             eprintln!(
-                "# later commands need no --wallet, --identity, --item-account or --payout-account after:\nsource {}\n{env}",
-                env_path.display()
+                "# later commands need no --wallet, --identity, --item-account, --payout-account or --listings after:\nsource {}\n{env}# PowerShell: . {}",
+                env_path.display(),
+                wallet.join("env.ps1").display()
             );
             Ok(())
         }
@@ -468,6 +508,35 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
+        Cmd::Pay {
+            wallet,
+            account,
+            account_index,
+            identity,
+            to,
+            amount,
+            memo,
+            server,
+        } => {
+            let wallet = Wallet::open(&wallet)?;
+            let mut db = wallet.db()?;
+            check_consensus_at_tip_blocking(&server, wallet.network)?;
+            let seed = wallet.seed(identity.as_deref())?;
+            let req = zsettle_core::mint::PayRequest {
+                from_account: parse_account(&account)?,
+                from_account_index: account_index,
+                to,
+                value_zat: amount,
+                memo,
+            };
+            let (bytes, txid) = zsettle_core::mint::pay(&wallet, &mut db, &seed, &req)?;
+            let response = zsettle_core::broadcast::send_raw_transaction_blocking(&server, bytes)?;
+            println!(
+                "{}",
+                serde_json::json!({ "txid": txid, "amount_zat": amount, "broadcast": response })
+            );
+            Ok(())
+        }
         Cmd::Items {
             wallet,
             item_account,
@@ -478,9 +547,10 @@ fn main() -> Result<()> {
                 zsettle_core::mint::unspent_notes(&wallet, &db, parse_account(&item_account)?)?;
             for n in &notes {
                 println!(
-                    "{}  {:>8} zat  mined {}",
+                    "{}  {:>8} zat ({})  mined {}",
                     n.note,
                     n.value_zat,
+                    zec(n.value_zat),
                     n.mined_height
                         .map(|h| h.to_string())
                         .unwrap_or_else(|| "pending".into())
@@ -1201,6 +1271,11 @@ impl Service<'_> {
 }
 
 /// The last height this wallet scanned, or zero.
+/// Zatoshis as ZEC, for people.
+fn zec(zat: u64) -> String {
+    format!("{} ZEC", zat as f64 / 1e8)
+}
+
 fn last_tip(db: &Db) -> u32 {
     max_scanned_height(db).ok().flatten().unwrap_or(0)
 }

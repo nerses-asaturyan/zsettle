@@ -16,32 +16,52 @@ jobs:
         include:
           - os: ubuntu-latest
             name: linux-x86_64
+            target: ""
           - os: macos-latest
             name: macos-arm64
+            target: ""
+          - os: macos-latest
+            name: macos-x86_64
+            target: x86_64-apple-darwin
           - os: windows-latest
             name: windows-x86_64
+            target: ""
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.93.1
+      - if: matrix.target != ''
+        run: rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --locked
+        with:
+          key: ${{ matrix.name }}
+      - if: matrix.target == ''
+        run: cargo build --release --locked
+      - if: matrix.target != ''
+        run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Collect
         shell: bash
         run: |
           mkdir -p dist
+          bin=target/release
+          if [ -n "${{ matrix.target }}" ]; then bin="target/${{ matrix.target }}/release"; fi
           ext=""
           if [ "${{ runner.os }}" = "Windows" ]; then ext=".exe"; fi
-          cp "target/release/zsettle$ext" "target/release/zsettle-seller$ext" dist/
-          cp README.md dist/
-          cp LICENSE-* dist/ 2>/dev/null || true
+          cp "$bin/zsettle$ext" "$bin/zsettle-seller$ext" dist/
+          cp README.md CHANGELOG.md LICENSE-APACHE LICENSE-MIT dist/
+          cp -r docs examples spec dist/
           if [ "${{ runner.os }}" = "Windows" ]; then
             7z a "zsettle-${{ matrix.name }}.zip" ./dist/* > /dev/null
           else
             tar -C dist -czf "zsettle-${{ matrix.name }}.tar.gz" .
           fi
+      - name: Contents
+        shell: bash
+        run: |
+          find dist -type f | sort
+          ls -l zsettle-${{ matrix.name }}.*
       - uses: actions/upload-artifact@v4
         with:
           name: zsettle-${{ matrix.name }}
