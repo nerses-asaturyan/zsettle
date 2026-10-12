@@ -90,6 +90,10 @@ struct Config {
     /// Shop each bought item came from, for its history.
     #[serde(default)]
     origins: HashMap<String, String>,
+    /// The listed note each bought item came from: its history starts there, since only the
+    /// seller's key opens it.
+    #[serde(default)]
+    origin_items: HashMap<String, String>,
     shop_listen: Option<String>,
 }
 
@@ -1127,6 +1131,7 @@ impl App {
                     cfg.names.insert(format!("{t}:{i}"), name.clone());
                 }
                 cfg.origins.insert(format!("{t}:{i}"), base.clone());
+                cfg.origin_items.insert(format!("{t}:{i}"), item.clone());
             }
             app.add_activity(json!({
                 "kind": "buy", "txid": txid, "price_zat": built["price_zat"], "fee_zat": built["fee_zat"],
@@ -1137,12 +1142,20 @@ impl App {
     }
 
     fn start_verify(self: &Arc<Self>, body: &Value) -> Result<Value> {
-        let item = field(body, "item")?;
+        let mine = field(body, "item")?;
+        let item = self
+            .cfg
+            .lock()
+            .unwrap()
+            .origin_items
+            .get(&mine)
+            .cloned()
+            .unwrap_or_else(|| mine.clone());
         // Which shops to read the item's keys from: the one named, else the one it was bought
         // from, else the shops opened lately, tried in turn.
         let named = field(body, "url").ok();
         let cfg = self.cfg.lock().unwrap().clone();
-        let candidates: Vec<String> = match named.or_else(|| cfg.origins.get(&item).cloned()) {
+        let candidates: Vec<String> = match named.or_else(|| cfg.origins.get(&mine).cloned()) {
             Some(u) => vec![u],
             None => cfg.sellers.iter().take(5).cloned().collect(),
         };
