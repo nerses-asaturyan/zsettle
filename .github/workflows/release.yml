@@ -49,7 +49,7 @@ jobs:
           if [ -n "${{ matrix.target }}" ]; then bin="target/${{ matrix.target }}/release"; fi
           ext=""
           if [ "${{ runner.os }}" = "Windows" ]; then ext=".exe"; fi
-          cp "$bin/zsettle$ext" "$bin/zsettle-seller$ext" dist/
+          cp "$bin/zsettle$ext" "$bin/zsettle-seller$ext" "$bin/zsettle-app$ext" dist/
           cp README.md CHANGELOG.md LICENSE-APACHE LICENSE-MIT dist/
           cp -r docs examples spec dist/
           if [ "${{ runner.os }}" = "Windows" ]; then

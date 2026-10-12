@@ -4,6 +4,7 @@ members = [
     "crates/zsettle-core",
     "crates/zsettle",
     "crates/zsettle-seller",
+    "crates/zsettle-app",
 ]
 
 [workspace.package]

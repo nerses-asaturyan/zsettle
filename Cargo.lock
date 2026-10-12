@@ -4742,6 +4742,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "zsettle-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "hex",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "ureq",
+ "zeroize",
+ "zsettle-core",
+]
+
+[[package]]
 name = "zsettle-core"
 version = "0.1.0"
 dependencies = [

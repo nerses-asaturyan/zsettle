@@ -21,6 +21,7 @@ The buyer builds and proves the whole transaction holding only viewing keys. The
 |---|---|
 | `zsettle-core` | library: items, signed listings, two-party bundle, PCZT roles, seller policy, proof check, wallet sync, provenance verifier, lightwalletd client |
 | `zsettle` | buyer and verifier CLI: `init`, `accounts`, `address`, `pay`, `list`, `sync`, `import-listing`, `buy`, `finish`, `broadcast`, `rotate`, `consolidate`, `notes`, `verify` |
+| `zsettle-app` | local web page over the two binaries: passkey wallet, market, buy and sell |
 | `zsettle-seller` | seller service: `init`, `accounts`, `address`, `pay`, `sync`, `new-item-account`, `mint`, `items`, `publish`, `cancel`, `sign`, `serve` (syncs, reconciles listings with the chain, verifies proofs, signs only the item action) |
 
 ## Install
@@ -33,6 +34,17 @@ tar xzf zsettle-linux-x86_64.tar.gz    # Windows: unzip zsettle-windows-x86_64.z
 ```
 
 To build instead: Rust 1.93 and `cargo build --release --locked` ([docs/SETUP.md](docs/SETUP.md)).
+
+## The app
+
+`zsettle-app` is the same tool with a page in your browser: a wallet unlocked by a passkey (or a passphrase), a market where you open a seller's shop by its address, one-click buying with a live progress view, and a seller tab to mint items, set prices, open the shop and watch offers arrive.
+
+```
+zsettle-app                        # prints a http://localhost:7070/#token=… link to open
+zsettle-app --profile bob --port 7071   # a second profile, to play buyer and seller on one machine
+```
+
+It listens on this machine only, keeps the wallet in `~/.zsettle-app/<profile>`, and runs the `zsettle` and `zsettle-seller` binaries next to it for every action, so it adds no cryptography of its own. The passkey's PRF output is the wallet's passphrase: the browser derives it on each unlock and nothing stores it. Losing the passkey loses the wallet, so keep amounts small.
 
 ## One minute, no wallet
 
