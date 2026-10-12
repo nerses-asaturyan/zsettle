@@ -6,7 +6,7 @@
 //!    recent tree roots (a proof against a synthetic tree is worthless to the seller);
 //! 2. exactly one action spends the listed item note (matched by nullifier) and that
 //!    action carries a spend randomizer, so it can be signed; no other action spends any
-//!    note of the seller's wallet;
+//!    note of the listed item account;
 //! 3. the outputs that decrypt under the seller's incoming viewing key and are worth more
 //!    than the ZIP 317 marginal fee (anything smaller is dust no wallet spends) pay at least
 //!    the listed price;
@@ -42,8 +42,8 @@ pub enum PolicyError {
     /// The item action has no spend randomizer, so it cannot be signed.
     #[error("item action {0} has no spend randomizer")]
     MissingAlpha(usize),
-    /// An action spends another note of the seller's wallet.
-    #[error("action {0} spends another note of this wallet")]
+    /// An action spends another note of the listed item account.
+    #[error("action {0} spends another note of the listed item account")]
     ExtraSellerSpend(usize),
     /// Payment output missing or below the listed price.
     #[error("payment {got} zat below price {want} zat")]
