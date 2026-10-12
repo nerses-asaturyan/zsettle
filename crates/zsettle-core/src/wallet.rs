@@ -348,30 +348,6 @@ pub fn account_unspent_nullifiers(
         .collect())
 }
 
-/// Nullifiers of every unspent Ironwood note this wallet can spend: the notes of its derived
-/// accounts. Notes of accounts imported as viewing keys (consignments held for resale, or a
-/// counterparty's listing) are seen here but belong to someone else, so a trade that spends
-/// one of them is not an extra seller spend.
-pub fn unspent_ironwood_nullifiers(db: &Db) -> Result<Vec<orchard::note::Nullifier>> {
-    let mut spendable = Vec::new();
-    for id in db.get_account_ids().map_err(|e| anyhow!("{e}"))? {
-        let account = db
-            .get_account(id)
-            .map_err(|e| anyhow!("{e}"))?
-            .ok_or_else(|| anyhow!("account {} not found", id.expose_uuid()))?;
-        if matches!(account.source(), AccountSource::Derived { .. }) {
-            spendable.push(id);
-        }
-    }
-    Ok(db
-        .get_ironwood_nullifiers(NullifierQuery::Unspent)
-        .map_err(|e| anyhow!("{e}"))?
-        .into_iter()
-        .filter(|(account, _)| spendable.contains(account))
-        .map(|(_, nf)| nf)
-        .collect())
-}
-
 /// Import a unified full viewing key as a view-only account, scanning from `birthday`.
 pub fn import_viewing_key(
     db: &mut Db,
