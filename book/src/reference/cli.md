@@ -27,6 +27,7 @@ Common values:
 | `finish` | Combine with the seller's signed copy, sign, extract, optionally broadcast. |
 | `broadcast` | Send a raw transaction file. |
 | `verify` | Trace an item's history with viewing keys only. |
+| `check-proof` | Check an ownership proof against your challenge and the chain. |
 | `rotate` | Retire the paying notes of offers that did not settle. |
 | `consolidate` | Merge an account's spendable notes into one. |
 | `pay` | Send ZEC to any unified address with an Orchard receiver. |
@@ -116,6 +117,21 @@ Common values:
 | `--to-height <height>` | chain tip | Stop scanning here. |
 | `--private` | off | Do not ask the server where the genesis transaction is; scan from the birthdays; no name. |
 
+### zsettle check-proof
+
+Checks a proof made by `zsettle-seller prove`. See [Ownership proofs](../how/ownership.md).
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--proof <path or url>` | required | The proof file, or an `http://` or `https://` URL. At most 16 KiB. |
+| `--challenge <text>` | required | The challenge you gave the holder. |
+| `--network <main\|test>` | `main` | Network the proof must be for. |
+| `--server <url>` | default server | |
+
+It prints JSON with `valid`, `held`, `note`, `name`, `challenge`, `signed_at_height`,
+`scanned_to` and, when the check fails, `reason`. The exit status is 0 only when the proof is
+valid and the note is held; otherwise 1.
+
 ### zsettle rotate
 
 | Flag | Default | Meaning |
@@ -174,6 +190,7 @@ Several commands share the **wallet flags**:
 | `items` | List the item account's unspent notes. |
 | `publish` | Create or update the signed listings file. |
 | `cancel` | Take an item off the market for good. |
+| `prove` | Sign an ownership proof for an item note, bound to a checker's challenge. |
 | `sign` | Check and sign one trade PCZT. |
 | `serve` | Run the seller service. |
 
@@ -251,6 +268,24 @@ Same flags as `zsettle init`: `--wallet`, `--identity` [`ZSETTLE_IDENTITY`], `--
 | `--payout-account-index <n>` | `0` | Signs the fee-paying spend. |
 | `--listings <file>` [`ZSETTLE_LISTINGS`] | | File to drop the item from. |
 | `--min-confirmations <n>` | `3` | |
+| `--server <url>` | default server | |
+| `--no-sync` | off | Skip the sync first. |
+
+### zsettle-seller prove
+
+Prints a signed [ownership proof](../how/ownership.md) for `zsettle check-proof`. The proof
+gives the checker the item account's viewing key: they can see every item that account has
+held. It does not need `--payout-account`.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--wallet <dir>` [`ZSETTLE_WALLET`] | required | |
+| `--item-account <uuid>` [`ZSETTLE_ITEM_ACCOUNT`] | required | |
+| `--item-account-index <n>` [`ZSETTLE_ITEM_ACCOUNT_INDEX`] | `1` | Derives the signing key. |
+| `--identity <file>` [`ZSETTLE_IDENTITY`] | | |
+| `--item-note <note>` | required | An unspent, mined note of the item account. |
+| `--challenge <text>` | required | The checker's text: 1 to 200 characters, no line breaks. |
+| `--out <file>` | | Also write the proof here. |
 | `--server <url>` | default server | |
 | `--no-sync` | off | Skip the sync first. |
 

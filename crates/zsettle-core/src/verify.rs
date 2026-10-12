@@ -93,6 +93,20 @@ pub struct Provenance {
     pub scanned_to: u32,
 }
 
+/// The starting note was not found with the supplied keys: it is not mined, not in the
+/// scanned range, or none of the keys decrypts it. [`trace_blocking`] returns it inside its
+/// error, so a caller can tell it from a failed connection with `downcast_ref`.
+#[derive(Debug)]
+pub struct NoteNotFound(pub String);
+
+impl std::fmt::Display for NoteNotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NoteNotFound {}
+
 struct Key {
     label: String,
     fvk: FullViewingKey,
@@ -242,7 +256,7 @@ async fn trace(
             .into_inner();
         let genesis_height = u32::try_from(raw.height)?;
         if genesis_height == 0 {
-            return Err(anyhow!("the genesis transaction is not mined yet"));
+            return Err(NoteNotFound("the genesis transaction is not mined yet".into()).into());
         }
         (from_height.max(genesis_height), Some(raw.data))
     };
@@ -287,9 +301,11 @@ async fn trace(
                     // Still looking for the genesis note.
                     if txid == genesis_txid && i as u32 == genesis.index {
                         let Some((k, note)) = ring.decrypt(&act) else {
-                            return Err(anyhow!(
+                            return Err(NoteNotFound(
                                 "the genesis note does not decrypt with any supplied consignment"
-                            ));
+                                    .into(),
+                            )
+                            .into());
                         };
                         hops.push(Hop {
                             txid: txid.clone(),
@@ -345,11 +361,11 @@ async fn trace(
         }
     }
     if hops.is_empty() {
-        return Err(anyhow!(
+        return Err(NoteNotFound(format!(
             "genesis note {}:{} not found between heights {from_height} and {tip}",
-            genesis.txid,
-            genesis.index
-        ));
+            genesis.txid, genesis.index
+        ))
+        .into());
     }
     let status = match (watch, broken) {
         (_, Some(txid)) => Status::LineageBroken { txid },

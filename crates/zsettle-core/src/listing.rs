@@ -160,21 +160,12 @@ impl Listings {
 
     /// The network the file is for.
     pub fn network(&self) -> Result<Network> {
-        match self.network.as_str() {
-            "main" => Ok(Network::MainNetwork),
-            "test" => Ok(Network::TestNetwork),
-            other => Err(anyhow!("unknown network {other}")),
-        }
+        network_from_name(&self.network)
     }
 
     /// The item account's Orchard full viewing key.
     pub fn item_fvk(&self) -> Result<FullViewingKey> {
-        let network = self.network()?;
-        UnifiedFullViewingKey::decode(&network, &self.item_ufvk)
-            .map_err(|e| anyhow!("decoding item viewing key: {e}"))?
-            .orchard()
-            .cloned()
-            .ok_or_else(|| anyhow!("the item viewing key has no Orchard component"))
+        decode_item_key(self.network()?, &self.item_ufvk)
     }
 
     /// Encode an Orchard full viewing key as a unified viewing key with that single
@@ -206,10 +197,7 @@ impl Listings {
     /// has.
     pub fn sign(&mut self, ask: &SpendAuthorizingKey, issued_at: u32) -> Result<()> {
         self.issued_at = issued_at;
-        // Randomizer zero: the signing key is `ask` itself and the verification key is `ak`.
-        let key = ask.randomize(&pasta_curves::pallas::Scalar::from(0u64));
-        let sig = key.sign(OsRng, &self.signing_bytes()?);
-        self.signature = Some(hex::encode(<[u8; 64]>::from(&sig)));
+        self.signature = Some(sign_message(ask, &self.signing_bytes()?));
         Ok(())
     }
 
@@ -219,18 +207,16 @@ impl Listings {
             .signature
             .as_deref()
             .ok_or_else(|| anyhow!("the listings file is not signed"))?;
-        let bytes: [u8; 64] = hex::decode(sig_hex)
-            .context("listings signature is not hex")?
-            .try_into()
-            .map_err(|_| anyhow!("listings signature must be 64 bytes"))?;
-        let fvk = self.item_fvk()?;
-        let ak: [u8; 32] = fvk.to_bytes()[..32]
-            .try_into()
-            .expect("a full viewing key starts with the 32-byte spend validating key");
-        let vk = VerificationKey::<SpendAuth>::try_from(ak)
-            .map_err(|_| anyhow!("the item viewing key has an invalid spend validating key"))?;
-        vk.verify(&self.signing_bytes()?, &Signature::from(bytes))
-            .map_err(|_| anyhow!("the listings signature does not verify: the file was altered, or it was not signed by the key that controls these items"))
+        verify_message(
+            &self.item_fvk()?,
+            sig_hex,
+            &self.signing_bytes()?,
+            "listings",
+        )
+        .map_err(|e| match e {
+            SignatureError::Malformed(e) => e,
+            SignatureError::Mismatch => anyhow!("the listings signature does not verify: the file was altered, or it was not signed by the key that controls these items"),
+        })
     }
 
     /// Short fingerprint of the item viewing key, for buyers to compare out of band: the
@@ -268,6 +254,73 @@ impl Listings {
         }
         changed
     }
+}
+
+/// Parse a network name as written in the files (`main` or `test`).
+pub(crate) fn network_from_name(name: &str) -> Result<Network> {
+    match name {
+        "main" => Ok(Network::MainNetwork),
+        "test" => Ok(Network::TestNetwork),
+        other => Err(anyhow!("unknown network {other}")),
+    }
+}
+
+/// The network name written in the files.
+pub(crate) fn network_name(network: Network) -> &'static str {
+    match network {
+        Network::MainNetwork => "main",
+        Network::TestNetwork => "test",
+    }
+}
+
+/// Decode an item viewing key and take its Orchard component.
+pub(crate) fn decode_item_key(network: Network, ufvk: &str) -> Result<FullViewingKey> {
+    UnifiedFullViewingKey::decode(&network, ufvk)
+        .map_err(|e| anyhow!("decoding item viewing key: {e}"))?
+        .orchard()
+        .cloned()
+        .ok_or_else(|| anyhow!("the item viewing key has no Orchard component"))
+}
+
+/// Sign a message with the item account's spend authorizing key; returns the signature as hex.
+pub(crate) fn sign_message(ask: &SpendAuthorizingKey, msg: &[u8]) -> String {
+    // Randomizer zero: the signing key is `ask` itself and the verification key is `ak`.
+    let key = ask.randomize(&pasta_curves::pallas::Scalar::from(0u64));
+    let sig = key.sign(OsRng, msg);
+    hex::encode(<[u8; 64]>::from(&sig))
+}
+
+/// Why a signature was refused.
+pub(crate) enum SignatureError {
+    /// The signature or the key cannot be read.
+    Malformed(anyhow::Error),
+    /// Well formed, but not a signature over this message by this key.
+    Mismatch,
+}
+
+/// Check a hex signature over a message against the spend validating key `ak`, the first 32
+/// bytes of the viewing key. `what` names the signed file in error messages.
+pub(crate) fn verify_message(
+    fvk: &FullViewingKey,
+    sig_hex: &str,
+    msg: &[u8],
+    what: &str,
+) -> std::result::Result<(), SignatureError> {
+    let bytes: [u8; 64] = hex::decode(sig_hex)
+        .with_context(|| format!("{what} signature is not hex"))
+        .map_err(SignatureError::Malformed)?
+        .try_into()
+        .map_err(|_| SignatureError::Malformed(anyhow!("{what} signature must be 64 bytes")))?;
+    let ak: [u8; 32] = fvk.to_bytes()[..32]
+        .try_into()
+        .expect("a full viewing key starts with the 32-byte spend validating key");
+    let vk = VerificationKey::<SpendAuth>::try_from(ak).map_err(|_| {
+        SignatureError::Malformed(anyhow!(
+            "the item viewing key has an invalid spend validating key"
+        ))
+    })?;
+    vk.verify(msg, &Signature::from(bytes))
+        .map_err(|_| SignatureError::Mismatch)
 }
 
 #[cfg(test)]

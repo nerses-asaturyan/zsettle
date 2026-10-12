@@ -19,6 +19,7 @@
   - [Items as notes](how/items.md)
   - [Listings and signatures](how/listings.md)
   - [Item history](how/history.md)
+  - [Ownership proofs](how/ownership.md)
   - [Architecture](how/architecture.md)
 - [Privacy](privacy.md)
 - [Security model and limits](security.md)
