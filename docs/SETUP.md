@@ -13,11 +13,11 @@ Binaries: `target/release/zsettle` (buyer and verifier) and `target/release/zset
 ## Wallets
 
 ```
-zsettle-seller init --wallet ~/.zsettle/seller --identity ~/.zsettle/seller/key.txt
-zsettle        init --wallet ~/.zsettle/buyer  --identity ~/.zsettle/buyer/key.txt
+zsettle-seller init --wallet ~/.zsettle/seller --identity ~/.zsettle/seller.key
+zsettle        init --wallet ~/.zsettle/buyer  --identity ~/.zsettle/buyer.key
 ```
 
-Each command makes a 24-word mnemonic, encrypts it to a new age identity written to `key.txt`, creates the database, and derives two accounts: index 0 pays and receives payments (`payout` in the seller wallet, `buyer` in the buyer wallet), index 1 holds items (`item`). Items live in their own ZIP 32 account so that publishing its viewing key reveals nothing about the rest of the wallet. The output lists the account UUIDs the other commands take and a fresh address to fund. Keep `key.txt`: it is the only way to decrypt the mnemonic, and the mnemonic is the only backup of the funds.
+Each command makes a 24-word mnemonic, encrypts it to a new age identity written to `key.txt`, creates the database, and derives two accounts: index 0 pays and receives payments (`payout` in the seller wallet, `buyer` in the buyer wallet), index 1 holds items (`item`). Items live in their own ZIP 32 account so that publishing its viewing key reveals nothing about the rest of the wallet. The output lists the account UUIDs the other commands take and a fresh address to fund. Keep the key file, and keep it apart from the wallet directory and its backups: it is the only way to decrypt the mnemonic, and the mnemonic is the only backup of the funds.
 
 ```
 zsettle accounts --wallet ~/.zsettle/buyer
@@ -41,7 +41,15 @@ This is the `zcash_client_backend` synchronizer with an in-memory block cache: i
 
 ## Funding
 
-Send ZEC to the address `init` printed, or to a fresh one from `zsettle address`. A trade costs the price plus the ZIP 317 fee: 15,000 zat with a change output, 10,000 when the paying note is exact. A mint costs 10,000 zat plus 5,000 for every input beyond the first. Prices must be above 5,000 zat, since a smaller payment is dust that wallets refuse to spend. Everything in [TRADE.md](TRADE.md) was funded with 161,000 zat.
+Send ZEC to the address `init` printed, or to a fresh one from `zsettle address`. A note received from another wallet becomes spendable after ten confirmations (about 13 minutes on mainnet); the wallet's own change after three. `mint` and `buy` say so when asked too early. A trade costs the price plus the ZIP 317 fee: 15,000 zat with a change output, 10,000 when the paying note is exact. A mint costs 10,000 zat plus 5,000 for every input beyond the first. Prices must be above 5,000 zat, since a smaller payment is dust that wallets refuse to spend. Everything in [TRADE.md](TRADE.md) was funded with 161,000 zat.
+
+## Taking money out
+
+```
+zsettle pay --wallet ~/.zsettle/seller --account <PAYOUT_ACCOUNT_UUID> --identity ~/.zsettle/seller.key --to <unified address> --amount <zatoshis>
+```
+
+Sends from any account of a wallet to any address, a phone wallet's included (`--memo` optional). The same command funds a counterparty's wallet.
 
 ## Files the tools write
 

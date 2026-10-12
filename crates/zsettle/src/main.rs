@@ -155,8 +155,9 @@ enum Cmd {
         /// UUID of the imported, view-only account that holds the item note (auto-detected from the listings).
         #[arg(long)]
         item_account: Option<String>,
-        /// UUID of the account of this wallet that receives the item (default: the buyer account).
-        /// Use a dedicated item account if you may resell the item later.
+        /// Account that receives the item. Default: the wallet's `item` account, as `init`
+        /// makes it, so that items stay apart from payments; the paying account if there is
+        /// none.
         #[arg(long)]
         receive_account: Option<String>,
         /// The buyer's note that pays, as <txid>:<output index> (default: the largest spendable
@@ -187,9 +188,10 @@ enum Cmd {
         /// Where to write the full PCZT. It holds your viewing key and witnesses: keep it private.
         #[arg(long)]
         out: PathBuf,
-        /// Where to write the redacted copy for the seller (drop it in the seller's inbox).
+        /// Where to write the redacted copy for the seller: drop it in the seller's inbox, or
+        /// let `--seller-url` post it. Default: `<out>.seller.pczt`.
         #[arg(long)]
-        seller_copy: PathBuf,
+        seller_copy: Option<PathBuf>,
         /// Seller service URL (http://host:port). The redacted copy is also posted to
         /// `<url>/offer`, and the reply URL to pass to `finish --signed` is printed.
         #[arg(long)]
@@ -444,6 +446,11 @@ fn fetch_reply(url: &str, wait_secs: u64) -> Result<Vec<u8>> {
     }
 }
 
+/// Zatoshis as ZEC, for people.
+fn zec(zat: u64) -> String {
+    format!("{} ZEC", zat as f64 / 1e8)
+}
+
 fn check_server_before_sending(server: &str, network: Network) -> Result<()> {
     check_consensus_at_tip_blocking(server, network)?;
     Ok(())
@@ -476,8 +483,12 @@ fn main() -> Result<()> {
             );
             for i in &l.items {
                 println!(
-                    "{}  {:>10} zat  expiry<= {:>3} blocks  {}",
-                    i.note, i.price_zat, i.max_expiry_delta, i.name
+                    "{}  {:>10} zat ({}) expiry<= {:>3} blocks  {}",
+                    i.note,
+                    i.price_zat,
+                    zec(i.price_zat),
+                    i.max_expiry_delta,
+                    i.name
                 );
             }
             Ok(())
@@ -753,6 +764,11 @@ fn main() -> Result<()> {
             let redacted =
                 pczt_ops::redact_for_seller(built.pczt.clone(), built.item_action_index)?;
             let envelope = pczt_ops::to_bytes(&redacted)?;
+            let seller_copy = seller_copy.unwrap_or_else(|| {
+                let mut p = out.clone().into_os_string();
+                p.push(".seller.pczt");
+                PathBuf::from(p)
+            });
             fs::write(&seller_copy, &envelope)
                 .with_context(|| format!("writing {}", seller_copy.display()))?;
             reserve_note(&w, buyer_note, built.expiry_height)?;

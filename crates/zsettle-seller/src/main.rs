@@ -184,8 +184,12 @@ enum Cmd {
     },
     /// List the item account's unspent notes (the references to publish).
     Items {
-        #[command(flatten)]
-        w: WalletArgs,
+        /// Wallet directory.
+        #[arg(long)]
+        wallet: PathBuf,
+        /// UUID of the item account.
+        #[arg(long)]
+        item_account: String,
     },
     /// Create or update the signed public listings file for this wallet's item account.
     Publish {
@@ -315,7 +319,8 @@ enum Cmd {
         /// Shell command to run instead of the built-in sync.
         #[arg(long)]
         sync_cmd: Option<String>,
-        /// Also take offers over HTTP at this address (for example 127.0.0.1:8900): `POST /offer`
+        /// Also serve over HTTP at this address (for example 127.0.0.1:8900): `GET /listings`
+        /// returns the signed listings file; `POST /offer`
         /// with the envelope as the body answers `{"tag": …}`; `GET /reply/<tag>` returns the
         /// signed copy once it exists (202 while pending, 410 with the reason if refused). Put
         /// a TLS reverse proxy or a Tor hidden service in front of it for the internet.
@@ -440,19 +445,26 @@ fn main() -> Result<()> {
                 value_zat: value,
                 name: name.clone(),
             };
-            let (bytes, txid) = zsettle_core::mint::mint(&wallet, &mut db, &seed, &req)?;
+            let (bytes, txid, index) = zsettle_core::mint::mint(&wallet, &mut db, &seed, &req)?;
             let response = zsettle_core::broadcast::send_raw_transaction_blocking(&server, bytes)?;
             println!(
                 "{}",
-                serde_json::json!({ "txid": txid, "name": name, "value_zat": value, "broadcast": response })
+                serde_json::json!({
+                    "txid": txid, "name": name, "value_zat": value, "broadcast": response,
+                    "note": index.map(|i| format!("{txid}:{i}")),
+                    "next": "once mined (and synced): publish --item-note <note>",
+                })
             );
             Ok(())
         }
-        Cmd::Items { w } => {
-            let wallet = Wallet::open(&w.wallet)?;
+        Cmd::Items {
+            wallet,
+            item_account,
+        } => {
+            let wallet = Wallet::open(&wallet)?;
             let db = wallet.db()?;
             let notes =
-                zsettle_core::mint::unspent_notes(&wallet, &db, parse_account(&w.item_account)?)?;
+                zsettle_core::mint::unspent_notes(&wallet, &db, parse_account(&item_account)?)?;
             for n in &notes {
                 println!(
                     "{}  {:>8} zat  mined {}",
@@ -843,8 +855,8 @@ fn main() -> Result<()> {
                     "{}",
                     serde_json::json!({ "event": "listening", "address": addr })
                 );
-                let (inbox, outbox) = (inbox.clone(), outbox.clone());
-                thread::spawn(move || serve_http(listener, inbox, outbox));
+                let (inbox, outbox, listings) = (inbox.clone(), outbox.clone(), listings.clone());
+                thread::spawn(move || serve_http(listener, inbox, outbox, listings));
             }
             let poll = poll_secs.max(1);
             let mut delay = poll;
@@ -1295,7 +1307,7 @@ fn settled(entry: &fs::DirEntry, now: SystemTime) -> bool {
 /// read, a bounded number of connections, one request per connection. An envelope lands in
 /// the inbox under its content tag, so the directory loop handles it like a dropped file,
 /// and each buyer can fetch only the reply to its own envelope.
-fn serve_http(listener: std::net::TcpListener, inbox: PathBuf, outbox: PathBuf) {
+fn serve_http(listener: std::net::TcpListener, inbox: PathBuf, outbox: PathBuf, listings: PathBuf) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     let live = Arc::new(AtomicUsize::new(0));
@@ -1306,16 +1318,21 @@ fn serve_http(listener: std::net::TcpListener, inbox: PathBuf, outbox: PathBuf) 
             continue;
         }
         live.fetch_add(1, Ordering::Relaxed);
-        let (live, inbox, outbox) = (Arc::clone(&live), inbox.clone(), outbox.clone());
+        let (live, inbox, outbox, listings) = (
+            Arc::clone(&live),
+            inbox.clone(),
+            outbox.clone(),
+            listings.clone(),
+        );
         thread::spawn(move || {
-            handle_http(stream, &inbox, &outbox);
+            handle_http(stream, &inbox, &outbox, &listings);
             live.fetch_sub(1, Ordering::Relaxed);
         });
     }
 }
 
-/// One HTTP request: `POST /offer` or `GET /reply/<tag>`.
-fn handle_http(mut stream: std::net::TcpStream, inbox: &Path, outbox: &Path) {
+/// One HTTP request: `GET /listings`, `POST /offer` or `GET /reply/<tag>`.
+fn handle_http(mut stream: std::net::TcpStream, inbox: &Path, outbox: &Path, listings: &Path) {
     use std::io::Read;
     let timeout = Some(Duration::from_secs(HTTP_TIMEOUT_SECS));
     if stream.set_read_timeout(timeout).is_err() || stream.set_write_timeout(timeout).is_err() {
@@ -1426,6 +1443,14 @@ fn handle_http(mut stream: std::net::TcpStream, inbox: &Path, outbox: &Path) {
                 }
             }
         }
+        ("GET", "/listings") => match fs::read(listings) {
+            Ok(bytes) => {
+                let _ = respond(&mut stream, 200, "application/json", &bytes);
+            }
+            Err(_) => {
+                let _ = respond(&mut stream, 404, "text/plain", b"no listings file");
+            }
+        },
         ("GET", p) if p.starts_with("/reply/") => {
             let tag = &p["/reply/".len()..];
             if tag.len() != 32
@@ -1453,7 +1478,7 @@ fn handle_http(mut stream: std::net::TcpStream, inbox: &Path, outbox: &Path) {
                 &mut stream,
                 404,
                 "text/plain",
-                b"zsettle seller: POST /offer, GET /reply/<tag>",
+                b"zsettle seller: GET /listings, POST /offer, GET /reply/<tag>",
             );
         }
     }
