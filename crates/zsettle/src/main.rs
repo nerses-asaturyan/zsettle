@@ -381,18 +381,42 @@ fn parse_network(name: &str) -> Result<Network> {
 }
 
 /// Refuse to send when the server is on a consensus branch this build does not sign for.
-/// An HTTP client that follows no redirects: an offer must reach the service itself.
-fn http_agent() -> ureq::Agent {
-    ureq::builder()
+/// An HTTP client that follows no redirects: an offer must reach the service itself. A proxy
+/// named by `ALL_PROXY`, `HTTPS_PROXY` or `HTTP_PROXY` (Tor: `socks5://127.0.0.1:9050`, also
+/// written `socks5h://`) must be usable, or the command stops: a proxy the transport cannot
+/// parse must never turn into a direct connection.
+fn http_agent() -> Result<ureq::Agent> {
+    let mut builder = ureq::builder()
         .redirects(0)
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
+        .timeout(std::time::Duration::from_secs(30));
+    for var in [
+        "ALL_PROXY",
+        "all_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+    ] {
+        let Ok(value) = std::env::var(var) else {
+            continue;
+        };
+        if value.trim().is_empty() {
+            continue;
+        }
+        let url = value.trim().replacen("socks5h://", "socks5://", 1);
+        let proxy = ureq::Proxy::new(&url).map_err(|e| {
+            anyhow!("{var} names a proxy this tool cannot use ({e}); nothing was sent")
+        })?;
+        builder = builder.proxy(proxy);
+        break;
+    }
+    Ok(builder.build())
 }
 
 /// Post the redacted copy to the seller service; returns the URL its reply will appear at.
 fn post_offer(seller_url: &str, envelope: &[u8]) -> Result<String> {
     let base = seller_url.trim_end_matches('/');
-    let resp = http_agent()
+    let resp = http_agent()?
         .post(&format!("{base}/offer"))
         .set("Content-Type", "application/octet-stream")
         .send_bytes(envelope)
@@ -422,7 +446,7 @@ fn fetch_reply(url: &str, wait_secs: u64) -> Result<Vec<u8>> {
     use std::io::Read;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
     loop {
-        match http_agent().get(url).call() {
+        match http_agent()?.get(url).call() {
             Ok(resp) if resp.status() == 200 => {
                 let mut bytes = Vec::new();
                 resp.into_reader()
@@ -463,10 +487,16 @@ fn read_listings(arg: &std::path::Path, verified: bool) -> Result<Listings> {
         };
     }
     let url: &str = text.as_ref();
-    let resp = http_agent()
+    let resp = http_agent()?
         .get(url)
         .call()
         .map_err(|e| anyhow!("fetching the listings from {url}: {e}"))?;
+    if resp.status() != 200 {
+        return Err(anyhow!(
+            "fetching the listings from {url}: answer {} (redirects are not followed; give the final URL)",
+            resp.status()
+        ));
+    }
     let mut body = String::new();
     resp.into_reader()
         .take(zsettle_core::MAX_ENVELOPE_BYTES + 1)
@@ -828,8 +858,7 @@ fn main() -> Result<()> {
                 p.push(".seller.pczt");
                 PathBuf::from(p)
             });
-            fs::write(&seller_copy, &envelope)
-                .with_context(|| format!("writing {}", seller_copy.display()))?;
+            zsettle_core::wallet::write_owner_only(&seller_copy, &envelope)?;
             reserve_note(&w, buyer_note, built.expiry_height)?;
             let stem = seller_copy
                 .file_stem()
@@ -853,8 +882,10 @@ fn main() -> Result<()> {
                 .as_ref()
                 .map(|url| -> Result<String> {
                     let path = format!("{}.reply", out.display());
-                    fs::write(&path, format!("{url}\n"))
-                        .with_context(|| format!("writing {path}"))?;
+                    zsettle_core::wallet::write_owner_only(
+                        std::path::Path::new(&path),
+                        format!("{url}\n").as_bytes(),
+                    )?;
                     Ok(path)
                 })
                 .transpose()?;
