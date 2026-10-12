@@ -31,8 +31,12 @@ Data lives in `/var/lib/zsettle/data`: one directory per wallet, `hub.json` (whi
 
 ## Limits built in
 
-- 40 new wallets an hour and 300 in total; 25 shops open at once.
-- A session lasts 12 hours; a wallet nobody used for two hours is locked again.
-- A failed sign-in waits a second, so codes and passphrases cannot be tried quickly.
-- Requests must come from the site itself: the Host and Origin are checked, POSTs need a custom header, and the session cookie is HttpOnly, Secure and SameSite=Strict.
-- Only three requests pass to a shop: its listings, an offer, and a reply.
+- The server talks to its own shops only: a visitor cannot make it fetch or post to any other address.
+- 40 new wallets an hour in all, 3 an hour per visitor, 300 in total; 25 shops open at once; test coins twice a day per visitor and once per wallet.
+- At most two tasks per wallet and twelve in all; at most four passphrase checks at once; a request must arrive within 30 seconds.
+- Passphrases are at least 12 characters. Five wrong tries in a row make a wallet, or a visitor, wait one minute, then longer each time, up to an hour.
+- A session lasts 12 hours; a wallet nobody used for two hours is locked again. An open shop keeps signing offers while its owner is away.
+- Requests must come from the site itself: the Host and Origin are checked, POSTs need a custom header, and the session cookie is `__Host-` prefixed, HttpOnly, Secure and SameSite=Strict.
+- Only three requests pass to a shop: its listings, an offer, and a reply; every answer carries the server's own security headers.
+- The service runs under systemd with a read-only system, no new privileges, no link-local addresses (so no cloud metadata), and caps on memory, processes and CPU. Caddy refuses bodies above 2 MB and slow requests.
+- `--network main` is refused unless `--allow-hosted-mainnet` is given: a hosted server holds its visitors' wallets.

@@ -597,13 +597,13 @@ function viewWelcomeHosted() {
     await done();
   });
   const code = h('input', { class: 'input', id: 'code', placeholder: 'Wallet code', autocomplete: 'username', autocapitalize: 'off', spellcheck: 'false' });
-  const pass = h('input', { class: 'input', id: 'pw', type: 'password', placeholder: 'Passphrase (10 characters or more)', autocomplete: 'current-password' });
+  const pass = h('input', { class: 'input', id: 'pw', type: 'password', placeholder: 'Passphrase (12 characters or more)', autocomplete: 'current-password' });
   const signInPw = () => act(async () => {
     await api('/api/unlock', { code: code.value.trim(), passphrase: pass.value });
     await done();
   });
   const createPw = () => act(async () => {
-    if (pass.value.length < 10) throw new Error('Use a passphrase of at least 10 characters.');
+    if (pass.value.length < 12) throw new Error('Use a passphrase of at least 12 characters.');
     const r = await api('/api/wallet/create', { passphrase: pass.value });
     await done();
     showCode(r.code);
@@ -1078,7 +1078,7 @@ function viewShopFront() {
     h(
       'div',
       { class: 'card stack' },
-      h('div', { class: 'shophead' }, shopAvatar(m.fingerprint), h('div', { style: null, class: 'grow' }, h('div', { style: null }, h('b', null, m.base.replace(/^https?:\/\//, ''))), h('div', { class: 'row', style: null }, h('span', { class: 'chip ok' }, icon('shield'), 'Signed by the seller'), h('span', { class: 'chip' }, m.items.length + ' for sale'), wrongNet ? h('span', { class: 'chip err' }, 'Other network') : null))),
+      h('div', { class: 'shophead' }, shopAvatar(m.fingerprint), h('div', { style: null, class: 'grow' }, h('div', { style: null }, h('b', null, ((S.shops || []).find((x) => x.base === m.base) || {}).name || m.base.replace(/^https?:\/\//, ''))), h('div', { class: 'row', style: null }, h('span', { class: 'chip ok' }, icon('shield'), 'Signed by the seller'), h('span', { class: 'chip' }, m.items.length + ' for sale'), wrongNet ? h('span', { class: 'chip err' }, 'Other network') : null))),
       h('div', { class: 'callout info' }, icon('info'), h('span', null, 'When you buy, the seller sees the price and the time of the sale, never your address or your balance.')),
     ),
     h('div', { class: 'section-title' }, 'For sale'),
@@ -1208,6 +1208,7 @@ function viewSell() {
         shop.running
           ? h('div', { class: 'stack' }, h('div', { class: 'addr mono' }, shopUrl), h('div', { class: 'row' }, h('button', { class: 'btn sm', onclick: () => copy(shopUrl, 'Shop address copied') }, icon('copy'), 'Copy address'), navigator.share ? h('button', { class: 'btn sm', onclick: () => navigator.share({ text: shopUrl }).catch(() => {}) }, icon('share'), 'Share') : null))
           : h('p', { class: 'small muted' }, listed ? 'Open the shop so buyers can reach it.' : 'List an item below, then open the shop.'),
+        shop.running && S.hosted ? h('p', { class: 'small muted' }, 'Your shop stays open and keeps signing offers after you sign out.') : null,
         S.hosted ? null : h('details', null, h('summary', { class: 'small muted' }, 'Advanced'), h('div', { class: 'field', style: null }, h('label', { for: 'listen' }, 'Listen on'), h('input', { class: 'input', id: 'listen', value: listen, onchange: (e) => (S.listen = e.target.value) }), h('div', { class: 'hint' }, 'Use 0.0.0.0:8900 to let other machines in. For the internet, put a TLS proxy or a Tor hidden service in front.'))),
       ),
       h(

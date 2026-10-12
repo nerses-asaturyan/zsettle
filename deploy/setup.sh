@@ -53,9 +53,27 @@ ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=$DATA
 ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
 ProtectControlGroups=true
+ProtectClock=true
+PrivateDevices=true
 RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+UMask=0077
+# No cloud metadata or other link-local addresses from this service.
+IPAddressDeny=169.254.0.0/16 fe80::/10
 LimitNOFILE=4096
+TasksMax=512
+MemoryMax=3G
+CPUQuota=180%
 
 [Install]
 WantedBy=multi-user.target
@@ -63,8 +81,21 @@ UNIT
 
 echo "== HTTPS"
 cat > /etc/caddy/Caddyfile <<CADDY
+{
+	servers {
+		timeouts {
+			read_body 30s
+			read_header 10s
+			idle 60s
+		}
+	}
+}
+
 $DOMAIN {
 	encode gzip
+	request_body {
+		max_size 2MB
+	}
 	reverse_proxy 127.0.0.1:$PORT
 	header Strict-Transport-Security "max-age=31536000"
 }

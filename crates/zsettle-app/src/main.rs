@@ -17,7 +17,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
@@ -57,8 +57,42 @@ const MAX_OPEN_SHOPS: usize = 25;
 /// Hosted: a session lasts this long; an idle wallet is locked after this long.
 const SESSION_SECS: u64 = 12 * 3600;
 const IDLE_LOCK_SECS: u64 = 2 * 3600;
-/// Hosted: first port of the shops behind the relay.
-const FIRST_SHOP_PORT: u16 = 9100;
+/// Hosted: first port of the shops behind the relay (a range nothing common uses).
+const FIRST_SHOP_PORT: u16 = 19100;
+/// Work a server takes on at once: jobs per wallet and in all, passphrase checks (age scrypt
+/// is heavy on CPU and memory).
+const MAX_JOBS_PER_WALLET: usize = 2;
+const MAX_JOBS_TOTAL: usize = 12;
+const MAX_SCRYPT: usize = 4;
+/// A request must arrive whole within this time.
+const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
+/// Hosted: per visitor (by the proxy's X-Forwarded-For), new wallets an hour and test coins a
+/// day; failed sign-ins before a wallet or a visitor must wait.
+const MAX_NEW_PER_IP_HOUR: usize = 3;
+const MAX_FAUCET_PER_IP_DAY: usize = 2;
+const FREE_FAILURES: u32 = 5;
+/// Hosted passphrases are at least this long.
+const MIN_HOSTED_PASSPHRASE: usize = 12;
+
+static RUNNING_JOBS: AtomicUsize = AtomicUsize::new(0);
+static SCRYPT_RUNNING: AtomicUsize = AtomicUsize::new(0);
+
+/// One of the few passphrase checks allowed at once; refused when all are taken.
+struct ScryptSlot;
+impl ScryptSlot {
+    fn take() -> Result<Self> {
+        if SCRYPT_RUNNING.fetch_add(1, Ordering::SeqCst) >= MAX_SCRYPT {
+            SCRYPT_RUNNING.fetch_sub(1, Ordering::SeqCst);
+            return Err(anyhow!("the server is busy; try again in a moment"));
+        }
+        Ok(ScryptSlot)
+    }
+}
+impl Drop for ScryptSlot {
+    fn drop(&mut self) {
+        SCRYPT_RUNNING.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 /// Hosted house shop: items it keeps listed, their price, and the test coins it gives once
 /// to each new wallet.
 const HOUSE: &str = "house";
@@ -113,6 +147,10 @@ struct Cli {
     /// created if missing, unlocked at start, kept stocked, and pays the test coins.
     #[arg(long)]
     house_passphrase_file: Option<PathBuf>,
+    /// Hosted mode on mainnet: the server would hold real money for its visitors. Refused
+    /// unless this is given.
+    #[arg(long)]
+    allow_hosted_mainnet: bool,
 }
 
 /// What the app remembers about a profile. Nothing secret: the wallet's mnemonic stays
@@ -208,7 +246,47 @@ struct Hosted {
     apps: Mutex<HashMap<String, Arc<App>>>,
     index: Mutex<Index>,
     sessions: Mutex<HashMap<String, Session>>,
-    created: Mutex<Vec<u64>>,
+    /// New wallets: when, and from which visitor.
+    created: Mutex<Vec<(u64, String)>>,
+    /// Test coins handed out per visitor, when.
+    faucet_by_ip: Mutex<HashMap<String, Vec<u64>>>,
+    /// Failed sign-ins (and backup requests) per wallet and per visitor: count, and the time
+    /// before which the next try is refused.
+    fails: Mutex<HashMap<String, (u32, u64)>>,
+}
+
+impl Hosted {
+    fn check_fails(&self, keys: &[String]) -> Result<()> {
+        let f = self.fails.lock().unwrap();
+        for k in keys {
+            if let Some((_, until)) = f.get(k) {
+                if *until > now() {
+                    let mins = (*until - now()).div_ceil(60);
+                    return Err(anyhow!(
+                        "too many wrong tries; wait {mins} minute{} and try again",
+                        if mins == 1 { "" } else { "s" }
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn record_fail(&self, keys: &[String]) {
+        let mut f = self.fails.lock().unwrap();
+        for k in keys {
+            let e = f.entry(k.clone()).or_insert((0, 0));
+            e.0 += 1;
+            if e.0 >= FREE_FAILURES {
+                let wait = 60u64 << (e.0 - FREE_FAILURES).min(6);
+                e.1 = now() + wait.min(3600);
+            }
+        }
+    }
+
+    fn clear_fails(&self, key: &str) {
+        self.fails.lock().unwrap().remove(key);
+    }
 }
 
 enum Mode {
@@ -263,8 +341,10 @@ fn main() -> Result<()> {
     }
     let open = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
-        let Ok(stream) = stream else { continue };
+        let Ok(mut stream) = stream else { continue };
         if open.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
+            let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+            respond(&mut stream, 503, "text/plain", b"busy, try again");
             continue;
         }
         open.fetch_add(1, Ordering::SeqCst);
@@ -333,6 +413,11 @@ fn hosted_hub(cli: &Cli, public: &str, base: PathBuf, bins: Bins) -> Result<Hub>
     if cli.network != "test" && cli.network != "main" {
         return Err(anyhow!("--network is test or main"));
     }
+    if cli.network == "main" && !cli.allow_hosted_mainnet {
+        return Err(anyhow!(
+            "a hosted server holds its visitors' wallets: on mainnet that is real money in your custody; pass --allow-hosted-mainnet if you mean it"
+        ));
+    }
     let index: Index = fs::read(base.join("hub.json"))
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
@@ -368,6 +453,8 @@ fn hosted_hub(cli: &Cli, public: &str, base: PathBuf, bins: Bins) -> Result<Hub>
         index: Mutex::new(index),
         sessions: Mutex::new(HashMap::new()),
         created: Mutex::new(Vec::new()),
+        faucet_by_ip: Mutex::new(HashMap::new()),
+        fails: Mutex::new(HashMap::new()),
     };
     let hub = Hub {
         base,
@@ -389,6 +476,25 @@ fn hosted_hub(cli: &Cli, public: &str, base: PathBuf, bins: Bins) -> Result<Hub>
         cli.network, cli.port
     );
     Ok(hub)
+}
+
+/// A note reference as the tools print it: a transaction id and an output index.
+fn valid_note(s: &str) -> bool {
+    s.split_once(':').is_some_and(|(txid, i)| {
+        txid.len() == 64
+            && txid.bytes().all(|b| b.is_ascii_hexdigit())
+            && !i.is_empty()
+            && i.len() <= 4
+            && i.bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
+fn note_field(body: &Value, key: &str) -> Result<String> {
+    let n = field(body, key)?;
+    if !valid_note(&n) {
+        return Err(anyhow!("that is not an item reference"));
+    }
+    Ok(n)
 }
 
 fn valid_name(s: &str) -> bool {
@@ -448,6 +554,7 @@ struct Request {
 
 fn read_request(stream: &mut TcpStream) -> Result<Request> {
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    let started = Instant::now();
     let mut buf = Vec::new();
     let mut chunk = [0u8; 8192];
     let head_end = loop {
@@ -456,6 +563,9 @@ fn read_request(stream: &mut TcpStream) -> Result<Request> {
         }
         if buf.len() > MAX_HEAD {
             return Err(anyhow!("request head too large"));
+        }
+        if started.elapsed() > REQUEST_DEADLINE {
+            return Err(anyhow!("request too slow"));
         }
         let n = stream.read(&mut chunk)?;
         if n == 0 {
@@ -489,6 +599,9 @@ fn read_request(stream: &mut TcpStream) -> Result<Request> {
     }
     let mut body = buf[head_end + 4..].to_vec();
     while body.len() < len {
+        if started.elapsed() > REQUEST_DEADLINE {
+            return Err(anyhow!("request too slow"));
+        }
         let n = stream.read(&mut chunk)?;
         if n == 0 {
             break;
@@ -518,6 +631,8 @@ fn respond_with(stream: &mut TcpStream, status: u16, ctype: &str, body: &[u8], e
         413 => "Payload Too Large",
         421 => "Misdirected Request",
         429 => "Too Many Requests",
+        202 => "Accepted",
+        410 => "Gone",
         502 => "Bad Gateway",
         503 => "Service Unavailable",
         _ => "Error",
@@ -638,6 +753,15 @@ fn handle_hosted(hub: &Arc<Hub>, h: &Hosted, req: Request, mut stream: TcpStream
     if let Some(rest) = req.path.strip_prefix("/shop/") {
         return relay_shop(h, rest, &req, stream);
     }
+    // The proxy in front sets X-Forwarded-For; the app listens on 127.0.0.1 only, so nobody
+    // else can.
+    let ip = req
+        .headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.split(',').next())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "local".into());
     if req.method == "GET" {
         if let Some((ctype, body)) = static_file(&req.path) {
             return respond(&mut stream, 200, ctype, body);
@@ -651,7 +775,7 @@ fn handle_hosted(hub: &Arc<Hub>, h: &Hosted, req: Request, mut stream: TcpStream
     if req.method == "POST" && req.headers.get("x-zsettle").map(String::as_str) != Some("1") {
         return respond(&mut stream, 403, "text/plain", b"missing header");
     }
-    let session = cookie(&req, "zs").and_then(|t| {
+    let session = cookie(&req, "__Host-zs").and_then(|t| {
         let mut s = h.sessions.lock().unwrap();
         match s.get(&t) {
             Some(x) if x.expires > now() => Some((t, x.profile.clone())),
@@ -677,11 +801,11 @@ fn handle_hosted(hub: &Arc<Hub>, h: &Hosted, req: Request, mut stream: TcpStream
             return json_answer(&mut stream, r, "");
         }
         ("POST", "/api/wallet/create") => {
-            let r = parse_body(&req).and_then(|b| hub.hosted_create(h, &b));
+            let r = parse_body(&req).and_then(|b| hub.hosted_create(h, &b, &ip));
             return answer_with_session(&mut stream, r);
         }
         ("POST", "/api/unlock") => {
-            let r = parse_body(&req).and_then(|b| hub.hosted_unlock(h, &b));
+            let r = parse_body(&req).and_then(|b| hub.hosted_unlock(h, &b, &ip));
             return answer_with_session(&mut stream, r);
         }
         _ => {}
@@ -703,7 +827,7 @@ fn handle_hosted(hub: &Arc<Hub>, h: &Hosted, req: Request, mut stream: TcpStream
             return json_answer(
                 &mut stream,
                 Ok(json!({ "locked": true })),
-                "Set-Cookie: zs=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0\r\n",
+                "Set-Cookie: __Host-zs=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0\r\n",
             );
         }
         ("GET", "/api/status") => app.status().map(|mut v| {
@@ -717,7 +841,7 @@ fn handle_hosted(hub: &Arc<Hub>, h: &Hosted, req: Request, mut stream: TcpStream
             v
         }),
         ("GET", "/api/shops") => Ok(hub.open_shops(h)),
-        ("POST", "/api/faucet") => hub.faucet(h, &app),
+        ("POST", "/api/faucet") => hub.faucet(h, &app, &ip),
         ("POST", "/api/shop/start") => {
             let open = h
                 .apps
@@ -734,7 +858,17 @@ fn handle_hosted(hub: &Arc<Hub>, h: &Hosted, req: Request, mut stream: TcpStream
                 app.shop_start(&json!({}))
             }
         }
-        ("POST", "/api/backup") => parse_body(&req).and_then(|b| app.backup(&b)),
+        ("POST", "/api/backup") => {
+            let keys = [format!("w:{}", app.profile), format!("ip:{ip}")];
+            h.check_fails(&keys).and_then(|_| {
+                parse_body(&req)
+                    .and_then(|b| app.backup(&b))
+                    .inspect_err(|_| {
+                        h.record_fail(&keys);
+                        thread::sleep(Duration::from_secs(1));
+                    })
+            })
+        }
         _ => api(&app, &req),
     };
     json_answer(&mut stream, r, "");
@@ -744,7 +878,7 @@ fn answer_with_session(stream: &mut TcpStream, r: Result<(Value, String)>) {
     match r {
         Ok((v, token)) => {
             let set = format!(
-                "Set-Cookie: zs={token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age={SESSION_SECS}\r\n"
+                "Set-Cookie: __Host-zs={token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age={SESSION_SECS}\r\n"
             );
             json_answer(stream, Ok(v), &set);
         }
@@ -792,7 +926,32 @@ fn relay_shop(h: &Hosted, rest: &str, req: &Request, mut stream: TcpStream) {
     };
     match relay() {
         Ok(bytes) => {
-            let _ = stream.write_all(&bytes);
+            // Rebuild the answer from the shop's status and body, so it carries this server's
+            // headers like every other answer.
+            let split = bytes.windows(4).position(|w| w == b"\r\n\r\n");
+            let Some(end) = split else {
+                return respond(&mut stream, 502, "text/plain", b"the shop did not answer");
+            };
+            let head = String::from_utf8_lossy(&bytes[..end]);
+            let status: u16 = head
+                .split_whitespace()
+                .nth(1)
+                .and_then(|c| c.parse().ok())
+                .unwrap_or(502);
+            let ctype = match head
+                .lines()
+                .find_map(|l| {
+                    l.split_once(':')
+                        .filter(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+                })
+                .map(|(_, v)| v.trim().to_ascii_lowercase())
+                .as_deref()
+            {
+                Some("application/json") => "application/json",
+                Some("application/octet-stream") => "application/octet-stream",
+                _ => "text/plain; charset=utf-8",
+            };
+            respond(&mut stream, status, ctype, &bytes[end + 4..]);
         }
         Err(_) => respond(&mut stream, 502, "text/plain", b"the shop did not answer"),
     }
@@ -898,20 +1057,37 @@ impl Hub {
         Ok(app)
     }
 
-    fn hosted_create(&self, h: &Hosted, body: &Value) -> Result<(Value, String)> {
+    fn hosted_create(&self, h: &Hosted, body: &Value, ip: &str) -> Result<(Value, String)> {
+        if field(body, "passphrase").map(|p| p.len()).unwrap_or(0) < MIN_HOSTED_PASSPHRASE {
+            return Err(anyhow!(
+                "use a passphrase of at least {MIN_HOSTED_PASSPHRASE} characters"
+            ));
+        }
+        let cred = body["passkey"]["id"].as_str().map(str::to_string);
+        if let Some(id) = &cred {
+            if id.len() > 1400 || h.index.lock().unwrap().by_cred.contains_key(id) {
+                return Err(anyhow!("this passkey already belongs to a wallet here"));
+            }
+        }
         {
             let mut created = h.created.lock().unwrap();
-            created.retain(|t| *t + 3600 > now());
+            created.retain(|(t, _)| *t + 3600 > now());
             if created.len() >= MAX_NEW_PER_HOUR {
                 return Err(anyhow!(
                     "many wallets were created this hour; try again later"
                 ));
             }
+            if created.iter().filter(|(_, who)| who == ip).count() >= MAX_NEW_PER_IP_HOUR {
+                return Err(anyhow!(
+                    "you created several wallets this hour; try again later"
+                ));
+            }
             if h.apps.lock().unwrap().len() >= MAX_PROFILES {
                 return Err(anyhow!("this demo server is full"));
             }
-            created.push(now());
+            created.push((now(), ip.to_string()));
         }
+        let _slot = ScryptSlot::take()?;
         let code = loop {
             const ALPHA: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
             let c: String = rand::random::<[u8; 8]>()
@@ -937,12 +1113,14 @@ impl Hub {
                 return Err(e);
             }
         };
-        if let Some(id) = b["passkey"]["id"].as_str() {
+        if let Some(id) = cred {
+            // Never re-point a passkey that already names a wallet.
             h.index
                 .lock()
                 .unwrap()
                 .by_cred
-                .insert(id.to_string(), code.clone());
+                .entry(id)
+                .or_insert_with(|| code.clone());
             self.save_index(h)?;
         }
         h.apps.lock().unwrap().insert(code.clone(), app);
@@ -952,7 +1130,9 @@ impl Hub {
         Ok((v, token))
     }
 
-    fn hosted_unlock(&self, h: &Hosted, body: &Value) -> Result<(Value, String)> {
+    fn hosted_unlock(&self, h: &Hosted, body: &Value, ip: &str) -> Result<(Value, String)> {
+        let ip_key = format!("ip:{ip}");
+        h.check_fails(std::slice::from_ref(&ip_key))?;
         let code = match field(body, "credential") {
             Ok(id) => h
                 .index
@@ -964,21 +1144,27 @@ impl Hub {
                 .ok_or_else(|| anyhow!("this passkey has no wallet on this server"))?,
             Err(_) => field(body, "code")?.to_ascii_lowercase(),
         };
-        if code == HOUSE {
-            return Err(anyhow!("no such wallet"));
-        }
-        let app = h
-            .apps
-            .lock()
-            .unwrap()
-            .get(&code)
-            .cloned()
-            .ok_or_else(|| anyhow!("no such wallet"))?;
-        // A failed guess costs a second, so codes and passphrases cannot be tried quickly.
-        if let Err(e) = app.unlock(body) {
+        let wallet_key = format!("w:{code}");
+        let keys = [wallet_key.clone(), ip_key];
+        h.check_fails(&keys)?;
+        let app = h.apps.lock().unwrap().get(&code).cloned();
+        let app = match app {
+            Some(a) if code != HOUSE => a,
+            _ => {
+                h.record_fail(&keys[1..]);
+                thread::sleep(Duration::from_secs(1));
+                return Err(anyhow!("wrong wallet code or passphrase"));
+            }
+        };
+        // A failed guess costs a second and counts against the wallet and the visitor, so
+        // codes and passphrases cannot be tried quickly.
+        let _slot = ScryptSlot::take()?;
+        if app.unlock(body).is_err() {
+            h.record_fail(&keys);
             thread::sleep(Duration::from_secs(1));
-            return Err(e);
+            return Err(anyhow!("wrong wallet code or passphrase"));
         }
+        h.clear_fails(&wallet_key);
         let token = self.new_session(h, &code);
         Ok((json!({ "unlocked": true, "code": code }), token))
     }
@@ -1011,7 +1197,7 @@ impl Hub {
     }
 
     /// Test coins from the house wallet, once per wallet.
-    fn faucet(self: &Arc<Self>, h: &Hosted, app: &Arc<App>) -> Result<Value> {
+    fn faucet(self: &Arc<Self>, h: &Hosted, app: &Arc<App>, ip: &str) -> Result<Value> {
         let house = h
             .apps
             .lock()
@@ -1023,10 +1209,19 @@ impl Hub {
             return Err(anyhow!("test coins exist on the testnet only"));
         }
         {
+            let mut by_ip = h.faucet_by_ip.lock().unwrap();
+            let times = by_ip.entry(ip.to_string()).or_default();
+            times.retain(|t| *t + 86_400 > now());
+            if times.len() >= MAX_FAUCET_PER_IP_DAY {
+                return Err(anyhow!(
+                    "you got test coins for several wallets today; try again tomorrow"
+                ));
+            }
             let mut idx = h.index.lock().unwrap();
             if !idx.funded.insert(app.profile.clone()) {
                 return Err(anyhow!("this wallet already got its test coins"));
             }
+            times.push(now());
         }
         self.save_index(h)?;
         let addr = app.address()?["address"]
@@ -1157,6 +1352,23 @@ impl App {
         self.public_shop.is_some()
     }
 
+    /// The shop and listings URLs for what the visitor typed. A hosted server talks to its
+    /// own shops only, so a visitor cannot make it fetch or post anywhere else.
+    fn shop_urls(&self, input: &str) -> Result<(String, String)> {
+        let (base, url) = seller_urls(input)?;
+        if let Some(own) = &self.public_shop {
+            let prefix = own
+                .rsplit_once("/shop/")
+                .map(|(o, _)| format!("{o}/shop/"))
+                .unwrap_or_default();
+            let ok = base.strip_prefix(&prefix).is_some_and(valid_name);
+            if !ok {
+                return Err(anyhow!("on this demo you can open its own shops only"));
+            }
+        }
+        Ok((base, url))
+    }
+
     fn wallet_dir(&self) -> PathBuf {
         self.dir.join("wallet")
     }
@@ -1216,7 +1428,11 @@ impl App {
                 .map(str::trim)
                 .filter(|l| !l.is_empty() && !l.starts_with("warning:") && !l.starts_with('#'))
                 .collect();
-            let text = msg.join(" ").replace("Error: ", "");
+            let mut text = msg.join(" ").replace("Error: ", "");
+            if self.hosted() {
+                // No server paths in what a visitor sees.
+                text = text.replace(&self.dir.display().to_string(), "");
+            }
             return Err(anyhow!(if text.is_empty() {
                 "the command failed".to_string()
             } else {
@@ -1288,6 +1504,35 @@ impl App {
         f: impl FnOnce(&Arc<App>, u64) -> Result<Value> + Send + 'static,
     ) -> Value {
         let id = self.next_job.fetch_add(1, Ordering::SeqCst) + 1;
+        let running_here = self
+            .jobs
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|j| j.state == "running")
+            .count();
+        let busy = if running_here >= MAX_JOBS_PER_WALLET {
+            Some("another task of this wallet is still running; wait for it to finish")
+        } else if RUNNING_JOBS.load(Ordering::SeqCst) >= MAX_JOBS_TOTAL {
+            Some("the server is busy; try again in a moment")
+        } else {
+            None
+        };
+        if let Some(why) = busy {
+            self.jobs.lock().unwrap().insert(
+                id,
+                Job {
+                    id,
+                    kind: kind.to_string(),
+                    state: "failed".into(),
+                    steps: Vec::new(),
+                    result: Value::Null,
+                    error: Some(why.into()),
+                },
+            );
+            return json!({ "job": id });
+        }
+        RUNNING_JOBS.fetch_add(1, Ordering::SeqCst);
         {
             let mut jobs = self.jobs.lock().unwrap();
             // Keep the last hundred jobs.
@@ -1310,6 +1555,7 @@ impl App {
         let app = self.clone();
         thread::spawn(move || {
             let r = f(&app, id);
+            RUNNING_JOBS.fetch_sub(1, Ordering::SeqCst);
             let mut jobs = app.jobs.lock().unwrap();
             if let Some(j) = jobs.get_mut(&id) {
                 match r {
@@ -1345,7 +1591,9 @@ impl App {
         let _guard = self.wallet_lock.lock().unwrap();
         let was = self.stop_shop();
         let r = f();
-        if let Some(listen) = was {
+        // The shop restarts only with the passphrase it needs; a wallet locked meanwhile keeps
+        // its shop closed.
+        if let Some(listen) = was.filter(|_| self.passphrase.lock().unwrap().is_some()) {
             if let Err(e) = self.spawn_shop(&listen) {
                 self.push_event(
                     json!({ "event": "error", "error": format!("restarting the shop: {e:#}") }),
@@ -1468,6 +1716,9 @@ impl App {
 
     fn unlock(&self, body: &Value) -> Result<Value> {
         let pass = field(body, "passphrase")?;
+        if pass.len() > 512 {
+            return Err(anyhow!("wrong passphrase"));
+        }
         Wallet::open(self.wallet_dir())?.check_passphrase(&pass)?;
         *self.passphrase.lock().unwrap() = Some(Zeroizing::new(pass));
         Ok(json!({ "unlocked": true }))
@@ -1476,6 +1727,10 @@ impl App {
     /// The recovery words, for a passphrase given again (or a passkey asked again).
     fn backup(&self, body: &Value) -> Result<Value> {
         let pass = field(body, "passphrase")?;
+        if pass.len() > 512 {
+            return Err(anyhow!("wrong passphrase"));
+        }
+        let _slot = ScryptSlot::take()?;
         let words = Wallet::open(self.wallet_dir())?.mnemonic_phrase(&pass)?;
         Ok(json!({ "words": words.split_whitespace().collect::<Vec<_>>() }))
     }
@@ -1553,11 +1808,11 @@ impl App {
                 app.step(id, "Syncing with the network");
                 app.sync()?;
                 app.step(id, "Building, proving and sending the payment");
-                let mut args = vec![
-                    "pay", "--wallet", &w, "--account", &payout, "--to", &to, "--amount", &amount,
-                ];
-                if let Some(m) = memo.as_deref() {
-                    args.extend(["--memo", m]);
+                let (to_a, amount_a) = (format!("--to={to}"), format!("--amount={amount}"));
+                let memo_a = memo.as_deref().map(|m| format!("--memo={m}"));
+                let mut args = vec!["pay", "--wallet", &w, "--account", &payout, &to_a, &amount_a];
+                if let Some(m) = memo_a.as_deref() {
+                    args.push(m);
                 }
                 let r = app.seller(&args)?;
                 app.add_activity(json!({ "kind": "pay", "txid": r["txid"], "amount_zat": r["amount_zat"], "text": "Sent ZEC" }));
@@ -1576,9 +1831,11 @@ impl App {
                 self.sync()?;
             }
             let amount = zat.to_string();
+            let to_a = format!("--to={to}");
+            let amount_a = format!("--amount={amount}");
             let r = self.seller(&[
-                "pay", "--wallet", &w, "--account", &payout, "--to", to, "--amount", &amount,
-                "--memo", "zsettle demo: free test coins",
+                "pay", "--wallet", &w, "--account", &payout, &to_a, &amount_a,
+                "--memo=zsettle demo: free test coins",
             ])?;
             self.add_activity(json!({ "kind": "pay", "txid": r["txid"], "amount_zat": zat, "text": "Faucet payment" }));
             Ok(r)
@@ -1633,7 +1890,7 @@ impl App {
             let mut args = vec!["mint".to_string()];
             args.extend(wa);
             for n in names {
-                args.extend(["--name".to_string(), n.clone()]);
+                args.push(format!("--name={n}"));
             }
             let r = self.run(&self.seller_bin, &args)?;
             {
@@ -1662,7 +1919,7 @@ impl App {
 
     fn start_publish(self: &Arc<Self>, body: &Value) -> Result<Value> {
         self.require_unlocked()?;
-        let note = field(body, "note")?;
+        let note = note_field(body, "note")?;
         let price = field(body, "price")?;
         let name = body
             .get("name")
@@ -1689,15 +1946,12 @@ impl App {
             let mut args = vec!["publish".to_string()];
             args.extend(wa);
             args.extend([
-                "--listings".into(),
-                listings,
-                "--item-note".into(),
-                note.to_string(),
-                "--price".into(),
-                price.to_string(),
+                format!("--listings={listings}"),
+                format!("--item-note={note}"),
+                format!("--price={price}"),
             ]);
             if !name.is_empty() {
-                args.extend(["--name".into(), name.to_string()]);
+                args.push(format!("--name={name}"));
             }
             let r = self.run(&self.seller_bin, &args)?;
             self.add_activity(json!({ "kind": "list", "text": format!("Listed {} for {price}", if name.is_empty() { note } else { name }) }));
@@ -1707,7 +1961,7 @@ impl App {
 
     fn start_delist(self: &Arc<Self>, body: &Value) -> Result<Value> {
         self.require_unlocked()?;
-        let note = field(body, "note")?;
+        let note = note_field(body, "note")?;
         let wa = self.wallet_args()?;
         let listings = self.listings_path().display().to_string();
         Ok(self.job("delist", move |app, id| {
@@ -1715,12 +1969,7 @@ impl App {
                 app.step(id, "Removing the item from the listings file");
                 let mut args = vec!["publish".to_string()];
                 args.extend(wa);
-                args.extend([
-                    "--listings".into(),
-                    listings,
-                    "--remove".into(),
-                    note.clone(),
-                ]);
+                args.extend([format!("--listings={listings}"), format!("--remove={note}")]);
                 let r = app.run(&app.seller_bin, &args)?;
                 app.add_activity(json!({ "kind": "delist", "text": format!("Delisted {note}") }));
                 Ok(r)
@@ -1730,7 +1979,7 @@ impl App {
 
     fn start_cancel(self: &Arc<Self>, body: &Value) -> Result<Value> {
         self.require_unlocked()?;
-        let note = field(body, "note")?;
+        let note = note_field(body, "note")?;
         let wa = self.wallet_args()?;
         let listings = self.listings_path();
         Ok(self.job("cancel", move |app, id| {
@@ -1738,7 +1987,7 @@ impl App {
                 app.step(id, "Moving the item to a fresh note, so no signed offer can settle");
                 let mut args = vec!["cancel".to_string()];
                 args.extend(wa);
-                args.extend(["--item-note".into(), note.clone()]);
+                args.push(format!("--item-note={note}"));
                 if listings.exists() {
                     args.extend(["--listings".into(), listings.display().to_string()]);
                 }
@@ -1932,8 +2181,14 @@ impl App {
     // ------------------------------------------------------------ buying
 
     fn market(&self, body: &Value) -> Result<Value> {
-        let (base, url) = seller_urls(&field(body, "url")?)?;
-        let text = http_get(&url)?;
+        let (base, url) = self.shop_urls(&field(body, "url")?)?;
+        let text = http_get(&url).map_err(|e| {
+            if self.hosted() {
+                anyhow!("could not reach that shop; is it open?")
+            } else {
+                e
+            }
+        })?;
         let l = Listings::parse(&text, &url)?;
         l.verify_signature()?;
         {
@@ -1960,11 +2215,11 @@ impl App {
     fn start_buy(self: &Arc<Self>, body: &Value) -> Result<Value> {
         self.require_unlocked()?;
         let (payout, _) = self.accounts()?;
-        let (base, url) = seller_urls(&field(body, "url")?)?;
+        let (base, url) = self.shop_urls(&field(body, "url")?)?;
         if self.public_shop.as_deref() == Some(base.as_str()) {
             return Err(anyhow!("this is your own shop"));
         }
-        let item = field(body, "item")?;
+        let item = note_field(body, "item")?;
         let name = body
             .get("name")
             .and_then(Value::as_str)
@@ -1977,13 +2232,15 @@ impl App {
             let tx = format!("{}.tx", stem.display());
             let built = app.exclusive(|| {
                 app.step(id, "Importing the seller's viewing key");
-                app.buyer(&["import-listing", "--wallet", &w, "--listings", &url])?;
+                let listings_a = format!("--listings={url}");
+                app.buyer(&["import-listing", "--wallet", &w, &listings_a])?;
                 app.step(id, "Syncing with the network");
                 app.sync()?;
                 app.step(id, "Building and proving the trade (both sides, one transaction)");
+                let (item_a, seller_a) = (format!("--item={item}"), format!("--seller-url={base}"));
                 app.buyer(&[
-                    "buy", "--wallet", &w, "--buyer-account", &payout, "--listings", &url,
-                    "--item", &item, "--out", &full, "--seller-url", &base,
+                    "buy", "--wallet", &w, "--buyer-account", &payout, &listings_a, &item_a,
+                    "--out", &full, &seller_a,
                 ])
             })?;
             if built["reply_url"].is_null() {
@@ -2015,7 +2272,7 @@ impl App {
     }
 
     fn start_verify(self: &Arc<Self>, body: &Value) -> Result<Value> {
-        let mine = field(body, "item")?;
+        let mine = note_field(body, "item")?;
         let item = self
             .cfg
             .lock()
@@ -2034,7 +2291,9 @@ impl App {
         };
         let mut shops = Vec::new();
         for c in &candidates {
-            shops.push(seller_urls(c)?.1);
+            if let Ok((_, url)) = self.shop_urls(c) {
+                shops.push(url);
+            }
         }
         let own = self
             .listings_path()
@@ -2053,9 +2312,9 @@ impl App {
             let attempt = |shop: Option<&String>| {
                 let mut args = vec!["verify".to_string()];
                 for s in shop.into_iter().chain(own.as_ref()) {
-                    args.extend(["--listings".to_string(), s.clone()]);
+                    args.push(format!("--listings={s}"));
                 }
-                args.extend(["--item".to_string(), item.clone()]);
+                args.push(format!("--item={item}"));
                 app.run(&app.buyer_bin, &args)
             };
             if shops.is_empty() {
@@ -2078,6 +2337,12 @@ fn seller_urls(input: &str) -> Result<(String, String)> {
     let t = input.trim().trim_end_matches('/');
     if !(t.starts_with("http://") || t.starts_with("https://")) {
         return Err(anyhow!("a seller address starts with http:// or https://"));
+    }
+    if t.len() > 300
+        || t.chars()
+            .any(|c| c.is_whitespace() || c == '?' || c == '#' || c.is_control())
+    {
+        return Err(anyhow!("that is not a shop address"));
     }
     let base = t.strip_suffix("/listings").unwrap_or(t).to_string();
     let url = format!("{base}/listings");
