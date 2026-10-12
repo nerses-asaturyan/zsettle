@@ -1367,7 +1367,7 @@ fn reconcile(wallet: &Wallet, db: &Db, l: &mut Listings) -> Result<bool> {
             NoteState::Spent { txid } => {
                 println!(
                     "{}",
-                    serde_json::json!({ "event": "sold", "item": item.note, "name": item.name, "txid": txid })
+                    serde_json::json!({ "event": "sold", "item": item.note, "name": item.name, "price_zat": item.price_zat, "txid": txid })
                 );
                 changed = true;
             }

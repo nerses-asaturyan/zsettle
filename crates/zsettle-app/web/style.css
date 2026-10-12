@@ -463,3 +463,10 @@ ol.words li { padding: 4px 0; }
   .li .sub { overflow: visible; white-space: normal; }
   .li .sub .txlink .iconbtn { display: none; }
 }
+
+/* How a trade works (first visit) */
+.how { display: grid; gap: 10px; margin-top: 18px; }
+.how-step { display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); text-align: left; }
+.how-n { flex: none; width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 13px; color: var(--accent-ink); background: var(--accent); }
+.how-t { font-weight: 600; font-size: 14px; }
+.how-d { color: var(--muted); font-size: 13px; line-height: 1.45; margin-top: 2px; }

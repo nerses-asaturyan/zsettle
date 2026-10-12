@@ -81,7 +81,7 @@ The service watches the inbox for `*.pczt` envelopes. Every pass (default every 
    logged and retried with exponential backoff, up to five minutes. `--sync-cmd <command>` runs
    a shell command instead of the built-in sync; `--no-sync` skips the step.
 2. **Reconcile.** An item whose note the wallet has recorded as spent is removed from the
-   listings (`sold`, with the spending txid), and the file is signed again. A note the wallet
+   listings (`sold`, with the spending txid and the price), and the file is signed again. A note the wallet
    cannot see right now stays listed (`not_in_wallet`).
 3. **Inbox.** Each envelope that has not changed for two seconds and is at most 1 MiB is
    checked, in arrival order. What is checked, and in which order, is in

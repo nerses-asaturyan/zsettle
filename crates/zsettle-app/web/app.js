@@ -632,8 +632,23 @@ function viewWelcomeHosted() {
         pwBox,
         err,
       ),
+      howItWorks(),
       linksRow(),
     ),
+  );
+}
+
+/** One trade in three steps, for a first visit. */
+function howItWorks() {
+  const steps = [
+    ['Get a wallet and coins', 'A passkey makes a shielded wallet; the demo gives free test coins.'],
+    ['Pick an item', 'Shops list real shielded notes, signed by their seller.'],
+    ['Buy in one transaction', 'The item and the ZEC change hands together, or not at all. The seller never sees your address or balance.'],
+  ];
+  return h(
+    'section',
+    { class: 'how', 'aria-label': 'How a trade works' },
+    steps.map(([t, d], i) => h('div', { class: 'how-step' }, h('span', { class: 'how-n', 'aria-hidden': 'true' }, String(i + 1)), h('div', null, h('div', { class: 'how-t' }, t), h('div', { class: 'how-d' }, d)))),
   );
 }
 
@@ -1022,7 +1037,7 @@ function txRow(txid) {
 // ------------------------------------------------------------ market
 
 function viewMarket() {
-  const input = h('input', { class: 'input', id: 'shopurl', type: 'url', inputmode: 'url', placeholder: 'http://127.0.0.1:8900', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', value: S.market ? S.market.base : '' });
+  const input = h('input', { class: 'input', id: 'shopurl', type: 'url', inputmode: 'url', placeholder: S.hosted ? location.origin + '/shop/…' : 'http://127.0.0.1:8900', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', value: S.market ? S.market.base : '' });
   const err = h('p', { class: 'small err', role: 'alert' });
   const openBtn = h('button', { class: 'btn primary sm action', onclick: () => open() }, 'Open');
   async function open(u) {
@@ -1041,17 +1056,20 @@ function viewMarket() {
     }
   }
   input.addEventListener('keydown', (e) => e.key === 'Enter' && open());
-  const recent = (S.status.sellers || []).filter((s) => !S.market || s !== S.market.base);
   const openShops = (S.shops || []).filter((s) => !S.market || s.base !== S.market.base);
+  // Shops already in the open list are not repeated under recent ones.
+  const recent = (S.status.sellers || []).filter((s) => (!S.market || s !== S.market.base) && !(S.hosted && openShops.some((o) => o.base === s)));
   return h(
     'div',
     null,
     h('h2', { class: 'page' }, 'Market'),
-    h('p', { class: 'pagesub' }, 'Open a shop by its address. The seller’s signature is checked before anything is shown.'),
-    h('div', { class: 'card stack' }, h('div', { class: 'field' }, h('label', { for: 'shopurl' }, 'Shop address'), h('div', { class: 'inputwrap' }, input, openBtn)), err, recent.length ? h('div', null, h('div', { class: 'small muted', style: null }, 'Recent shops'), h('div', { class: 'list' }, recent.slice(0, 4).map((s) => h('button', { class: 'li', onclick: () => open(s) }, avatar(s, 'ico'), h('span', { class: 'grow' }, h('div', { class: 'title' }, s.replace(/^https?:\/\//, '')), h('div', { class: 'sub' }, 'Opened before')), icon('chevron'))))) : null),
+    h('p', { class: 'pagesub' }, S.hosted ? 'Pick a shop, or open one by its address. The seller’s signature is checked before anything is shown.' : 'Open a shop by its address. The seller’s signature is checked before anything is shown.'),
+    // On the demo the open shops come first: that is where a new visitor starts.
     S.hosted && openShops.length
       ? h('div', null, h('div', { class: 'section-title' }, 'Open shops on this demo'), h('div', { class: 'card' }, h('div', { class: 'list' }, openShops.map((s) => h('button', { class: 'li', onclick: () => open(s.base) }, shopAvatar(s.base), h('span', { class: 'grow' }, h('div', { class: 'title' }, s.name + (s.base === S.status.public_shop ? ' (yours)' : '')), h('div', { class: 'sub' }, s.items + ' item' + (s.items === 1 ? '' : 's') + ' for sale')), icon('chevron'))))))
       : null,
+    S.hosted && openShops.length ? h('div', { class: 'section-title' }, 'Or open a shop by its address') : null,
+    h('div', { class: 'card stack' }, h('div', { class: 'field' }, h('label', { for: 'shopurl' }, 'Shop address'), h('div', { class: 'inputwrap' }, input, openBtn)), err, recent.length ? h('div', null, h('div', { class: 'small muted', style: null }, 'Recent shops'), h('div', { class: 'list' }, recent.slice(0, 4).map((s) => h('button', { class: 'li', onclick: () => open(s) }, avatar(s, 'ico'), h('span', { class: 'grow' }, h('div', { class: 'title' }, s.replace(/^https?:\/\//, '')), h('div', { class: 'sub' }, 'Opened before')), icon('chevron'))))) : null),
     S.market ? viewShopFront() : null,
   );
 }
@@ -1357,12 +1375,13 @@ function activityList(items) {
     { class: 'list' },
     items.map((a) => {
       const [kind, ic] = KIND[a.kind] || ['', 'clock'];
-      const amount = a.price_zat || a.amount_zat;
+      // A buy cost its price and the network fee.
+      const amount = a.kind === 'buy' && a.price_zat && a.fee_zat ? a.price_zat + a.fee_zat : a.price_zat || a.amount_zat;
       return h(
         'div',
         { class: 'li' },
         h('span', { class: 'ico ' + kind }, icon(ic)),
-        h('div', { class: 'grow' }, h('div', { class: 'title' }, a.text || a.kind), h('div', { class: 'sub' }, ago(a.at), a.txid ? [' · ', txLink(a.txid, 5)] : null)),
+        h('div', { class: 'grow' }, h('div', { class: 'title' }, a.text || a.kind), h('div', { class: 'sub' }, ago(a.at), a.kind === 'buy' && a.fee_zat ? ' · fee ' + zec(a.fee_zat) : null, a.txid ? [' · ', txLink(a.txid, 5)] : null)),
         amount ? h('span', { class: 'amt' + (a.kind === 'sale' || a.kind === 'faucet' ? ' in' : '') }, (a.kind === 'sale' || a.kind === 'faucet' ? '+' : '−') + zec(amount)) : null,
       );
     }),

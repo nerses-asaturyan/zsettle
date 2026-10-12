@@ -2015,7 +2015,7 @@ impl App {
                     .unwrap_or("an item");
                 cfg.activity.insert(
                     0,
-                    json!({ "kind": "sale", "txid": e["txid"], "text": format!("Sold {name}"), "at": e["at"] }),
+                    json!({ "kind": "sale", "txid": e["txid"], "price_zat": e["price_zat"], "text": format!("Sold {name}"), "at": e["at"] }),
                 );
                 added = true;
             }
