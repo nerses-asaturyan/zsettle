@@ -186,13 +186,21 @@ function human(msg) {
 }
 
 async function api(path, body) {
-  const opt = { method: body === undefined ? 'GET' : 'POST', headers: { 'X-Zsettle-Token': S.token } };
+  const headers = { 'X-Zsettle': '1' };
+  if (S.token) headers['X-Zsettle-Token'] = S.token;
+  const opt = { method: body === undefined ? 'GET' : 'POST', headers, credentials: 'same-origin' };
   if (body !== undefined) {
     opt.headers['Content-Type'] = 'application/json';
     opt.body = JSON.stringify(body);
   }
   const r = await fetch(path, opt);
   if (r.status === 401) {
+    if (S.hosted) {
+      S.timers.forEach(clearInterval);
+      document.getElementById('layer').replaceChildren();
+      render(viewWelcomeHosted());
+      throw new Error('Please sign in.');
+    }
     sessionExpired();
     throw new Error('This session ended: open the new link from the terminal.');
   }
@@ -351,21 +359,22 @@ const unb64u = (s) => {
 };
 const hexOf = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
 const NO_PRF = 'This passkey cannot derive a key. Use a passphrase, or a passkey saved in Chrome, Edge, Safari or a recent Firefox.';
-const passkeyUsable = () => !!window.PublicKeyCredential && location.hostname === 'localhost';
+const passkeyUsable = () =>
+  !!window.PublicKeyCredential && window.isSecureContext && (location.hostname === 'localhost' || location.protocol === 'https:');
 
 // The passkey's PRF output, never stored, is the wallet's passphrase.
 async function passkeyCreate() {
-  const salt = crypto.getRandomValues(new Uint8Array(32));
+  const salt = S.hosted ? unb64u(S.hosted.salt) : crypto.getRandomValues(new Uint8Array(32));
   const cred = await navigator.credentials.create({
     publicKey: {
       challenge: crypto.getRandomValues(new Uint8Array(32)),
-      rp: { name: 'zsettle', id: 'localhost' },
-      user: { id: crypto.getRandomValues(new Uint8Array(16)), name: 'zsettle-' + S.status.profile, displayName: 'zsettle wallet (' + S.status.profile + ')' },
+      rp: { name: 'zsettle', id: location.hostname },
+      user: { id: crypto.getRandomValues(new Uint8Array(16)), name: S.hosted ? 'zsettle demo wallet' : 'zsettle-' + S.status.profile, displayName: S.hosted ? 'zsettle demo wallet' : 'zsettle wallet (' + S.status.profile + ')' },
       pubKeyCredParams: [
         { type: 'public-key', alg: -7 },
         { type: 'public-key', alg: -257 },
       ],
-      authenticatorSelection: { residentKey: 'preferred', userVerification: 'required' },
+      authenticatorSelection: { residentKey: S.hosted ? 'required' : 'preferred', requireResidentKey: !!S.hosted, userVerification: 'required' },
       extensions: { prf: { eval: { first: salt } } },
     },
   });
@@ -378,11 +387,26 @@ async function passkeyCreate() {
   }
   return { pk, passphrase: 'passkey:' + hexOf(secret) };
 }
+// Hosted sign-in: the browser offers this site's passkeys; the chosen one names the wallet.
+async function passkeySignIn() {
+  const a = await navigator.credentials.get({
+    publicKey: {
+      challenge: crypto.getRandomValues(new Uint8Array(32)),
+      rpId: location.hostname,
+      userVerification: 'required',
+      extensions: { prf: { eval: { first: unb64u(S.hosted.salt) } } },
+    },
+  });
+  const r = a.getClientExtensionResults().prf;
+  if (!r || !r.results || !r.results.first) throw new Error(NO_PRF);
+  return { credential: b64u(a.rawId), passphrase: 'passkey:' + hexOf(r.results.first) };
+}
+
 async function passkeySecret(pk) {
   const a = await navigator.credentials.get({
     publicKey: {
       challenge: crypto.getRandomValues(new Uint8Array(32)),
-      rpId: 'localhost',
+      rpId: location.hostname,
       allowCredentials: [{ type: 'public-key', id: unb64u(pk.id) }],
       userVerification: 'required',
       extensions: { prf: { eval: { first: unb64u(pk.salt) } } },
@@ -410,6 +434,16 @@ function linksRow() {
 }
 
 async function boot() {
+  try {
+    const hello = await (await fetch('/api/hello', { headers: { 'X-Zsettle': '1' } })).json();
+    if (hello.mode === 'hosted') {
+      S.hosted = hello;
+      if (!hello.signed_in) return render(viewWelcomeHosted());
+      return refresh();
+    }
+  } catch {
+    /* an old app without /api/hello: local mode */
+  }
   const m = location.hash.match(/token=([0-9a-f]{32})/);
   if (m) {
     sessionStorage.setItem('zsettle-token', m[1]);
@@ -430,6 +464,7 @@ async function refresh() {
   } catch (e) {
     return render(h('div', { class: 'onboard' }, h('div', { class: 'panel card' }, h('p', { class: 'err' }, human(e.message)))));
   }
+  if (S.hosted && !S.status.unlocked) return render(viewWelcomeHosted());
   if (!S.status.wallet) return render(viewCreate());
   if (!S.status.unlocked) return render(viewUnlock());
   renderShell();
@@ -532,6 +567,84 @@ function viewCreate() {
   );
 }
 
+function viewWelcomeHosted() {
+  const err = h('p', { class: 'small err', role: 'alert' });
+  const busy = (b) => document.querySelectorAll('.onboard .btn').forEach((x) => (x.disabled = b));
+  async function act(fn) {
+    err.textContent = '';
+    busy(true);
+    try {
+      await fn();
+    } catch (e) {
+      err.textContent = e.name === 'NotAllowedError' ? 'The passkey prompt was cancelled.' : human(e.message);
+    } finally {
+      busy(false);
+    }
+  }
+  async function done() {
+    S.hosted.signed_in = true;
+    S.view = 'wallet';
+    await refresh();
+  }
+  const createPk = () => act(async () => {
+    const { pk, passphrase } = await passkeyCreate();
+    await api('/api/wallet/create', { passphrase, passkey: pk });
+    await done();
+  });
+  const signInPk = () => act(async () => {
+    await api('/api/unlock', await passkeySignIn());
+    await done();
+  });
+  const code = h('input', { class: 'input', id: 'code', placeholder: 'Wallet code', autocomplete: 'username', autocapitalize: 'off', spellcheck: 'false' });
+  const pass = h('input', { class: 'input', id: 'pw', type: 'password', placeholder: 'Passphrase (10 characters or more)', autocomplete: 'current-password' });
+  const signInPw = () => act(async () => {
+    await api('/api/unlock', { code: code.value.trim(), passphrase: pass.value });
+    await done();
+  });
+  const createPw = () => act(async () => {
+    if (pass.value.length < 10) throw new Error('Use a passphrase of at least 10 characters.');
+    const r = await api('/api/wallet/create', { passphrase: pass.value });
+    await done();
+    showCode(r.code);
+  });
+  const pwBox = h(
+    'div',
+    { class: 'stack', hidden: true },
+    h('div', { class: 'field' }, h('label', { for: 'code' }, 'Wallet code (to sign in)'), code),
+    h('div', { class: 'field' }, h('label', { for: 'pw' }, 'Passphrase'), pass),
+    h('div', { class: 'row' }, h('button', { class: 'btn', onclick: signInPw }, 'Sign in'), h('button', { class: 'btn', onclick: createPw }, 'New wallet with this passphrase')),
+  );
+  return h(
+    'main',
+    { class: 'onboard' },
+    h(
+      'div',
+      { class: 'panel' },
+      h('div', { class: 'hero' }, logo(), h('h1', null, 'Trade privately on Zcash'), h('p', { class: 'lede' }, 'Buy and sell items for ZEC in one shielded transaction. No escrow, no one in the middle.')),
+      h(
+        'div',
+        { class: 'card stack lg' },
+        h('div', { class: 'callout info' }, icon('info'), h('span', null, 'This is a public demo on the Zcash testnet: the coins are free and have no value. The demo server keeps your wallet; for real money, run zsettle on your own computer.')),
+        h('button', { class: 'btn primary lg block', onclick: createPk, disabled: !passkeyUsable() }, icon('finger'), 'Create a wallet with a passkey'),
+        h('button', { class: 'btn lg block', onclick: signInPk, disabled: !passkeyUsable() }, icon('lock'), 'Sign in with your passkey'),
+        h('button', { class: 'linkbtn', onclick: () => (pwBox.hidden = !pwBox.hidden) }, 'No passkey? Use a wallet code and passphrase'),
+        pwBox,
+        err,
+      ),
+      linksRow(),
+    ),
+  );
+}
+
+function showCode(code) {
+  const sh = sheet({
+    title: 'Your wallet code',
+    body: [h('p', { class: 'muted' }, 'You sign in with this code and your passphrase. Write both down: nobody can recover them.'), h('div', { class: 'addr mono' }, code)],
+    foot: [h('button', { class: 'btn primary', onclick: () => copy(code, 'Code copied') }, icon('copy'), 'Copy code')],
+  });
+  sh.box.querySelector('.addr').style.fontSize = '22px';
+}
+
 function viewUnlock() {
   const err = h('p', { class: 'small err', role: 'alert' });
   const pk = S.status.passkey;
@@ -600,8 +713,9 @@ function renderShell() {
       h('a', { href: LINKS.docs, target: '_blank', rel: 'noopener noreferrer' }, icon('book'), 'Docs'),
       h('a', { href: LINKS.github, target: '_blank', rel: 'noopener noreferrer' }, icon('github'), 'GitHub'),
       h('a', { href: LINKS.x, target: '_blank', rel: 'noopener noreferrer' }, icon('xlogo'), 'Follow on X'),
-      h('div', { class: 'who' }, h('span', null, st.profile), netChip.cloneNode(true)),
-      h('a', { href: '#', onclick: (e) => { e.preventDefault(); lock(); } }, icon('lock'), 'Lock wallet'),
+      h('a', { href: '#', onclick: (e) => { e.preventDefault(); openBackup(); } }, icon('shield'), 'Backup words'),
+      h('div', { class: 'who' }, h('span', null, st.hosted ? 'Code ' + st.code : st.profile), netChip.cloneNode(true)),
+      h('a', { href: '#', onclick: (e) => { e.preventDefault(); lock(); } }, icon('lock'), st.hosted ? 'Sign out' : 'Lock wallet'),
     ),
   );
   const top = h(
@@ -623,11 +737,38 @@ function openMenu() {
     title: 'zsettle',
     body: [
       h('div', { class: 'list' }, a(LINKS.docs, 'book', 'Docs'), a(LINKS.github, 'github', 'Source on GitHub'), a(LINKS.x, 'xlogo', 'Follow on X')),
-      h('p', { class: 'small muted' }, 'Wallet ' + S.status.profile + ' · ' + (S.status.network === 'main' ? 'Mainnet' : 'Testnet')),
+      h('p', { class: 'small muted' }, (S.status.hosted ? 'Wallet code ' + S.status.code : 'Wallet ' + S.status.profile) + ' · ' + (S.status.network === 'main' ? 'Mainnet' : 'Testnet')),
     ],
-    foot: [h('button', { class: 'btn', onclick: () => { sh.close(); lock(); } }, icon('lock'), 'Lock wallet')],
+    foot: [h('button', { class: 'btn', onclick: () => { sh.close(); openBackup(); } }, icon('shield'), 'Backup words'), h('button', { class: 'btn', onclick: () => { sh.close(); lock(); } }, icon('lock'), S.hosted ? 'Sign out' : 'Lock wallet')],
   });
   sh.box.querySelectorAll('a.li').forEach((x) => (x.style.textDecoration = 'none'));
+}
+
+async function openBackup() {
+  const pk = S.status.passkey;
+  const pass = h('input', { class: 'input', type: 'password', placeholder: 'Your passphrase', autocomplete: 'current-password', 'aria-label': 'Passphrase' });
+  const err = h('p', { class: 'small err', role: 'alert' });
+  const sh = sheet({
+    title: 'Backup words',
+    body: [
+      h('div', { class: 'callout warn' }, icon('alert'), h('span', null, 'Anyone who sees these 24 words controls this wallet. Write them on paper, out of sight of cameras, and never type them into a website.')),
+      pk ? h('p', { class: 'small muted' }, 'Confirm with your passkey to show them.') : pass,
+      err,
+    ],
+    foot: [h('button', { class: 'btn primary', onclick: () => show() }, pk ? [icon('finger'), 'Confirm and show'] : 'Show words')],
+  });
+  async function show() {
+    err.textContent = '';
+    try {
+      const passphrase = pk ? 'passkey:' + hexOf(await passkeySecret(pk)) : pass.value;
+      const r = await api('/api/backup', { passphrase });
+      const grid = h('ol', { class: 'words' }, r.words.map((w) => h('li', null, w)));
+      sh.setBody(h('div', { class: 'callout warn' }, icon('alert'), h('span', null, 'Write these down in order. Close this when you are done.')), grid);
+      sh.setFoot(h('button', { class: 'btn primary', onclick: () => sh.close() }, 'I wrote them down'));
+    } catch (e) {
+      err.textContent = e.name === 'NotAllowedError' ? 'The passkey prompt was cancelled.' : human(e.message);
+    }
+  }
 }
 
 function go(view) {
@@ -643,9 +784,17 @@ function go(view) {
 }
 
 async function lock() {
-  await api('/api/lock', {});
+  try {
+    await api('/api/lock', {});
+  } catch {
+    /* already signed out */
+  }
   S.timers.forEach(clearInterval);
   S.wallet = S.market = S.shop = S.activity = null;
+  if (S.hosted) {
+    S.hosted.signed_in = false;
+    return render(viewWelcomeHosted());
+  }
   await refresh();
 }
 
@@ -672,6 +821,9 @@ async function loadView(quiet) {
       S.shop = s;
     } else if (view === 'activity') {
       S.activity = await api('/api/activity');
+    } else if (view === 'market' && S.hosted) {
+      S.shops = await api('/api/shops');
+      if (!S.wallet) S.wallet = await api('/api/wallet');
     }
   } catch (e) {
     if (!quiet) toast(human(e.message), 'err');
@@ -681,7 +833,7 @@ async function loadView(quiet) {
   if (!c) return;
   // A background refresh redraws only when something changed, so a tap never lands on a
   // screen that is being replaced.
-  const key = JSON.stringify([view, S.wallet, S.shop && S.shop.running, S.activity, S.market, S.status && S.status.sellers]);
+  const key = JSON.stringify([view, S.wallet, S.shop && S.shop.running, S.activity, S.market, S.status && S.status.sellers, S.shops]);
   if (quiet && key === S.lastKey && c.firstChild && !c.querySelector('[aria-busy="true"]')) {
     updateSyncChip();
     return;
@@ -701,6 +853,8 @@ function viewWallet() {
   return h(
     'div',
     { class: 'stack lg' },
+    S.hosted ? h('div', { class: 'callout info' }, icon('info'), h('span', null, 'Public demo on the Zcash testnet. Wallet code ', h('b', null, S.status.code || ''), '. Coins here are free and worthless.')) : null,
+    S.status.faucet ? h('div', { class: 'card row nowrap' }, h('span', { class: 'ico' }, icon('spark')), h('div', { class: 'grow' }, h('b', null, 'Free test coins'), h('div', { class: 'small muted' }, 'Get 0.003 test ZEC to try buying and selling.')), h('button', { class: 'btn primary', onclick: getCoins }, 'Get coins')) : null,
     h(
       'section',
       { class: 'balance-card', 'aria-label': 'Balance' },
@@ -733,6 +887,13 @@ function viewWallet() {
       ? h('div', null, h('div', { class: 'section-title' }, 'Recent activity', h('span', { class: 'spacer' }), h('button', { class: 'linkbtn', onclick: () => go('activity') }, 'See all')), h('div', { class: 'card', style: null }, activityList(S.activity.slice(0, 4))))
       : null,
   );
+}
+
+async function getCoins() {
+  const sh = sheet({ title: 'Free test coins', body: [] });
+  await runInSheet(sh, '/api/faucet', {}, { total: 1, success: (r) => ({ title: 'On their way', text: zec(r.amount_zat) + ' arrives in about a minute and can be spent after 10 confirmations, a few minutes later.', extra: txRow(r.txid) }), failTitle: 'No coins this time' });
+  S.status = await api('/api/status');
+  loadView(true);
 }
 
 function itemsGrid(items, onOpen, emptyText) {
@@ -877,12 +1038,16 @@ function viewMarket() {
   }
   input.addEventListener('keydown', (e) => e.key === 'Enter' && open());
   const recent = (S.status.sellers || []).filter((s) => !S.market || s !== S.market.base);
+  const openShops = (S.shops || []).filter((s) => !S.market || s.base !== S.market.base);
   return h(
     'div',
     null,
     h('h2', { class: 'page' }, 'Market'),
     h('p', { class: 'pagesub' }, 'Open a shop by its address. The seller’s signature is checked before anything is shown.'),
     h('div', { class: 'card stack' }, h('div', { class: 'field' }, h('label', { for: 'shopurl' }, 'Shop address'), h('div', { class: 'inputwrap' }, input, openBtn)), err, recent.length ? h('div', null, h('div', { class: 'small muted', style: null }, 'Recent shops'), h('div', { class: 'list' }, recent.slice(0, 4).map((s) => h('button', { class: 'li', onclick: () => open(s) }, avatar(s, 'ico'), h('span', { class: 'grow' }, h('div', { class: 'title' }, s.replace(/^https?:\/\//, '')), h('div', { class: 'sub' }, 'Opened before')), icon('chevron'))))) : null),
+    S.hosted && openShops.length
+      ? h('div', null, h('div', { class: 'section-title' }, 'Open shops on this demo'), h('div', { class: 'card' }, h('div', { class: 'list' }, openShops.map((s) => h('button', { class: 'li', onclick: () => open(s.base) }, shopAvatar(s.base), h('span', { class: 'grow' }, h('div', { class: 'title' }, s.name + (s.base === S.status.public_shop ? ' (yours)' : '')), h('div', { class: 'sub' }, s.items + ' item' + (s.items === 1 ? '' : 's') + ' for sale')), icon('chevron'))))))
+      : null,
     S.market ? viewShopFront() : null,
   );
 }
@@ -928,7 +1093,7 @@ function openShopItem(it, wrongNet) {
       h('div', { class: 'summary' }, h('div', { class: 'r' }, h('span', null, 'Price'), h('b', null, zec(it.price_zat))), h('div', { class: 'r' }, h('span', null, 'Seller'), h('span', null, S.market.base.replace(/^https?:\/\//, ''))), h('div', { class: 'r' }, h('span', null, 'Item note'), h('span', { class: 'mono' }, short(it.note, 8)))),
       wrongNet ? h('div', { class: 'callout warn' }, icon('alert'), h('span', null, 'This shop is on another network than your wallet.')) : null,
     ],
-    foot: [h('button', { class: 'btn', onclick: () => { sh.close(); openHistory(S.market.base, it.note, it.name); } }, icon('history'), 'History'), h('button', { class: 'btn primary', disabled: wrongNet, onclick: () => buyReview(sh, it) }, icon('bag'), 'Buy')],
+    foot: [h('button', { class: 'btn', onclick: () => { sh.close(); openHistory(S.market.base, it.note, it.name); } }, icon('history'), 'History'), S.market.own ? h('span', { class: 'chip' }, 'Your own shop') : h('button', { class: 'btn primary', disabled: wrongNet, onclick: () => buyReview(sh, it) }, icon('bag'), 'Buy')],
   });
 }
 
@@ -1023,7 +1188,7 @@ function viewSell() {
   const w = S.wallet || { items: [] };
   const shop = S.shop || { running: false, events: [] };
   const listen = (shop.listen || (S.status.shop && S.status.shop.listen) || '127.0.0.1:8900');
-  const shopUrl = 'http://' + listen.replace('0.0.0.0', location.hostname === 'localhost' ? '127.0.0.1' : location.hostname);
+  const shopUrl = shop.public || (S.status.shop && S.status.shop.public) || 'http://' + listen.replace('0.0.0.0', location.hostname === 'localhost' ? '127.0.0.1' : location.hostname);
   const sw = h('button', { class: 'switch', role: 'switch', 'aria-checked': String(!!shop.running), 'aria-label': 'Shop open', onclick: () => toggleShop(!shop.running, sw) });
   const names = h('textarea', { class: 'input', id: 'names', placeholder: 'One name per line\nGolden ticket #1\nGolden ticket #2' });
   const listed = w.items.filter((i) => i.listed_zat).length;
@@ -1042,7 +1207,7 @@ function viewSell() {
         shop.running
           ? h('div', { class: 'stack' }, h('div', { class: 'addr mono' }, shopUrl), h('div', { class: 'row' }, h('button', { class: 'btn sm', onclick: () => copy(shopUrl, 'Shop address copied') }, icon('copy'), 'Copy address'), navigator.share ? h('button', { class: 'btn sm', onclick: () => navigator.share({ text: shopUrl }).catch(() => {}) }, icon('share'), 'Share') : null))
           : h('p', { class: 'small muted' }, listed ? 'Open the shop so buyers can reach it.' : 'List an item below, then open the shop.'),
-        h('details', null, h('summary', { class: 'small muted' }, 'Advanced'), h('div', { class: 'field', style: null }, h('label', { for: 'listen' }, 'Listen on'), h('input', { class: 'input', id: 'listen', value: listen, onchange: (e) => (S.listen = e.target.value) }), h('div', { class: 'hint' }, 'Use 0.0.0.0:8900 to let other machines in. For the internet, put a TLS proxy or a Tor hidden service in front.'))),
+        S.hosted ? null : h('details', null, h('summary', { class: 'small muted' }, 'Advanced'), h('div', { class: 'field', style: null }, h('label', { for: 'listen' }, 'Listen on'), h('input', { class: 'input', id: 'listen', value: listen, onchange: (e) => (S.listen = e.target.value) }), h('div', { class: 'hint' }, 'Use 0.0.0.0:8900 to let other machines in. For the internet, put a TLS proxy or a Tor hidden service in front.'))),
       ),
       h(
         'div',
@@ -1179,6 +1344,7 @@ const KIND = {
   cancel: ['', 'x'],
   pay: ['out', 'up'],
   wallet: ['acc', 'shield'],
+  faucet: ['in', 'down'],
 };
 function activityList(items) {
   return h(
@@ -1192,7 +1358,7 @@ function activityList(items) {
         { class: 'li' },
         h('span', { class: 'ico ' + kind }, icon(ic)),
         h('div', { class: 'grow' }, h('div', { class: 'title' }, a.text || a.kind), h('div', { class: 'sub' }, ago(a.at), a.txid ? [' · ', txLink(a.txid, 5)] : null)),
-        amount ? h('span', { class: 'amt' + (a.kind === 'sale' ? ' in' : '') }, (a.kind === 'sale' ? '+' : '−') + zec(amount)) : null,
+        amount ? h('span', { class: 'amt' + (a.kind === 'sale' || a.kind === 'faucet' ? ' in' : '') }, (a.kind === 'sale' || a.kind === 'faucet' ? '+' : '−') + zec(amount)) : null,
       );
     }),
   );
