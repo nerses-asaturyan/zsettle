@@ -459,3 +459,7 @@ ol.words li { padding: 4px 0; }
   .shophead .row { gap: 6px; }
   .shophead b { font-size: 15px; word-break: break-all; }
 }
+@media (max-width: 600px) {
+  .li .sub { overflow: visible; white-space: normal; }
+  .li .sub .txlink .iconbtn { display: none; }
+}
