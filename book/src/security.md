@@ -26,7 +26,9 @@ Report problems privately as described in `SECURITY.md`. The full threat table i
 
 - The mnemonic is age-encrypted: to an identity file created owner-only, or to a passphrase
   (scrypt). Someone who copies the wallet directory learns its history from the database but
-  cannot spend.
+  cannot spend. A passphrase that comes from a passkey (`passkey:` and 64 hex digits, 256
+  random bits) gets a light scrypt work factor, since it cannot be guessed; a typed
+  passphrase keeps age's full one.
 - On Unix, new wallet directories, `keys.toml`, the reservations file, the full and final
   PCZT files and the reply file are owner-only. The reservations file, the PCZT files and the
   reply file are written to a new file first and then renamed into place, so a crash or a
