@@ -68,8 +68,10 @@ SystemCallFilter=@system-service
 SystemCallArchitectures=native
 CapabilityBoundingSet=
 UMask=0077
-# No cloud metadata or other link-local addresses from this service.
-IPAddressDeny=169.254.0.0/16 fe80::/10
+# No cloud metadata, link-local or private addresses from this service (loopback stays open
+# for its own shops).
+IPAddressDeny=169.254.0.0/16 fe80::/10 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 fc00::/7
+ProtectProc=invisible
 LimitNOFILE=4096
 TasksMax=512
 MemoryMax=3G
@@ -80,7 +82,11 @@ WantedBy=multi-user.target
 UNIT
 
 echo "== HTTPS"
+if [ -f /etc/caddy/Caddyfile ] && ! grep -q 'zsettle demo' /etc/caddy/Caddyfile; then
+  cp /etc/caddy/Caddyfile "/etc/caddy/Caddyfile.before-zsettle.$(date +%s)"
+fi
 cat > /etc/caddy/Caddyfile <<CADDY
+# zsettle demo (written by deploy/setup.sh)
 {
 	servers {
 		timeouts {
@@ -96,7 +102,10 @@ $DOMAIN {
 	request_body {
 		max_size 2MB
 	}
-	reverse_proxy 127.0.0.1:$PORT
+	reverse_proxy 127.0.0.1:$PORT {
+		# Whole bodies reach the app at once, so slow senders hold no app connection.
+		request_buffers 2MB
+	}
 	header Strict-Transport-Security "max-age=31536000"
 }
 CADDY

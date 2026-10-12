@@ -32,11 +32,14 @@ Data lives in `/var/lib/zsettle/data`: one directory per wallet, `hub.json` (whi
 ## Limits built in
 
 - The server talks to its own shops only: a visitor cannot make it fetch or post to any other address.
-- 40 new wallets an hour in all, 3 an hour per visitor, 300 in total; 25 shops open at once; test coins twice a day per visitor and once per wallet.
-- At most two tasks per wallet and twelve in all; at most four passphrase checks at once; a request must arrive within 30 seconds.
-- Passphrases are at least 12 characters. Five wrong tries in a row make a wallet, or a visitor, wait one minute, then longer each time, up to an hour.
-- A session lasts 12 hours; a wallet nobody used for two hours is locked again. An open shop keeps signing offers while its owner is away.
+- A visitor is an IPv4 address or an IPv6 /64. 40 new wallets an hour in all, 3 an hour per visitor, 500 in total; a wallet that was never once synced, got no test coins and listed nothing is removed after three days. 25 shops open at once.
+- Test coins once per wallet, twice a day per visitor, 12 an hour in all; at most four faucet payments wait at once. A payment that may have reached the network is never sent again.
+- At most two tasks per wallet and twelve in all; at most four passphrase checks at once (others wait their turn a few seconds); at most three commands that prove at once; a request must arrive within 30 seconds.
+- Passphrases are at least 12 characters. Ten passphrase checks a minute per visitor, right or wrong. Five wrong tries in a row make that visitor wait one minute, then longer each time, up to an hour; the count is forgotten an hour after the last wrong try. Wrong tries never hold back the wallet's owner on another connection, nor a passkey sign-in.
+- A session lasts 12 hours; a wallet nobody used for two hours is locked again. An open shop keeps signing offers while its owner is away (the page says so at sign-out).
+- While a wallet action pauses a shop, its listings are still served and offers wait for it to open again; buyers retry for a short outage.
+- State files are replaced whole (a new file, then a rename), so a crash never leaves half a file. If `hub.json` or a wallet's `app.json` cannot be read, the server refuses to start rather than start empty.
 - Requests must come from the site itself: the Host and Origin are checked, POSTs need a custom header, and the session cookie is `__Host-` prefixed, HttpOnly, Secure and SameSite=Strict.
 - Only three requests pass to a shop: its listings, an offer, and a reply; every answer carries the server's own security headers.
-- The service runs under systemd with a read-only system, no new privileges, no link-local addresses (so no cloud metadata), and caps on memory, processes and CPU. Caddy refuses bodies above 2 MB and slow requests.
-- `--network main` is refused unless `--allow-hosted-mainnet` is given: a hosted server holds its visitors' wallets.
+- The service runs under systemd with a read-only system, no new privileges, no link-local or private addresses (so no cloud metadata), a hidden process list, and caps on memory, processes and CPU. Caddy refuses bodies above 2 MB and slow requests, and hands each body to the app whole. The script keeps a copy of any Caddyfile it replaces.
+- `--network main` is refused unless `--allow-hosted-mainnet` is given: a hosted server holds its visitors' wallets. A build from `main` refuses `--network test`, since it syncs mainnet only.

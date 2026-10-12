@@ -785,6 +785,9 @@ function go(view) {
 }
 
 async function lock() {
+  // A hosted shop keeps selling after its owner signs out; say so first.
+  if (S.hosted && S.status && S.status.shop && S.status.shop.running &&
+      !confirm('Your shop stays open while you are away: it keeps selling and signing offers. To close it, stop it on the Sell tab first. Sign out anyway?')) return;
   try {
     await api('/api/lock', {});
   } catch {
