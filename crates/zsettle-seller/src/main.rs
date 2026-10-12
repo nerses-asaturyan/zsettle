@@ -187,7 +187,7 @@ enum Cmd {
         #[arg(long, env = "ZSETTLE_WALLET")]
         wallet: PathBuf,
         /// UUID of the item account.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_ITEM_ACCOUNT")]
         item_account: String,
     },
     /// Create or update the signed public listings file for this wallet's item account.
