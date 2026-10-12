@@ -691,7 +691,7 @@ function syncChip() {
   const st = S.status || {};
   const at = st.last_sync && st.last_sync.at;
   const label = S.syncing ? 'Syncing…' : at ? 'Synced ' + ago(at) : 'Not synced';
-  return h('button', { class: 'chip ' + (S.syncing ? 'info' : at ? 'ok' : 'warn'), id: 'syncchip', onclick: () => backgroundSync(), title: 'Sync now' }, S.syncing ? h('span', { class: 'spinner sm' }) : h('span', { class: 'dot' }), label);
+  return h('button', { class: 'chip sync ' + (S.syncing ? 'info' : at ? 'ok' : 'warn'), id: 'syncchip', onclick: () => backgroundSync(), title: label + ' (tap to sync now)', 'aria-label': label }, S.syncing ? h('span', { class: 'spinner sm' }) : h('span', { class: 'dot' }), h('span', { class: 'lbl' }, label));
 }
 function updateSyncChip() {
   const old = document.getElementById('syncchip');

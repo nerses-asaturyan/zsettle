@@ -396,3 +396,66 @@ ol.words { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px 16px; 
 @media (min-width: 480px) { ol.words { grid-template-columns: repeat(3, 1fr); } }
 ol.words li { padding: 4px 0; }
 .card.row .ico { width: 42px; height: 42px; border-radius: 13px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); flex: none; }
+
+/* ---------- phones: denser, nothing past the edge ---------- */
+.topbar { overflow: hidden; }
+.topbar > * { flex-shrink: 0; }
+.topbar .brand { flex-shrink: 1; min-width: 0; }
+.chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.shell { overflow-x: clip; }
+@media (max-width: 600px) {
+  body { font-size: 15px; }
+  :root { --top-h: 52px; --nav-h: 58px; }
+  .topbar { padding: calc(4px + var(--safe-t)) 6px 4px 12px; gap: 6px; }
+  .topbar .logo { width: 26px; height: 26px; }
+  .topbar .wordmark { font-size: 17px; }
+  .topbar .chip { min-height: 26px; padding: 0 8px; font-size: 12px; }
+  .topbar .chip.sync .lbl { display: none; }
+  .topbar .chip.sync { width: 30px; justify-content: center; padding: 0; }
+  .content { padding: 12px 12px calc(var(--nav-h) + 20px + var(--safe-b)); }
+  .card { padding: 14px; border-radius: 16px; }
+  .stack { gap: 10px; }
+  .stack.lg { gap: 14px; }
+  h2.page { font-size: 22px; margin: 2px 0 4px; }
+  p.pagesub { margin: 0 0 14px; font-size: 14px; }
+  .section-title { margin: 20px 0 10px; font-size: 16px; }
+  .balance-card { padding: 16px 14px 14px; border-radius: 18px; }
+  .balance-card .amount { font-size: clamp(28px, 9vw, 38px); margin: 4px 0 2px; }
+  .balance-card .actions { margin-top: 12px; gap: 8px; }
+  .btn { padding: 0 14px; font-size: 15px; }
+  .btn.lg { min-height: 48px; font-size: 16px; border-radius: 12px; }
+  .callout { padding: 10px 12px; font-size: 13px; }
+  .items { gap: 10px; }
+  .art { font-size: 22px; aspect-ratio: 4 / 3; }
+  .art.big { aspect-ratio: 2 / 1; font-size: 34px; border-radius: 14px; }
+  .item { border-radius: 14px; }
+  .item .body { padding: 8px 10px 10px; }
+  .item .name, .item .price { font-size: 14px; }
+  .li { min-height: 56px; padding: 8px 0; gap: 10px; }
+  .li .ico { width: 36px; height: 36px; border-radius: 11px; }
+  .li .ico svg.i { width: 18px; height: 18px; }
+  .li .title { font-size: 14px; }
+  .li .amt { font-size: 14px; }
+  .bottomnav { padding: 4px 4px calc(4px + var(--safe-b)); }
+  .navbtn { min-height: 48px; font-size: 11px; }
+  .navbtn svg.i { width: 21px; height: 21px; }
+  .sheet { padding: 4px 14px calc(14px + var(--safe-b)); border-radius: 20px 20px 0 0; }
+  .sheet .head { min-height: 46px; }
+  .sheet .head h2 { font-size: 17px; }
+  .sheet .foot { margin-top: 14px; }
+  .summary .r { padding: 10px 12px; font-size: 14px; }
+  .qr { width: min(200px, 60vw); }
+  .addr { padding: 10px 12px; font-size: 13px; }
+  .result .big { width: 52px; height: 52px; }
+  .result h3 { font-size: 18px; }
+  .empty { padding: 18px 8px; }
+  .empty .ico { width: 46px; height: 46px; }
+  .onboard { padding-left: 14px; padding-right: 14px; }
+  .onboard .hero .logo { width: 52px; height: 52px; margin-bottom: 12px; }
+  .onboard h1 { font-size: 25px; }
+  .onboard .lede { font-size: 15px; }
+  .shophead { gap: 10px; }
+  .avatar { width: 44px; height: 44px; border-radius: 13px; }
+  .shophead .row { gap: 6px; }
+  .shophead b { font-size: 15px; word-break: break-all; }
+}
