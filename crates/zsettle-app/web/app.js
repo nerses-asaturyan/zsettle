@@ -570,7 +570,10 @@ function viewCreate() {
 
 function viewWelcomeHosted() {
   const err = h('p', { class: 'small err', role: 'alert' });
+  const note = h('p', { class: 'small muted', 'aria-live': 'polite' });
   const busy = (b) => document.querySelectorAll('.onboard .btn').forEach((x) => (x.disabled = b));
+  // Say what is happening at each step, so the wait never looks stuck.
+  const say = (t) => (note.textContent = t || '');
   async function act(fn) {
     err.textContent = '';
     busy(true);
@@ -580,6 +583,7 @@ function viewWelcomeHosted() {
       err.textContent = e.name === 'NotAllowedError' ? 'The passkey prompt was cancelled.' : human(e.message);
     } finally {
       busy(false);
+      say('');
     }
   }
   async function done() {
@@ -588,12 +592,18 @@ function viewWelcomeHosted() {
     await refresh();
   }
   const createPk = () => act(async () => {
+    say('Confirm with your device. Some devices ask twice: once to make the passkey, once to read its key.');
     const { pk, passphrase } = await passkeyCreate();
+    say('Creating your shielded wallet…');
     await api('/api/wallet/create', { passphrase, passkey: pk });
+    say('Opening your wallet…');
     await done();
   });
   const signInPk = () => act(async () => {
-    await api('/api/unlock', await passkeySignIn());
+    say('Confirm with your device.');
+    const body = await passkeySignIn();
+    say('Opening your wallet…');
+    await api('/api/unlock', body);
     await done();
   });
   const code = h('input', { class: 'input', id: 'code', placeholder: 'Wallet code', autocomplete: 'username', autocapitalize: 'off', spellcheck: 'false' });
@@ -630,6 +640,7 @@ function viewWelcomeHosted() {
         h('button', { class: 'btn lg block', onclick: signInPk, disabled: !passkeyUsable() }, icon('lock'), 'Sign in with your passkey'),
         h('button', { class: 'linkbtn', onclick: () => (pwBox.hidden = !pwBox.hidden) }, 'No passkey? Use a wallet code and passphrase'),
         pwBox,
+        note,
         err,
       ),
       howItWorks(),
