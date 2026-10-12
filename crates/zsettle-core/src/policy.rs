@@ -126,6 +126,37 @@ pub fn check(
     policy: &SellerPolicy,
     known_anchors: &[orchard::Anchor],
 ) -> Result<Approved, PolicyError> {
+    inspect(
+        pczt,
+        item_nullifier,
+        Some((seller_nullifiers, seller_ivk)),
+        policy,
+        known_anchors,
+    )
+}
+
+/// The checks that use nothing of the seller's own: branch, expiry, anchor, and exactly one
+/// spend of the listed item with a randomizer. They run before the proof is verified, so a
+/// refusal at this stage tells the sender nothing the listings file does not already give.
+/// The payment and the other-seller-note check wait for the proof: with a valid proof the
+/// sender knows every note it spends and every note it creates, so neither can be a probe
+/// built from someone else's on-chain data. `paid_zat` is zero here.
+pub fn check_public(
+    pczt: &Pczt,
+    item_nullifier: &Nullifier,
+    policy: &SellerPolicy,
+    known_anchors: &[orchard::Anchor],
+) -> Result<Approved, PolicyError> {
+    inspect(pczt, item_nullifier, None, policy, known_anchors)
+}
+
+fn inspect(
+    pczt: &Pczt,
+    item_nullifier: &Nullifier,
+    secrets: Option<(&[Nullifier], &PreparedIncomingViewingKey)>,
+    policy: &SellerPolicy,
+    known_anchors: &[orchard::Anchor],
+) -> Result<Approved, PolicyError> {
     let branch = *pczt.global().consensus_branch_id();
     if branch != policy.branch_id {
         return Err(PolicyError::WrongBranch {
@@ -169,7 +200,7 @@ pub fn check(
             let mut paid: u64 = 0;
             for (i, action) in bundle.actions().iter().enumerate() {
                 let nf = action.spend().nullifier();
-                if nf != item_nullifier && seller_nullifiers.contains(nf) {
+                if secrets.is_some_and(|(nfs, _)| nf != item_nullifier && nfs.contains(nf)) {
                     *found.borrow_mut() = Some(Err(PolicyError::ExtraSellerSpend(i)));
                     return Ok(());
                 }
@@ -191,6 +222,9 @@ pub fn check(
                     }
                     item_idx = Some(i);
                 }
+                let Some((_, seller_ivk)) = secrets else {
+                    continue;
+                };
                 // Does this output pay the seller? Trial-decrypt the compact ciphertext; the
                 // decryption only succeeds when the plaintext matches the committed note.
                 let enc = action.output().encrypted_note();
@@ -224,7 +258,7 @@ pub fn check(
     let (item_action_index, paid_zat) = found
         .into_inner()
         .ok_or_else(|| PolicyError::Invalid("no Ironwood bundle".into()))??;
-    if paid_zat < policy.price_zat {
+    if secrets.is_some() && paid_zat < policy.price_zat {
         return Err(PolicyError::Underpaid {
             got: paid_zat,
             want: policy.price_zat,

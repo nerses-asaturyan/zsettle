@@ -12,7 +12,7 @@ use zcash_primitives::transaction::fees::zip317::{FeeError, FeeRule};
 use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
 use zcash_protocol::memo::MemoBytes;
 use zcash_protocol::value::Zatoshis;
-use zsettle_core::policy::{check, prepared_ivk, PolicyError, SellerPolicy};
+use zsettle_core::policy::{check, check_public, prepared_ivk, PolicyError, SellerPolicy};
 
 const TARGET: u32 = 3_514_200;
 
@@ -314,4 +314,33 @@ fn refuses_a_zero_randomizer() {
         check(&edited, &nf, &[nf], &ivk, &policy(6_000), &[f.anchor]),
         Err(PolicyError::ZeroRandomizer(index))
     );
+}
+
+/// Before the proof only public data is judged: an extra seller spend and the payment are
+/// invisible to `check_public`, which still enforces the anchor. After the proof the seller's
+/// own knowledge refuses the extra spend.
+#[test]
+fn public_checks_use_nothing_of_the_sellers() {
+    let f = fixture();
+    let pczt = trade(&f, 6_000, TARGET + 10, true);
+    let nf = f.item_note.nullifier(&f.fvk_item);
+    let extra_nf = f.extra_seller_note.nullifier(&f.fvk_item);
+    let ivk = prepared_ivk(&f.fvk_seller);
+    let public = check_public(&pczt, &nf, &policy(6_000), &[f.anchor]).expect("public checks pass");
+    assert_eq!(public.paid_zat, 0);
+    assert_eq!(
+        check_public(&pczt, &nf, &policy(6_000), &[]),
+        Err(PolicyError::UnknownAnchor)
+    );
+    assert!(matches!(
+        check(
+            &pczt,
+            &nf,
+            &[nf, extra_nf],
+            &ivk,
+            &policy(6_000),
+            &[f.anchor]
+        ),
+        Err(PolicyError::ExtraSellerSpend(_))
+    ));
 }

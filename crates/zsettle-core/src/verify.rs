@@ -268,9 +268,15 @@ async fn trace(
     let mut broken: Option<String> = None;
     let mut scanned_to = from_height;
 
-    'blocks: while let Some(block) = stream.message().await.map_err(|e| anyhow!("stream: {e}"))? {
+    // The stream is read to its end even after the trace resolved, so the server does not
+    // learn at which height the item last moved.
+    let mut finished = false;
+    while let Some(block) = stream.message().await.map_err(|e| anyhow!("stream: {e}"))? {
         let height = u32::try_from(block.height)?;
         scanned_to = height;
+        if finished {
+            continue;
+        }
         for vtx in &block.vtx {
             let txid = txid_hex(&vtx.txid);
             for (i, a) in vtx.ironwood_actions.iter().enumerate() {
@@ -294,7 +300,10 @@ async fn trace(
                     }
                     continue;
                 }
-                let Some((nf, _)) = watch else { break 'blocks };
+                let Some((nf, _)) = watch else {
+                    finished = true;
+                    break;
+                };
                 if act.nullifier() != nf {
                     continue;
                 }
@@ -312,7 +321,8 @@ async fn trace(
                         if previous.is_some_and(|v| v != note.value().inner()) {
                             broken = Some(txid.clone());
                             watch = None;
-                            break 'blocks;
+                            finished = true;
+                            break;
                         }
                         watch = Some((note.nullifier(&ring.0[k].fvk), k));
                     }
@@ -325,7 +335,8 @@ async fn trace(
                             holder: None,
                         });
                         watch = None;
-                        break 'blocks;
+                        finished = true;
+                        break;
                     }
                 }
             }

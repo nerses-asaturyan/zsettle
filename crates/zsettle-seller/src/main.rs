@@ -22,7 +22,9 @@ use zsettle_core::broadcast::{check_consensus_at_tip_blocking, pick_server};
 use zsettle_core::listing::{ListedItem, Listings};
 use zsettle_core::mint::{note_state, NoteState};
 use zsettle_core::pczt as pczt_ops;
-use zsettle_core::policy::{check, describe, prepared_ivk, Approved, PolicyError, SellerPolicy};
+use zsettle_core::policy::{
+    check, check_public, describe, prepared_ivk, Approved, PolicyError, SellerPolicy,
+};
 use zsettle_core::wallet::{
     account_birthday, account_orchard_fvk, create_account, heights, init_wallet, ironwood_note,
     largest_spendable_note, list_accounts, max_scanned_height, next_orchard_address, parse_account,
@@ -51,6 +53,8 @@ const MAX_REASON_FILES: usize = 10_000;
 const MAX_TRADE_ACTIONS: usize = 3;
 /// Connections the HTTP endpoint serves at once.
 const MAX_HTTP_CONNECTIONS: usize = 32;
+/// Filed envelopes carry buyers' note nullifiers: they are deleted after this long.
+const MAX_DONE_AGE_SECS: u64 = 24 * 60 * 60;
 /// Request head the HTTP endpoint reads at most.
 const MAX_HTTP_HEAD: usize = 8 * 1024;
 /// Read and write timeout of one HTTP connection.
@@ -740,7 +744,7 @@ fn main() -> Result<()> {
             let vk = pczt_ops::verifying_key();
             pczt_ops::verify_proof(&pczt, &vk).context("refused: proof")?;
             eprintln!("proof verified");
-            let outcome = process(&db, &w, wallet.network, &l, &pczt, &anchors)?;
+            let outcome = process(&db, &w, wallet.network, &l, &pczt, &anchors, true)?;
             eprintln!("{}", describe(&outcome.result));
             if outcome.item.is_none() && outcome.unavailable > 0 {
                 eprintln!(
@@ -915,6 +919,21 @@ impl Service<'_> {
         if self.sync_cmd.is_none() && !self.no_sync {
             sync_blocking(&wallet, &mut db, self.server).context("syncing the seller wallet")?;
         }
+        // Filed envelopes are kept only as long as a restart could need them.
+        if let Ok(dir) = fs::read_dir(self.inbox.join("done")) {
+            let now = SystemTime::now();
+            for entry in dir.flatten() {
+                let old = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| now.duration_since(t).ok())
+                    .is_some_and(|age| age > Duration::from_secs(MAX_DONE_AGE_SECS));
+                if old {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
         let anchors = recent_ironwood_anchors(&mut db, ANCHOR_DEPTH)?;
         let mut l = Listings::read_verified(self.listings)?;
         if reconcile(&wallet, &db, &mut l)? {
@@ -1054,7 +1073,9 @@ impl Service<'_> {
             )));
         }
         let expiry = *pczt.global().expiry_height();
-        let outcome = match process(db, self.w, self.network, l, &pczt, anchors) {
+        // Stage one: public data only (branch, expiry, anchor, the listed item's spend). A
+        // refusal here tells the sender nothing the listings file does not already give.
+        let outcome = match process(db, self.w, self.network, l, &pczt, anchors, false) {
             Ok(outcome) => outcome,
             // A failure of this pass rather than of the envelope: keep it while its
             // transaction can still be mined.
@@ -1069,8 +1090,8 @@ impl Service<'_> {
                 outcome.unavailable
             )));
         }
-        let approved = match outcome.result {
-            Ok(approved) => approved,
+        match outcome.result {
+            Ok(_) => {}
             // The buyer may be a block or two ahead of this wallet: a root it has not scanned
             // yet, or an expiry measured from a later tip. Judge again next pass.
             Err(PolicyError::UnknownAnchor) if expiry > outcome.tip => {
@@ -1089,16 +1110,26 @@ impl Service<'_> {
                 )))
             }
             Err(e) => return Err(Refusal::Reject(format!("refused: {e}"))),
-        };
+        }
         let item = outcome.item.ok_or_else(|| {
             Refusal::Reject("error: approved trade without a listed item".to_string())
         })?;
+        // Stage two: the proof, once per envelope.
         let tag = pczt_ops::envelope_tag(bytes);
         if !self.verified.borrow().contains(&tag) {
             pczt_ops::verify_proof(&pczt, self.vk)
                 .map_err(|e| Refusal::Reject(format!("refused: {e:#}")))?;
             self.verified.borrow_mut().insert(tag);
         }
+        // Stage three: the checks that use the seller's own keys. With a valid proof the
+        // sender knows every note in the bundle, so these cannot be answered about anyone
+        // else's notes.
+        let approved = match process(db, self.w, self.network, l, &pczt, anchors, true) {
+            Ok(full) => full
+                .result
+                .map_err(|e| Refusal::Reject(format!("refused: {e}")))?,
+            Err(e) => return Err(Refusal::Reject(format!("error: {e:#}"))),
+        };
         let signed = pczt_ops::sign_ironwood_action(pczt, approved.item_action_index, self.ask)
             .map_err(|e| Refusal::Reject(format!("signing failed: {e:#}")))?;
         let bytes = pczt_ops::to_bytes(&signed)
@@ -1178,6 +1209,7 @@ fn process(
     l: &Listings,
     pczt: &pczt::Pczt,
     anchors: &[orchard::Anchor],
+    with_secrets: bool,
 ) -> Result<Outcome> {
     let (target, _) = heights(db, 1)?;
     let tip: u32 =
@@ -1218,7 +1250,11 @@ fn process(
         tip,
         branch_id: u32::from(BranchId::for_height(&network, BlockHeight::from(tip + 1))),
     };
-    let result = check(pczt, &nf, &seller_nfs, &ivk, &policy, anchors);
+    let result = if with_secrets {
+        check(pczt, &nf, &seller_nfs, &ivk, &policy, anchors)
+    } else {
+        check_public(pczt, &nf, &policy, anchors)
+    };
     Ok(Outcome {
         item: Some(item),
         result,
@@ -1474,12 +1510,7 @@ fn handle_http(mut stream: std::net::TcpStream, inbox: &Path, outbox: &Path, lis
             }
         }
         _ => {
-            let _ = respond(
-                &mut stream,
-                404,
-                "text/plain",
-                b"zsettle seller: GET /listings, POST /offer, GET /reply/<tag>",
-            );
+            let _ = respond(&mut stream, 404, "text/plain", b"not found");
         }
     }
 }
@@ -1506,7 +1537,7 @@ fn respond(
     };
     write!(
         stream,
-        "HTTP/1.1 {status} {reason}\r\nServer: zsettle\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     )?;
     stream.write_all(body)?;

@@ -429,6 +429,11 @@ fn passphrase(confirm: bool) -> Result<age::secrecy::SecretString> {
     Ok(age::secrecy::SecretString::new(text.as_str().into()))
 }
 
+/// Birthdays are rounded down to a multiple of this many blocks (about a day), so that the
+/// tree-state request made to create a wallet or an account, and the birthday a listing
+/// later publishes, name no height unique to one wallet.
+pub const BIRTHDAY_ROUNDING: u32 = 1_000;
+
 /// A wallet directory just created by [`init_wallet`].
 #[derive(Serialize)]
 pub struct Created {
@@ -552,7 +557,9 @@ pub fn init_wallet(
             info.chain_name
         ));
     }
-    let birthday_height = info.block_height.saturating_sub(100);
+    // Rounded down, so the tree-state request does not name a height unique to this wallet.
+    let birthday_height =
+        (info.block_height.saturating_sub(100) / BIRTHDAY_ROUNDING) * BIRTHDAY_ROUNDING;
     let tree_state =
         crate::broadcast::fetch_tree_state_blocking(server, birthday_height.saturating_sub(1))?;
     let birthday = AccountBirthday::from_treestate(tree_state, None)
@@ -592,7 +599,7 @@ pub fn init_wallet(
 }
 
 /// Write a file readable by its owner only (on Unix), replacing any previous content.
-fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<()> {
+pub fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut options = fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -661,7 +668,9 @@ pub fn create_account(
     server: &str,
 ) -> Result<(AccountUuid, u32)> {
     let tip = max_scanned_height(db)?.ok_or_else(|| anyhow!("sync the wallet first"))?;
-    let tree_state = crate::broadcast::fetch_tree_state_blocking(server, tip)?;
+    // Rounded down like `init_wallet`: the published birthday then names no exact height.
+    let born = (tip / BIRTHDAY_ROUNDING) * BIRTHDAY_ROUNDING;
+    let tree_state = crate::broadcast::fetch_tree_state_blocking(server, born.saturating_sub(1))?;
     let birthday = AccountBirthday::from_treestate(tree_state, None)
         .map_err(|e| anyhow!("birthday: {e:?}"))?;
     let (id, _usk) = db
@@ -802,14 +811,14 @@ pub fn reserve_note(wallet: &Wallet, note: NoteRef, expiry_height: u32) -> Resul
 
 /// Notes reserved by trades that can still be mined at `tip`. Expired reservations are
 /// dropped from the file.
-pub fn reserved_notes(wallet: &Wallet, tip: u32) -> Result<Vec<NoteRef>> {
-    let mut r = read_reservations(wallet)?;
-    let before = r.notes.len();
-    r.notes.retain(|x| x.expiry_height >= tip);
-    if r.notes.len() != before {
-        write_reservations(wallet, &r)?;
-    }
-    r.notes.iter().map(|x| x.note.parse()).collect()
+pub fn reserved_notes(wallet: &Wallet, _tip: u32) -> Result<Vec<NoteRef>> {
+    // Expired reservations stay: the seller holds that note's nullifier, so paying with it
+    // again would link two offers. `rotate` retires or releases them.
+    read_reservations(wallet)?
+        .notes
+        .iter()
+        .map(|x| x.note.parse())
+        .collect()
 }
 
 // ---- Synchronisation ----------------------------------------------------------------

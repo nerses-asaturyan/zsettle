@@ -38,7 +38,7 @@ secrecy = "0.8"
 toml = "0.8"
 rpassword = "7"
 zeroize = "1"
-ureq = { version = "2", default-features = false, features = ["tls"] }
+ureq = { version = "2", default-features = false, features = ["tls", "socks-proxy", "proxy-from-env"] }
 
 # networking
 tonic = { version = "0.14", features = ["tls-ring", "tls-webpki-roots"] }

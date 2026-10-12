@@ -18,7 +18,7 @@ use zsettle_core::verify::Consignment;
 use zsettle_core::wallet::{
     account_orchard_fvk, account_ufvk, find_account_by_ufvk, heights, import_viewing_key,
     init_wallet, largest_spendable_note, list_accounts, parse_account, release_note, reservations,
-    reserve_note, reserved_notes, sync_blocking, NoteRef, Wallet,
+    reserve_note, reserved_notes, sync_blocking, write_owner_only, NoteRef, Wallet,
 };
 
 #[derive(Parser)]
@@ -307,7 +307,7 @@ enum Cmd {
         #[arg(long)]
         no_sync: bool,
     },
-    /// Merge every spendable note of an account into one note at a fresh address, so that one
+    /// Merge every spendable note of an account into one note at its change address, so that one
     /// note can pay for a trade. Notes reserved for open offers are left alone.
     Consolidate {
         /// Wallet directory.
@@ -670,6 +670,12 @@ fn main() -> Result<()> {
                     })
                     .unwrap_or(zsettle_core::DEFAULT_MAX_EXPIRY_DELTA),
             );
+            if expiry != 0 && expiry < zsettle_core::DEFAULT_MAX_EXPIRY_DELTA {
+                eprintln!(
+                    "warning: an expiry of {expiry} blocks instead of {} marks this trade on chain",
+                    zsettle_core::DEFAULT_MAX_EXPIRY_DELTA
+                );
+            }
             if expiry == 0 || expiry > zsettle_core::DEFAULT_MAX_EXPIRY_DELTA {
                 return Err(anyhow!(
                     "--expiry-delta must be between 1 and {} blocks: a longer expiry would mark the trade on chain, and the seller refuses it anyway",
@@ -728,7 +734,7 @@ fn main() -> Result<()> {
                 Some(n) => n,
                 None => largest_spendable_note(&db, buyer_account, target, &reserved)?
                     .ok_or_else(|| {
-                        anyhow!("no spendable note in the buyer account: notes received from others need 10 confirmations and change 3, and notes reserved by an unsettled trade are skipped")
+                        anyhow!("no spendable note in the buyer account: notes received from others need 10 confirmations and change 3; notes reserved for earlier offers, expired ones included, are skipped until `rotate` retires them (or pass --buyer-note); and notes reserved by an unsettled trade are skipped")
                     })?,
             };
             let _ = account_ufvk(&db, buyer_account)?;
@@ -759,8 +765,7 @@ fn main() -> Result<()> {
                 "note: the seller learns the nullifier of the paying note; if this offer does not settle, spend that note to yourself before using it again"
             );
             let built = build_trade(&mut db, w.network, &req)?;
-            fs::write(&out, pczt_ops::to_bytes(&built.pczt)?)
-                .with_context(|| format!("writing {}", out.display()))?;
+            write_owner_only(&out, &pczt_ops::to_bytes(&built.pczt)?)?;
             let redacted =
                 pczt_ops::redact_for_seller(built.pczt.clone(), built.item_action_index)?;
             let envelope = pczt_ops::to_bytes(&redacted)?;
@@ -842,10 +847,10 @@ fn main() -> Result<()> {
                 ));
             }
             let final_pczt_path = PathBuf::from(format!("{}.pczt", out.display()));
-            fs::write(&final_pczt_path, pczt_ops::to_bytes(&pczt)?)?;
+            write_owner_only(&final_pczt_path, &pczt_ops::to_bytes(&pczt)?)?;
             let tx = pczt_ops::extract(pczt)?;
             let bytes = pczt_ops::tx_bytes(&tx)?;
-            fs::write(&out, &bytes)?;
+            write_owner_only(&out, &bytes)?;
             let mut sent = serde_json::Value::Null;
             if broadcast {
                 check_server_before_sending(&server, w.network)?;
