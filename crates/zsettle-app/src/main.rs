@@ -95,6 +95,8 @@ struct Config {
     #[serde(default)]
     origin_items: HashMap<String, String>,
     shop_listen: Option<String>,
+    /// The last sync: its report and when.
+    last_sync: Option<Value>,
 }
 
 #[derive(Clone, Serialize)]
@@ -197,6 +199,9 @@ fn main() -> Result<()> {
         events: Arc::new(Mutex::new(Vec::new())),
         last_sync: Mutex::new(Value::Null),
     });
+    if let Some(v) = app.cfg.lock().unwrap().last_sync.clone() {
+        *app.last_sync.lock().unwrap() = v;
+    }
     eprintln!(
         "zsettle-app, profile {:?}\nOpen this link in your browser (it carries this session's key; keep it to yourself):\n\n    http://localhost:{}/#token={}\n",
         app.profile, app.port, app.token
@@ -421,7 +426,10 @@ fn api(app: &Arc<App>, req: &Request) -> Result<Value> {
         ("POST", "/api/market") => app.market(&body),
         ("POST", "/api/buy") => app.start_buy(&body),
         ("POST", "/api/verify") => app.start_verify(&body),
-        ("GET", "/api/activity") => Ok(json!(app.cfg.lock().unwrap().activity)),
+        ("GET", "/api/activity") => {
+            app.absorb_sales();
+            Ok(json!(app.cfg.lock().unwrap().activity))
+        }
         ("GET", p) if p.starts_with("/api/jobs/") => {
             let id: u64 = p["/api/jobs/".len()..].parse().context("job id")?;
             let jobs = app.jobs.lock().unwrap();
@@ -622,13 +630,58 @@ impl App {
     fn sync(&self) -> Result<Value> {
         let w = self.w();
         let r = self.seller(&["sync", "--wallet", &w])?;
-        *self.last_sync.lock().unwrap() = json!({ "report": r, "at": now() });
+        self.record_sync(json!({ "report": r, "at": now() }));
         Ok(r)
+    }
+
+    fn record_sync(&self, v: Value) {
+        *self.last_sync.lock().unwrap() = v.clone();
+        self.cfg.lock().unwrap().last_sync = Some(v);
+        let _ = self.save_cfg();
+    }
+
+    /// Copy the shop's sales into the activity log, once each.
+    fn absorb_sales(&self) {
+        let sold: Vec<Value> = self
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e["event"] == "sold")
+            .cloned()
+            .collect();
+        let mut added = false;
+        {
+            let mut cfg = self.cfg.lock().unwrap();
+            for e in sold {
+                let known = cfg
+                    .activity
+                    .iter()
+                    .any(|a| a["kind"] == "sale" && a["txid"] == e["txid"]);
+                if known {
+                    continue;
+                }
+                let name = e["name"]
+                    .as_str()
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or("an item");
+                cfg.activity.insert(
+                    0,
+                    json!({ "kind": "sale", "txid": e["txid"], "text": format!("Sold {name}"), "at": e["at"] }),
+                );
+                added = true;
+            }
+            cfg.activity.truncate(MAX_ACTIVITY);
+        }
+        if added {
+            let _ = self.save_cfg();
+        }
     }
 
     // ------------------------------------------------------------ wallet
 
     fn status(&self) -> Result<Value> {
+        self.absorb_sales();
         let cfg = self.cfg.lock().unwrap().clone();
         let running = self.shop_running();
         Ok(json!({
@@ -740,7 +793,7 @@ impl App {
             // leave a gap in its service.
             return Ok(self.job("sync", |app, id| {
                 app.step(id, "The open shop keeps the wallet in sync");
-                *app.last_sync.lock().unwrap() = json!({ "report": { "by": "shop" }, "at": now() });
+                app.record_sync(json!({ "report": { "by": "shop" }, "at": now() }));
                 Ok(json!({ "by": "shop" }))
             }));
         }
@@ -956,6 +1009,7 @@ impl App {
     }
 
     fn shop_view(&self) -> Result<Value> {
+        self.absorb_sales();
         let running = self.shop_running();
         let listen = self.cfg.lock().unwrap().shop_listen.clone();
         Ok(json!({

@@ -73,7 +73,10 @@ function art(seed, label) {
   for (const c of String(seed)) x = (x * 31 + c.charCodeAt(0)) >>> 0;
   const a = x % 360;
   const b = (a + 40 + (x % 80)) % 360;
-  const el = h('div', { class: 'art' }, (label || '?').trim().slice(0, 2).toUpperCase());
+  const text = String(label || '?').trim();
+  const num = (text.match(/(\d+)\s*$/) || [])[1];
+  const mark = num ? text[0].toUpperCase() + num : text.slice(0, 2).toUpperCase();
+  const el = h('div', { class: 'art' }, mark.slice(0, 4));
   el.style.background = `linear-gradient(135deg, hsl(${a} 70% 45%), hsl(${b} 70% 30%))`;
   return el;
 }
@@ -250,6 +253,7 @@ async function refresh() {
 
 async function loadTab() {
   try {
+    S.status = await api('/api/status');
     if (S.tab === 'wallet') S.wallet = await api('/api/wallet');
     if (S.tab === 'sell') {
       S.wallet = await api('/api/wallet');
@@ -564,7 +568,15 @@ function confirmBuy(it) {
             const r = await runJob('Buying ' + (it.name || 'item'), '/api/buy', { url: S.market.base, item: it.note, name: it.name }, {
               done: (r) => 'Done. The item is yours once the transaction is mined (about a minute). Transaction ' + short(r.txid),
             });
-            if (r) toast('Bought');
+            if (r) {
+              toast('Bought');
+              try {
+                S.market = await api('/api/market', { url: S.market.base });
+              } catch {
+                /* the shop may be busy; the list refreshes next time */
+              }
+              render(viewShell());
+            }
           },
         },
         'Confirm and buy',
@@ -588,10 +600,18 @@ async function showHistory(base, note, name) {
         'div',
         { class: 'timeline' },
         (r.hops || []).map((hop, i) =>
-          h('div', { class: 'hop' }, h('div', null, h('b', null, i === 0 ? 'Created' : 'Changed hands'), ' · block ' + hop.height), h('div', { class: 'mono muted' }, short(hop.txid, 10)), h('div', { class: 'small muted' }, hop.holder ? 'held under ' + String(hop.holder).split('/').pop() : 'held by someone whose key you do not have')),
+          h('div', { class: 'hop' }, h('div', null, h('b', null, i === 0 ? 'Created' : 'Changed hands'), ' · block ' + hop.height), h('div', { class: 'mono muted' }, short(hop.txid, 10)), h('div', { class: 'small muted' }, holderText(hop, i === (r.hops || []).length - 1 && !base && hop.txid === String(note).split(':')[0]))),
         ),
       ),
   });
+}
+
+function holderText(hop, mine) {
+  if (mine) return 'held by you';
+  const h = String(hop.holder || '');
+  if (!h) return 'held by someone whose key you do not have';
+  if (h.endsWith('listings.json')) return 'held by your shop';
+  return 'held by the seller';
 }
 
 function statusText(s) {
