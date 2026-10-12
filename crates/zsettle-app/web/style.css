@@ -142,7 +142,7 @@ svg.i { width: 20px; height: 20px; flex: none; stroke: currentColor; fill: none;
 
 /* ---------- brand ---------- */
 .brand { display: flex; align-items: center; gap: 10px; text-decoration: none; }
-.logo { width: 30px; height: 30px; flex: none; display: block; }
+.logo { width: 30px; height: 30px; flex: none; display: block; color: var(--text); }
 .wordmark { font-weight: 800; font-size: 19px; letter-spacing: -0.02em; }
 .wordmark span { color: var(--accent); }
 

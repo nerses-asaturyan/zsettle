@@ -25,6 +25,7 @@ const INDEX_HTML: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
 const STYLE_CSS: &str = include_str!("../web/style.css");
 const QR_JS: &str = include_str!("../web/qr.js");
+const FAVICON_SVG: &str = include_str!("../web/favicon.svg");
 
 /// Largest request body the page sends (JSON forms).
 const MAX_BODY: usize = 64 * 1024;
@@ -353,6 +354,9 @@ fn handle(app: &Arc<App>, mut stream: TcpStream) {
                 "text/javascript; charset=utf-8",
                 APP_JS.as_bytes(),
             )
+        }
+        ("GET", "/favicon.svg") => {
+            return respond(&mut stream, 200, "image/svg+xml", FAVICON_SVG.as_bytes())
         }
         ("GET", "/qr.js") => {
             return respond(
