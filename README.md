@@ -21,7 +21,18 @@ The buyer builds and proves the whole transaction holding only viewing keys. The
 |---|---|
 | `zsettle-core` | library: items, signed listings, two-party bundle, PCZT roles, seller policy, proof check, wallet sync, provenance verifier, lightwalletd client |
 | `zsettle` | buyer and verifier CLI: `init`, `accounts`, `address`, `pay`, `list`, `sync`, `import-listing`, `buy`, `finish`, `broadcast`, `rotate`, `consolidate`, `notes`, `verify` |
-| `zsettle-seller` | seller service: `init`, `accounts`, `address`, `sync`, `new-item-account`, `mint`, `items`, `publish`, `cancel`, `sign`, `serve` (syncs, reconciles listings with the chain, verifies proofs, signs only the item action) |
+| `zsettle-seller` | seller service: `init`, `accounts`, `address`, `pay`, `sync`, `new-item-account`, `mint`, `items`, `publish`, `cancel`, `sign`, `serve` (syncs, reconciles listings with the chain, verifies proofs, signs only the item action) |
+
+## Install
+
+Download the archive for your system from the [releases page](https://github.com/nerses-asaturyan/zsettle/releases): Linux x86_64, macOS (Apple silicon or Intel) or Windows x86_64. It holds the two binaries, this README, `docs/`, `spec/` and `examples/`, so the one-minute check below runs from it.
+
+```
+tar xzf zsettle-linux-x86_64.tar.gz    # Windows: unzip zsettle-windows-x86_64.zip
+./zsettle --version
+```
+
+To build instead: Rust 1.93 and `cargo build --release --locked` ([docs/SETUP.md](docs/SETUP.md)).
 
 This branch targets the Zcash testnet (NU7) with the pre-release crates; see [docs/TESTNET.md](docs/TESTNET.md). The `main` branch targets mainnet.
 
@@ -38,28 +49,32 @@ The two signed listings files from the mainnet trades are in `examples/`; the tr
 
 ```
 # once (keep the key files outside the wallet directories; omit --identity for a passphrase instead)
-zsettle-seller init --wallet S --identity ~/seller.key     # prints P (payout) and I (item) and an address to fund
-zsettle init        --wallet B --identity ~/buyer.key      # prints A (buyer) and the item account, and an address to fund
-# fund both addresses; a note received from another wallet is spendable after ten confirmations (about 13 minutes)
-# seller
-zsettle-seller sync    --wallet S
-zsettle-seller mint    --wallet S --item-account I --payout-account P --identity ~/seller.key --name "Item #1" --name "Item #2"   # one transaction; prints each note as <txid>:<idx>
+zsettle-seller init --wallet S --identity ~/seller.key     # prints the payout and item accounts and an address to fund; writes S/env.sh
+zsettle init        --wallet B --identity ~/buyer.key      # prints the buyer and item accounts and an address to fund; writes B/env.sh
+# fund both: the seller needs about 0.0005 ZEC (mint fees), the buyer the price plus 0.00015 ZEC per trade;
+# a note received from another wallet is spendable after ten confirmations (about 13 minutes)
+# seller terminal
+source S/env.sh                                            # PowerShell: . S\env.ps1
+zsettle-seller sync
+zsettle-seller mint --name "Item #1" --name "Item #2"      # one transaction; prints each note as <txid>:<idx>
 # wait for that block (about 75 seconds), then
-zsettle-seller sync    --wallet S
-zsettle-seller publish --wallet S --item-account I --payout-account P --identity ~/seller.key --listings listings.json --item-note <txid>:<idx> --name "Item #1" --price 0.001
-zsettle-seller serve   --wallet S --item-account I --payout-account P --identity ~/seller.key --listings listings.json --inbox inbox --outbox outbox --listen 0.0.0.0:8900
-# buyer (gets listings.json from the seller, or from http://seller:8900/listings)
-zsettle import-listing --wallet B --listings listings.json
-zsettle sync           --wallet B
-zsettle buy            --wallet B --buyer-account A --listings listings.json --item <txid>:<idx> --out trade.pczt --seller-url http://seller:8900
-zsettle finish         --wallet B --identity ~/buyer.key --full trade.pczt --signed http://seller:8900/reply/<tag> --out trade.tx --broadcast
+zsettle-seller sync
+zsettle-seller publish --item-note <txid>:<idx> --name "Item #1" --price 0.001   # writes S/listings.json; one call per item
+zsettle-seller serve --inbox inbox --outbox outbox --listen 0.0.0.0:8900         # serves the file at http://seller:8900/listings
+# buyer terminal
+source B/env.sh
+zsettle list           --listings http://seller:8900/listings                    # a copy of the file works too
+zsettle import-listing --listings http://seller:8900/listings
+zsettle sync
+zsettle buy            --listings http://seller:8900/listings --item <txid>:<idx> --out trade.pczt --seller-url http://seller:8900
+zsettle finish         --full trade.pczt --out trade.tx --broadcast              # polls the reply URL buy saved in trade.pczt.reply
 # anyone
-zsettle verify --listings listings.json --item <txid>:<idx>
+zsettle verify --listings http://seller:8900/listings --item <txid>:<idx>        # JSON; status.state is "held" while the holder's key opens the last note
 ```
 
 Without a network between them, the parties share a folder instead: `buy --seller-copy inbox/trade.pczt` and `finish --signed outbox/trade.<tag>.signed.pczt`.
 
-`S`, `B` are wallet directories, `I`, `P`, `A` the account UUIDs `init` prints (`accounts` lists them again); `init` also writes `env.sh` into the wallet directory; after `source S/env.sh` the commands need none of these flags. No other tool is needed; `zsettle pay` sends ZEC out to any address, your phone wallet included. Amounts are zatoshis or ZEC with a decimal point (`--price 0.001`); `list` shows both. Commands that act print one JSON line; `list`, `notes` and `items` print tables; `zsettle notes --wallet B --account A` shows what a wallet holds.
+`S` and `B` are wallet directories. `init` prints the account UUIDs (`accounts` lists them again) and writes `env.sh` and `env.ps1` into the wallet directory; once sourced, no `--wallet`, `--identity`, account or `--listings` flag is needed, and every command above is written that way (`--help` shows each flag and the variable behind it). Every `--listings` takes a file or the URL a running service serves it at. No other tool is needed: `zsettle-seller pay` and `zsettle pay` send ZEC out to any address, a phone wallet included. Amounts are zatoshis or ZEC with a decimal point (`--price 0.001`); `list`, `notes` and `items` show both. Commands that act print one JSON line; `list`, `notes` and `items` print tables; `zsettle notes` shows what a wallet holds.
 
 See [docs/SETUP.md](docs/SETUP.md) for wallets, [docs/TRADE.md](docs/TRADE.md) for the full flow including resale, [spec/PROTOCOL.md](spec/PROTOCOL.md) and [spec/THREAT_MODEL.md](spec/THREAT_MODEL.md) for the design.
 
@@ -86,7 +101,7 @@ See [docs/SETUP.md](docs/SETUP.md) for wallets, [docs/TRADE.md](docs/TRADE.md) f
 - Light server: the wallet's transparent addresses are never sent to it (the library's UTXO refresh is answered inside the process); what it does learn is in the threat model.
 - Network upgrades: build, mint and broadcast stop with a message when the server's consensus branch is not the one this build signs for.
 - Wallets: created by the tools themselves (`init`), in the zcash-devtool layout; no other software is needed. `pay` sends ZEC out.
-- Binaries: every `v*` tag publishes a GitHub Release with Linux, macOS and Windows binaries; the same workflow runs on demand from Actions for testers.
+- Binaries: every `v*` tag publishes a GitHub Release with archives for Linux, macOS (arm64 and x86_64) and Windows holding the binaries, the docs and the examples; the same workflow runs on demand from Actions for testers.
 - Tests: the proven settlement core, action pairing, redaction and proof checks, twelve seller-policy cases, the rotation transfer, listings signatures.
 - Reviewed for privacy and soundness in several independent passes; the findings and what was done about each are in the changelog, and what remains by design is in the threat model.
 

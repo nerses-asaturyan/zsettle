@@ -97,6 +97,7 @@ pub fn redact_for_seller(pczt: Pczt, item_action_index: usize) -> Result<Pczt> {
             a.clear_spend_zip32_derivation();
             a.clear_spend_dummy_sk();
             a.clear_spend_proprietary();
+            a.clear_output_proprietary();
         });
     });
     // The item action keeps its spend fields: they describe the seller's own note and the

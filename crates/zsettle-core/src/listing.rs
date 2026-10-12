@@ -88,8 +88,12 @@ impl Listings {
     pub fn read(path: &Path) -> Result<Self> {
         let text =
             fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let l: Listings =
-            serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        Self::parse(&text, &path.display().to_string())
+    }
+
+    /// Parse listings from their JSON text; `what` names the source in error messages.
+    pub fn parse(text: &str, what: &str) -> Result<Self> {
+        let l: Listings = serde_json::from_str(text).with_context(|| format!("parsing {what}"))?;
         if l.version != 1 {
             return Err(anyhow!("unsupported listings version {}", l.version));
         }

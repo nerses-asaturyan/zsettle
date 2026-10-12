@@ -57,6 +57,9 @@ const MAX_HTTP_CONNECTIONS: usize = 32;
 /// Envelopes one pass may leave waiting for a later pass; beyond this they are refused, so a
 /// flood of unproven envelopes cannot fill the inbox up to its cap.
 const MAX_DEFERRED: usize = 100;
+/// Blocks a deferred envelope may wait for the chain view to catch up with it; every honest
+/// reason to defer resolves within a few blocks, so a longer wait is given up.
+const DEFER_MAX_BLOCKS: u32 = 10;
 /// Content tags whose proof was verified, kept in memory; cleared when this many.
 const MAX_VERIFIED_TAGS: usize = 10_000;
 /// Filed envelopes and signed replies carry buyers' note nullifiers: deleted after this long.
@@ -133,6 +136,35 @@ enum Cmd {
         /// Account UUID.
         #[arg(long)]
         account: String,
+    },
+    /// Send ZEC from the payout account to any address: cash out, or fund a counterparty.
+    Pay {
+        /// Wallet directory.
+        #[arg(long, env = "ZSETTLE_WALLET")]
+        wallet: PathBuf,
+        /// UUID of the paying account.
+        #[arg(long, env = "ZSETTLE_PAYOUT_ACCOUNT")]
+        account: String,
+        /// ZIP 32 account index of the paying account.
+        #[arg(long, default_value_t = 0)]
+        account_index: u32,
+        /// age identity file that decrypts the wallet's mnemonic. Omit it for a
+        /// passphrase-protected wallet: the passphrase is asked for, or taken from
+        /// ZSETTLE_PASSPHRASE.
+        #[arg(long, env = "ZSETTLE_IDENTITY")]
+        identity: Option<PathBuf>,
+        /// Recipient unified address.
+        #[arg(long)]
+        to: String,
+        /// Amount, in zatoshis or ZEC (`0.001`, `0.001 ZEC`).
+        #[arg(long, value_parser = zsettle_core::parse_zat)]
+        amount: u64,
+        /// Optional memo.
+        #[arg(long)]
+        memo: Option<String>,
+        /// lightwalletd server URL (defaults to the network's).
+        #[arg(long)]
+        server: Option<String>,
     },
     /// Sync the wallet with a lightwalletd server (no other tool needed).
     Sync {
@@ -255,7 +287,7 @@ enum Cmd {
         #[arg(long, default_value_t = 0)]
         payout_account_index: u32,
         /// Listings file to drop the item from (signed again).
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_LISTINGS")]
         listings: Option<PathBuf>,
         /// Confirmations required on the notes.
         #[arg(long, default_value_t = 3)]
@@ -277,7 +309,7 @@ enum Cmd {
         #[arg(long, env = "ZSETTLE_IDENTITY")]
         identity: Option<PathBuf>,
         /// Listings file.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_LISTINGS")]
         listings: PathBuf,
         /// Incoming (redacted) trade PCZT.
         #[arg(long)]
@@ -311,7 +343,7 @@ enum Cmd {
         #[arg(long, env = "ZSETTLE_IDENTITY")]
         identity: Option<PathBuf>,
         /// Listings file (kept in sync with the chain: sold items removed).
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_LISTINGS")]
         listings: PathBuf,
         /// Directory watched for `*.pczt` envelopes.
         #[arg(long)]
@@ -384,19 +416,30 @@ fn main() -> Result<()> {
                     "next": "send ZEC to `fund`, then `zsettle-seller sync`; `--payout-account` is the first UUID, `--item-account` the second (index 1)",
                 })
             );
-            let env = format!(
-                "export ZSETTLE_WALLET={}\nexport ZSETTLE_PAYOUT_ACCOUNT={}\nexport ZSETTLE_ITEM_ACCOUNT={}\nexport ZSETTLE_ITEM_ACCOUNT_INDEX=1{}\n",
-                wallet.display(),
-                created.accounts[0].account,
-                created.accounts[1].account,
-                identity.as_ref().map(|i| format!("\nexport ZSETTLE_IDENTITY={}", i.display())).unwrap_or_default()
-            );
-            let env_path = wallet.join("env.sh");
-            fs::write(&env_path, &env)
-                .with_context(|| format!("writing {}", env_path.display()))?;
+            let mut vars = vec![
+                ("ZSETTLE_WALLET", wallet.display().to_string()),
+                (
+                    "ZSETTLE_PAYOUT_ACCOUNT",
+                    created.accounts[0].account.to_string(),
+                ),
+                (
+                    "ZSETTLE_ITEM_ACCOUNT",
+                    created.accounts[1].account.to_string(),
+                ),
+                ("ZSETTLE_ITEM_ACCOUNT_INDEX", "1".to_string()),
+                (
+                    "ZSETTLE_LISTINGS",
+                    wallet.join("listings.json").display().to_string(),
+                ),
+            ];
+            if let Some(i) = &identity {
+                vars.push(("ZSETTLE_IDENTITY", i.display().to_string()));
+            }
+            let (env_path, env) = zsettle_core::wallet::write_env_files(&wallet, &vars)?;
             eprintln!(
-                "# later commands need no --wallet, --identity, --item-account or --payout-account after:\nsource {}\n{env}",
-                env_path.display()
+                "# later commands need no --wallet, --identity, --item-account, --payout-account or --listings after:\nsource {}\n{env}# PowerShell: . {}",
+                env_path.display(),
+                wallet.join("env.ps1").display()
             );
             Ok(())
         }
@@ -491,6 +534,36 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
+        Cmd::Pay {
+            wallet,
+            account,
+            account_index,
+            identity,
+            to,
+            amount,
+            memo,
+            server,
+        } => {
+            let wallet = Wallet::open(&wallet)?;
+            let mut db = wallet.db()?;
+            let server = pick_server(server, wallet.network);
+            check_consensus_at_tip_blocking(&server, wallet.network)?;
+            let seed = wallet.seed(identity.as_deref())?;
+            let req = zsettle_core::mint::PayRequest {
+                from_account: parse_account(&account)?,
+                from_account_index: account_index,
+                to,
+                value_zat: amount,
+                memo,
+            };
+            let (bytes, txid) = zsettle_core::mint::pay(&wallet, &mut db, &seed, &req)?;
+            let response = zsettle_core::broadcast::send_raw_transaction_blocking(&server, bytes)?;
+            println!(
+                "{}",
+                serde_json::json!({ "txid": txid, "amount_zat": amount, "broadcast": response })
+            );
+            Ok(())
+        }
         Cmd::Items {
             wallet,
             item_account,
@@ -501,9 +574,10 @@ fn main() -> Result<()> {
                 zsettle_core::mint::unspent_notes(&wallet, &db, parse_account(&item_account)?)?;
             for n in &notes {
                 println!(
-                    "{}  {:>8} zat  mined {}",
+                    "{}  {:>8} zat ({})  mined {}",
                     n.note,
                     n.value_zat,
+                    zec(n.value_zat),
                     n.mined_height
                         .map(|h| h.to_string())
                         .unwrap_or_else(|| "pending".into())
@@ -882,6 +956,7 @@ fn main() -> Result<()> {
                 sync_cmd: sync_cmd.as_deref(),
                 verified: RefCell::new(HashSet::new()),
                 deferred: std::cell::Cell::new(0),
+                deferred_since: RefCell::new(std::collections::HashMap::new()),
             };
             if let Some(addr) = listen {
                 let listener = std::net::TcpListener::bind(&addr)
@@ -937,6 +1012,8 @@ struct Service<'a> {
     verified: RefCell<HashSet<String>>,
     /// Envelopes deferred in the current pass.
     deferred: std::cell::Cell<usize>,
+    /// Chain tip at which each waiting envelope (by file name) was first deferred.
+    deferred_since: RefCell<std::collections::HashMap<String, u32>>,
 }
 
 impl Service<'_> {
@@ -986,7 +1063,17 @@ impl Service<'_> {
             l.sign(self.ask, max_scanned_height(&db)?.unwrap_or(0))?;
             l.write(self.listings)?;
         }
-        for path in self.envelopes()? {
+        let paths = self.envelopes()?;
+        {
+            let names: HashSet<String> = paths
+                .iter()
+                .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_string))
+                .collect();
+            self.deferred_since
+                .borrow_mut()
+                .retain(|name, _| names.contains(name));
+        }
+        for path in paths {
             if let Err(e) = self.handle(&db, &l, &anchors, &path) {
                 println!(
                     "{}",
@@ -997,7 +1084,8 @@ impl Service<'_> {
         Ok(())
     }
 
-    /// Envelopes waiting in the inbox, oldest name first, skipping files still being written.
+    /// Envelopes waiting in the inbox, in arrival order (then by name), skipping files still
+    /// being written.
     fn envelopes(&self) -> Result<Vec<PathBuf>> {
         let now = SystemTime::now();
         let mut paths: Vec<PathBuf> = fs::read_dir(self.inbox)
@@ -1009,7 +1097,7 @@ impl Service<'_> {
             .filter(|e| settled(e, now))
             .map(|e| e.path())
             .collect();
-        paths.sort();
+        paths.sort_by_cached_key(|p| (fs::metadata(p).and_then(|m| m.modified()).ok(), p.clone()));
         Ok(paths)
     }
 
@@ -1062,6 +1150,19 @@ impl Service<'_> {
             }
             Err(Refusal::Reject(reason)) => self.reject(path, reason),
             Err(Refusal::Defer(reason)) => {
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("envelope")
+                    .to_string();
+                let tip = last_tip(db);
+                let since = *self.deferred_since.borrow_mut().entry(name).or_insert(tip);
+                if tip > since.saturating_add(DEFER_MAX_BLOCKS) {
+                    return self.reject(
+                        path,
+                        format!("refused: waited {DEFER_MAX_BLOCKS} blocks for the chain view to catch up with this offer, and it did not; build the offer again"),
+                    );
+                }
                 if self.deferred.get() >= MAX_DEFERRED {
                     return self.reject(
                         path,
@@ -1094,12 +1195,8 @@ impl Service<'_> {
             .to_string();
         let kept = fs::read_dir(&rejected).map(|d| d.count()).unwrap_or(0);
         if kept < MAX_REASON_FILES {
-            let mut why = rejected.join(format!("{name}.reason.txt"));
-            let mut n = 1u32;
-            while why.exists() {
-                why = rejected.join(format!("{name}.{n}.reason.txt"));
-                n += 1;
-            }
+            // The latest judgement of these bytes is the one served.
+            let why = rejected.join(format!("{name}.reason.txt"));
             fs::write(&why, &reason).with_context(|| format!("writing {}", why.display()))?;
         }
         fs::remove_file(path).with_context(|| format!("removing {}", path.display()))?;
@@ -1228,6 +1325,11 @@ impl Service<'_> {
 }
 
 /// The last height this wallet scanned, or zero.
+/// Zatoshis as ZEC, for people.
+fn zec(zat: u64) -> String {
+    format!("{} ZEC", zat as f64 / 1e8)
+}
+
 fn last_tip(db: &Db) -> u32 {
     max_scanned_height(db).ok().flatten().unwrap_or(0)
 }
@@ -1557,6 +1659,12 @@ fn handle_http(mut stream: std::net::TcpStream, inbox: &Path, outbox: &Path, lis
             let stored = if file.exists() {
                 Ok(())
             } else {
+                // A refusal of an earlier copy of these bytes must not answer for this one.
+                let _ = fs::remove_file(
+                    inbox
+                        .join("rejected")
+                        .join(format!("{tag}.pczt.reason.txt")),
+                );
                 write_atomic(&file, &body)
             };
             match stored {
@@ -1571,11 +1679,12 @@ fn handle_http(mut stream: std::net::TcpStream, inbox: &Path, outbox: &Path, lis
                     );
                 }
                 Err(e) => {
+                    eprintln!("cannot store an offer: {e:#}");
                     let _ = respond(
                         &mut stream,
                         500,
                         "text/plain",
-                        format!("cannot store the offer: {e:#}").as_bytes(),
+                        b"cannot store the offer now; send it again later",
                     );
                 }
             }
@@ -1604,12 +1713,13 @@ fn handle_http(mut stream: std::net::TcpStream, inbox: &Path, outbox: &Path, lis
                 .join(format!("{tag}.pczt.reason.txt"));
             if let Ok(bytes) = fs::read(&signed) {
                 let _ = respond(&mut stream, 200, "application/octet-stream", &bytes);
-            } else if let Ok(why) = fs::read_to_string(&reason) {
-                let _ = respond(&mut stream, 410, "text/plain", why.as_bytes());
             } else if inbox.join(format!("{tag}.pczt")).exists()
                 || inbox.join("done").join(format!("{tag}.pczt")).exists()
             {
+                // An envelope under judgement wins over a stale reason from an earlier copy.
                 let _ = respond(&mut stream, 202, "text/plain", b"pending");
+            } else if let Ok(why) = fs::read_to_string(&reason) {
+                let _ = respond(&mut stream, 410, "text/plain", why.as_bytes());
             } else {
                 let _ = respond(
                     &mut stream,

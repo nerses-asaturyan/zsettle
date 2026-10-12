@@ -38,8 +38,9 @@ struct Cli {
 enum Cmd {
     /// Show the items in a listings file and whether its signature checks out.
     List {
-        /// Listings file published by a seller.
-        #[arg(long)]
+        /// Listings file published by a seller: a path, or the URL a seller service serves
+        /// it at (`http://seller:8900/listings`).
+        #[arg(long, env = "ZSETTLE_LISTINGS")]
         listings: PathBuf,
     },
     /// Create a wallet: a new mnemonic encrypted to an age identity, the database, and the
@@ -75,7 +76,7 @@ enum Cmd {
         #[arg(long, env = "ZSETTLE_WALLET")]
         wallet: PathBuf,
         /// Account UUID.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_BUYER_ACCOUNT")]
         account: String,
     },
     /// Sync a wallet with a lightwalletd server (no other tool needed).
@@ -128,8 +129,8 @@ enum Cmd {
         /// Buyer wallet directory.
         #[arg(long, env = "ZSETTLE_WALLET")]
         wallet: PathBuf,
-        /// Listings file published by a seller (must be signed).
-        #[arg(long)]
+        /// Listings file published by a seller (must be signed): a path or the service URL.
+        #[arg(long, env = "ZSETTLE_LISTINGS")]
         listings: PathBuf,
         /// Name for the imported view-only account.
         #[arg(long, default_value = "item-view")]
@@ -146,8 +147,9 @@ enum Cmd {
         /// UUID of the buyer's spending account.
         #[arg(long, env = "ZSETTLE_BUYER_ACCOUNT")]
         buyer_account: String,
-        /// Listings file (must be signed); fills in the seller address, price and expiry for `--item`.
-        #[arg(long)]
+        /// Listings file (must be signed), a path or the service URL; fills in the seller
+        /// address, price and expiry for `--item`.
+        #[arg(long, env = "ZSETTLE_LISTINGS")]
         listings: Option<PathBuf>,
         /// The item note, as <txid>:<output index>.
         #[arg(long)]
@@ -214,9 +216,9 @@ enum Cmd {
         #[arg(long)]
         full: PathBuf,
         /// The seller's signed copy: a file, or the reply URL `buy` printed, which is polled
-        /// until the seller has answered.
+        /// until the seller has answered. Omitted: the reply URL `buy` saved in `<full>.reply`.
         #[arg(long)]
-        signed: String,
+        signed: Option<String>,
         /// How long to wait for a reply URL, in seconds.
         #[arg(long, default_value_t = 300)]
         wait: u64,
@@ -259,8 +261,9 @@ enum Cmd {
     /// Pass `--listings` once per holder the item has passed through; each file contributes
     /// one consignment and the trace follows the item across every resale it can decrypt.
     Verify {
-        /// Listings file(s) providing item viewing keys and birthdays (must be signed).
-        #[arg(long, required = true)]
+        /// Listings file(s) providing item viewing keys and birthdays (must be signed): paths
+        /// or service URLs.
+        #[arg(long, required = true, env = "ZSETTLE_LISTINGS")]
         listings: Vec<PathBuf>,
         /// A note of the item, as <txid>:<output index>: its genesis note, or any later note a
         /// supplied listing decrypts (the trace starts there).
@@ -285,7 +288,7 @@ enum Cmd {
         #[arg(long, env = "ZSETTLE_WALLET")]
         wallet: PathBuf,
         /// UUID of the paying account the reservations belong to.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_BUYER_ACCOUNT")]
         account: String,
         /// ZIP 32 account index of that account.
         #[arg(long, default_value_t = 0)]
@@ -315,7 +318,7 @@ enum Cmd {
         #[arg(long, env = "ZSETTLE_WALLET")]
         wallet: PathBuf,
         /// UUID of the account.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_BUYER_ACCOUNT")]
         account: String,
         /// ZIP 32 account index of that account.
         #[arg(long, default_value_t = 0)]
@@ -344,7 +347,7 @@ enum Cmd {
         #[arg(long, env = "ZSETTLE_WALLET")]
         wallet: PathBuf,
         /// Account UUID.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_BUYER_ACCOUNT")]
         account: String,
     },
 }
@@ -447,6 +450,40 @@ fn fetch_reply(url: &str, wait_secs: u64) -> Result<Vec<u8>> {
     }
 }
 
+/// Read a `--listings` argument: a file path, or the URL a seller service serves its file at
+/// (`http://seller:8900/listings`), fetched afresh each time and never written to disk.
+fn read_listings(arg: &std::path::Path, verified: bool) -> Result<Listings> {
+    use std::io::Read;
+    let text = arg.to_string_lossy();
+    if !(text.starts_with("http://") || text.starts_with("https://")) {
+        return if verified {
+            Listings::read_verified(arg)
+        } else {
+            Listings::read(arg)
+        };
+    }
+    let url: &str = text.as_ref();
+    let resp = http_agent()
+        .get(url)
+        .call()
+        .map_err(|e| anyhow!("fetching the listings from {url}: {e}"))?;
+    let mut body = String::new();
+    resp.into_reader()
+        .take(zsettle_core::MAX_ENVELOPE_BYTES + 1)
+        .read_to_string(&mut body)?;
+    if body.len() as u64 > zsettle_core::MAX_ENVELOPE_BYTES {
+        return Err(anyhow!(
+            "the listings at {url} are larger than {} bytes",
+            zsettle_core::MAX_ENVELOPE_BYTES
+        ));
+    }
+    let l = Listings::parse(&body, url)?;
+    if verified {
+        l.verify_signature()?;
+    }
+    Ok(l)
+}
+
 /// Zatoshis as ZEC, for people.
 fn zec(zat: u64) -> String {
     format!("{} ZEC", zat as f64 / 1e8)
@@ -470,7 +507,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::List { listings } => {
-            let l = Listings::read(&listings)?;
+            let l = read_listings(&listings, false)?;
             let signed = match l.verify_signature() {
                 Ok(()) => "signed by the item account's key".to_string(),
                 Err(e) => format!("NOT TRUSTWORTHY: {e}"),
@@ -522,21 +559,21 @@ fn main() -> Result<()> {
                     "next": "send ZEC to `fund`, then `zsettle sync`; `--buyer-account` is the first UUID, `--receive-account` the second",
                 })
             );
-            let env = format!(
-                "export ZSETTLE_WALLET={}\nexport ZSETTLE_BUYER_ACCOUNT={}{}\n",
-                wallet.display(),
-                created.accounts[0].account,
-                identity
-                    .as_ref()
-                    .map(|i| format!("\nexport ZSETTLE_IDENTITY={}", i.display()))
-                    .unwrap_or_default()
-            );
-            let env_path = wallet.join("env.sh");
-            fs::write(&env_path, &env)
-                .with_context(|| format!("writing {}", env_path.display()))?;
+            let mut vars = vec![
+                ("ZSETTLE_WALLET", wallet.display().to_string()),
+                (
+                    "ZSETTLE_BUYER_ACCOUNT",
+                    created.accounts[0].account.to_string(),
+                ),
+            ];
+            if let Some(i) = &identity {
+                vars.push(("ZSETTLE_IDENTITY", i.display().to_string()));
+            }
+            let (env_path, env) = zsettle_core::wallet::write_env_files(&wallet, &vars)?;
             eprintln!(
-                "# later commands need no --wallet, --identity or --buyer-account after:\nsource {}\n{env}",
-                env_path.display()
+                "# later commands need no --wallet, --identity or --buyer-account after:\nsource {}\n{env}# PowerShell: . {}",
+                env_path.display(),
+                wallet.join("env.ps1").display()
             );
             Ok(())
         }
@@ -613,6 +650,7 @@ fn main() -> Result<()> {
             let w = Wallet::open(&wallet)?;
             let server = pick_server(server, w.network);
             let l = Listings::read_verified(&listings)?;
+            let l = read_listings(&listings, true)?;
             if l.network()? != w.network {
                 return Err(anyhow!("the listings file is for another network"));
             }
@@ -662,7 +700,7 @@ fn main() -> Result<()> {
             let mut db = w.db()?;
             let l = listings
                 .as_ref()
-                .map(|p| Listings::read_verified(p))
+                .map(|p| read_listings(p, true))
                 .transpose()?;
             if let Some(l) = &l {
                 if l.network()? != w.network {
@@ -812,6 +850,15 @@ fn main() -> Result<()> {
                 },
                 None => None,
             };
+            let reply_file = reply_url
+                .as_ref()
+                .map(|url| -> Result<String> {
+                    let path = format!("{}.reply", out.display());
+                    fs::write(&path, format!("{url}\n"))
+                        .with_context(|| format!("writing {path}"))?;
+                    Ok(path)
+                })
+                .transpose()?;
             println!(
                 "{}",
                 serde_json::json!({
@@ -829,6 +876,7 @@ fn main() -> Result<()> {
                     "seller_copy": seller_copy,
                     "expect_signed": expect_signed,
                     "reply_url": reply_url,
+                    "reply_file": reply_file,
                 })
             );
             Ok(())
@@ -846,6 +894,17 @@ fn main() -> Result<()> {
         } => {
             let w = Wallet::open(&wallet)?;
             let server = pick_server(server, w.network);
+            let signed = match signed {
+                Some(s) => s,
+                None => {
+                    let reply = format!("{}.reply", full.display());
+                    fs::read_to_string(&reply)
+                        .map(|s| s.trim().to_string())
+                        .with_context(|| {
+                            format!("no --signed given and no reply file at {reply} (buy writes it when the offer was posted with --seller-url)")
+                        })?
+                }
+            };
             let full_pczt = pczt_ops::from_bytes(&fs::read(&full)?)?;
             let signed_bytes = if signed.starts_with("http://") || signed.starts_with("https://") {
                 fetch_reply(&signed, wait)?
@@ -1124,9 +1183,10 @@ fn main() -> Result<()> {
             let notes = zsettle_core::mint::unspent_notes(&w, &db, parse_account(&account)?)?;
             for n in &notes {
                 println!(
-                    "{}  {:>10} zat  mined {}",
+                    "{}  {:>10} zat ({})  mined {}",
                     n.note,
                     n.value_zat,
+                    zec(n.value_zat),
                     n.mined_height
                         .map(|h| h.to_string())
                         .unwrap_or_else(|| "pending".into())
@@ -1147,7 +1207,7 @@ fn main() -> Result<()> {
             let mut network: Option<Network> = None;
             let mut consignments = Vec::with_capacity(listings.len());
             for path in &listings {
-                let l = Listings::read_verified(path)?;
+                let l = read_listings(path, true)?;
                 let net = l.network()?;
                 match network {
                     None => network = Some(net),
