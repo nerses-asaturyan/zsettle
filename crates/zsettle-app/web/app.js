@@ -1059,7 +1059,7 @@ function openCheckProof() {
     title: 'Check that someone owns an item',
     body: [
       h('ol', { class: 'small muted plainlist' }, h('li', null, 'Give the holder this challenge.'), h('li', null, 'They make a proof in their wallet and send it to you.'), h('li', null, 'Paste it below.')),
-      h('div', { class: 'summary' }, h('div', { class: 'r' }, h('span', null, 'Challenge'), h('b', { class: 'mono' }, challenge)), h('div', { class: 'r' }, h('span', null, ''), h('button', { class: 'linkbtn', onclick: () => copy(challenge, 'Challenge copied') }, 'Copy'))),
+      h('div', { class: 'summary' }, h('div', { class: 'r' }, h('span', null, 'Challenge'), h('span', { class: 'row nowrap' }, h('b', { class: 'mono' }, challenge), h('button', { class: 'linkbtn', onclick: () => copy(challenge, 'Challenge copied') }, 'Copy')))),
       h('div', { class: 'field' }, h('label', { for: 'proof' }, 'Their proof'), proof),
       err,
     ],
@@ -1437,7 +1437,7 @@ function listSheet(it) {
       h('div', { class: 'field' }, h('label', { for: 'price' }, 'Price'), h('div', { class: 'inputwrap' }, price, h('span', { class: 'suffix' }, 'ZEC')), h('div', { class: 'hint' }, 'At least 0.00005001 ZEC. The buyer pays the network fee.')),
       h('div', { class: 'field' }, h('label', { for: 'desc' }, 'Description (optional)'), desc),
       h('div', { class: 'field' }, h('div', { class: 'label' }, 'Icon (optional)'), h('div', { class: 'iconpicks', role: 'group', 'aria-label': 'Icon' }, picks)),
-      h('div', { class: 'hint' }, 'The description and icon go into your signed listings file, so buyers see them as you wrote them.'),
+      h('p', { class: 'small muted' }, 'The description and icon go into your signed listings file, so buyers see them as you wrote them.'),
       err,
     ],
     foot: [

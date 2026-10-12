@@ -39,8 +39,13 @@ before you publish.
 zsettle-seller publish \
   --wallet ~/.zsettle/seller --identity ~/.zsettle/seller.key \
   --item-account <ITEM_ACCOUNT_UUID> --item-account-index 1 --payout-account <PAYOUT_ACCOUNT_UUID> \
-  --listings listings.json --item-note <TXID>:<INDEX> --name "Item #3" --price 5001 --max-expiry-delta 40
+  --listings listings.json --item-note <TXID>:<INDEX> --name "Item #3" --price 5001 --max-expiry-delta 40 \
+  --description "Front row, Saturday night" --icon "🎟️"
 ```
+
+`--description` (one line, at most 280 characters) and `--icon` (one emoji) are optional. They
+are signed with the rest of the file, so a buyer sees them exactly as the seller wrote them.
+A file written before these fields existed signs the same bytes as before.
 
 `publish` creates or updates the signed listings file, one item per call:
 
