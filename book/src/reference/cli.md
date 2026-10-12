@@ -253,6 +253,8 @@ Same flags as `zsettle init`: `--wallet`, `--identity` [`ZSETTLE_IDENTITY`], `--
 | `--listings <file>` [`ZSETTLE_LISTINGS`] | required | File to create or update. |
 | `--item-note <note>` | | Item to list. Without it the file is checked and signed again. |
 | `--name <name>` | empty | Display name. |
+| `--description <text>` | | One line for buyers, at most 280 characters. Signed with the file. |
+| `--icon <emoji>` | | One emoji shown as the item's picture. Signed with the file. |
 | `--price <amount>` | required with `--item-note` | More than 5,000 zatoshis. |
 | `--max-expiry-delta <blocks>` | `40` | Most blocks between the tip and an offer's expiry. |
 | `--remove <note>` | | Delist this item (no spend). |

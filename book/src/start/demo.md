@@ -7,13 +7,20 @@ What you can do there:
 
 - **Create a wallet.** Use a passkey, or a wallet code and a passphrase of at least 12
   characters. The server shows you the wallet code; keep it if you use a passphrase.
-- **Get free test coins once.** If the server runs a house shop, a new wallet can ask for test
-  coins one time (300,000 zatoshis, that is 0.003 TAZ).
+- **Get free test coins.** If the server runs a house shop, a new wallet is sent test coins
+  right away, one time (300,000 zatoshis, that is 0.003 TAZ). The wallet page shows them on
+  the way. If the faucet cannot pay at that moment, a "Get coins" button stays for later.
 - **Buy from an open shop.** The market lists the shops that are open now. The house shop
   keeps a few items listed and makes new ones when they sell.
 - **Open your own shop.** Mint items, set prices, and open the shop. Other visitors reach it at
   `https://<demo domain>/shop/<your wallet code>`.
 - **See an item's history**, traced from the chain with viewing keys.
+- **Prove you own an item**, or check that someone else does: the checker gives a challenge,
+  the holder makes a proof in the wallet, and the checker pastes it in the market's Ownership
+  card. See [Ownership proofs](../how/ownership.md).
+- **Describe what you sell.** When you list an item, add a short description and pick an icon.
+- **Add it to your phone's home screen.** The page has a web app manifest, so a phone browser
+  can install it and open it like an app.
 
 ## Know the limits
 
