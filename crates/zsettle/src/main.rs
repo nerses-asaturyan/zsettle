@@ -649,7 +649,6 @@ fn main() -> Result<()> {
         } => {
             let w = Wallet::open(&wallet)?;
             let server = pick_server(server, w.network);
-            let l = Listings::read_verified(&listings)?;
             let l = read_listings(&listings, true)?;
             if l.network()? != w.network {
                 return Err(anyhow!("the listings file is for another network"));
