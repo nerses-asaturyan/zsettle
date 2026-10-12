@@ -25,6 +25,23 @@ fn trade(f: &Fixture, price: u64, expiry_height: u32, spend_extra: bool) -> Pczt
 
 /// Same, with the price split over several payment outputs.
 fn trade_paying(f: &Fixture, payments: &[u64], expiry_height: u32, spend_extra: bool) -> Pczt {
+    trade_paying_to(
+        f,
+        payments,
+        expiry_height,
+        spend_extra,
+        f.fvk_seller.address_at(0u32, Scope::External),
+    )
+}
+
+/// Same, paying a chosen address.
+fn trade_paying_to(
+    f: &Fixture,
+    payments: &[u64],
+    expiry_height: u32,
+    spend_extra: bool,
+    seller_addr: orchard::Address,
+) -> Pczt {
     let price: u64 = payments.iter().sum();
     let target = BlockHeight::from(TARGET);
     let mut b = Builder::new(
@@ -53,7 +70,6 @@ fn trade_paying(f: &Fixture, payments: &[u64], expiry_height: u32, spend_extra: 
     }
     b.add_ironwood_spend::<FeeError>(f.fvk_buyer.clone(), f.buyer_note, f.paths[2].clone())
         .unwrap();
-    let seller_addr = f.fvk_seller.address_at(0u32, Scope::External);
     let buyer_addr = f.fvk_buyer.address_at(0u32, Scope::External);
     let item_out = if spend_extra { 2_000 } else { 1_000 };
     b.add_ironwood_output::<FeeError>(
@@ -90,8 +106,9 @@ fn trade_paying(f: &Fixture, payments: &[u64], expiry_height: u32, spend_extra: 
     IoFinalizer::new(pczt).finalize_io().unwrap()
 }
 
-fn policy(price: u64) -> SellerPolicy {
+fn policy(f: &Fixture, price: u64) -> SellerPolicy {
     SellerPolicy {
+        payout: f.fvk_seller.address_at(0u32, Scope::External),
         price_zat: price,
         max_expiry_delta: 10,
         tip: TARGET - 1,
@@ -114,7 +131,7 @@ fn approves_a_correct_trade() {
         &nf,
         &[nf, extra_nf],
         &ivk,
-        &policy(6_000),
+        &policy(&f, 6_000),
         &[f.anchor],
     )
     .expect("approved");
@@ -129,7 +146,7 @@ fn refuses_underpayment() {
     let nf = f.item_note.nullifier(&f.fvk_item);
     let ivk = prepared_ivk(&f.fvk_seller);
     assert_eq!(
-        check(&pczt, &nf, &[nf], &ivk, &policy(6_000), &[f.anchor]),
+        check(&pczt, &nf, &[nf], &ivk, &policy(&f, 6_000), &[f.anchor]),
         Err(PolicyError::Underpaid {
             got: 5_999,
             want: 6_000
@@ -144,7 +161,7 @@ fn refuses_long_expiry() {
     let nf = f.item_note.nullifier(&f.fvk_item);
     let ivk = prepared_ivk(&f.fvk_seller);
     assert!(matches!(
-        check(&pczt, &nf, &[nf], &ivk, &policy(6_000), &[f.anchor]),
+        check(&pczt, &nf, &[nf], &ivk, &policy(&f, 6_000), &[f.anchor]),
         Err(PolicyError::ExpiryTooLong { .. })
     ));
 }
@@ -161,7 +178,7 @@ fn refuses_when_the_item_is_not_spent() {
             &other_nf,
             &[other_nf],
             &ivk,
-            &policy(6_000),
+            &policy(&f, 6_000),
             &[f.anchor]
         ),
         Err(PolicyError::ItemNotSpent)
@@ -181,7 +198,7 @@ fn refuses_an_extra_seller_spend() {
             &nf,
             &[nf, extra_nf],
             &ivk,
-            &policy(6_000),
+            &policy(&f, 6_000),
             &[f.anchor]
         ),
         Err(PolicyError::ExtraSellerSpend(_))
@@ -196,7 +213,7 @@ fn payment_to_someone_else_does_not_count() {
     // The buyer's own key sees the item and change outputs, not a payment to the seller.
     let ivk = prepared_ivk(&f.fvk_buyer);
     assert!(matches!(
-        check(&pczt, &nf, &[nf], &ivk, &policy(6_000), &[f.anchor]),
+        check(&pczt, &nf, &[nf], &ivk, &policy(&f, 6_000), &[f.anchor]),
         Err(PolicyError::Underpaid { .. })
     ));
 }
@@ -208,7 +225,7 @@ fn refuses_a_transaction_that_never_expires() {
     let nf = f.item_note.nullifier(&f.fvk_item);
     let ivk = prepared_ivk(&f.fvk_seller);
     assert_eq!(
-        check(&pczt, &nf, &[nf], &ivk, &policy(6_000), &[f.anchor]),
+        check(&pczt, &nf, &[nf], &ivk, &policy(&f, 6_000), &[f.anchor]),
         Err(PolicyError::NoExpiry)
     );
 }
@@ -221,13 +238,13 @@ fn refuses_an_expiry_at_or_below_the_tip() {
     for expiry in [TARGET - 5, TARGET - 1] {
         let pczt = trade(&f, 6_000, expiry, false);
         assert!(matches!(
-            check(&pczt, &nf, &[nf], &ivk, &policy(6_000), &[f.anchor]),
+            check(&pczt, &nf, &[nf], &ivk, &policy(&f, 6_000), &[f.anchor]),
             Err(PolicyError::Expired { .. })
         ));
     }
     // One block above the tip is the earliest acceptable expiry.
     let pczt = trade(&f, 6_000, TARGET, false);
-    assert!(check(&pczt, &nf, &[nf], &ivk, &policy(6_000), &[f.anchor]).is_ok());
+    assert!(check(&pczt, &nf, &[nf], &ivk, &policy(&f, 6_000), &[f.anchor]).is_ok());
 }
 
 #[test]
@@ -237,12 +254,12 @@ fn refuses_an_anchor_the_wallet_does_not_know() {
     let nf = f.item_note.nullifier(&f.fvk_item);
     let ivk = prepared_ivk(&f.fvk_seller);
     assert_eq!(
-        check(&pczt, &nf, &[nf], &ivk, &policy(6_000), &[]),
+        check(&pczt, &nf, &[nf], &ivk, &policy(&f, 6_000), &[]),
         Err(PolicyError::UnknownAnchor)
     );
     let other = orchard::Anchor::from_bytes([7u8; 32]).unwrap();
     assert_eq!(
-        check(&pczt, &nf, &[nf], &ivk, &policy(6_000), &[other]),
+        check(&pczt, &nf, &[nf], &ivk, &policy(&f, 6_000), &[other]),
         Err(PolicyError::UnknownAnchor)
     );
 }
@@ -254,7 +271,7 @@ fn a_price_paid_in_dust_does_not_count() {
     let nf = f.item_note.nullifier(&f.fvk_item);
     let ivk = prepared_ivk(&f.fvk_seller);
     assert_eq!(
-        check(&pczt, &nf, &[nf], &ivk, &policy(5_001), &[f.anchor]),
+        check(&pczt, &nf, &[nf], &ivk, &policy(&f, 5_001), &[f.anchor]),
         Err(PolicyError::Underpaid {
             got: 0,
             want: 5_001
@@ -262,7 +279,7 @@ fn a_price_paid_in_dust_does_not_count() {
     );
     // One real payment plus dust: only the real one counts.
     let pczt = trade_paying(&f, &[5_001, 4_000], TARGET + 10, false);
-    let ok = check(&pczt, &nf, &[nf], &ivk, &policy(5_001), &[f.anchor]).expect("approved");
+    let ok = check(&pczt, &nf, &[nf], &ivk, &policy(&f, 5_001), &[f.anchor]).expect("approved");
     assert_eq!(ok.paid_zat, 5_001);
 }
 
@@ -272,7 +289,7 @@ fn refuses_a_transaction_for_another_branch() {
     let pczt = trade(&f, 6_000, TARGET + 10, false);
     let nf = f.item_note.nullifier(&f.fvk_item);
     let ivk = prepared_ivk(&f.fvk_seller);
-    let mut other = policy(6_000);
+    let mut other = policy(&f, 6_000);
     other.branch_id ^= 1;
     assert!(matches!(
         check(&pczt, &nf, &[nf], &ivk, &other, &[f.anchor]),
@@ -315,7 +332,7 @@ fn refuses_a_zero_randomizer() {
     bytes[hits[0]..hits[0] + 32].fill(0);
     let edited = zsettle_core::pczt::from_bytes(&bytes).unwrap();
     assert_eq!(
-        check(&edited, &nf, &[nf], &ivk, &policy(6_000), &[f.anchor]),
+        check(&edited, &nf, &[nf], &ivk, &policy(&f, 6_000), &[f.anchor]),
         Err(PolicyError::ZeroRandomizer(index))
     );
 }
@@ -330,10 +347,11 @@ fn public_checks_use_nothing_of_the_sellers() {
     let nf = f.item_note.nullifier(&f.fvk_item);
     let extra_nf = f.extra_seller_note.nullifier(&f.fvk_item);
     let ivk = prepared_ivk(&f.fvk_seller);
-    let public = check_public(&pczt, &nf, &policy(6_000), &[f.anchor]).expect("public checks pass");
+    let public =
+        check_public(&pczt, &nf, &policy(&f, 6_000), &[f.anchor]).expect("public checks pass");
     assert_eq!(public.paid_zat, 0);
     assert_eq!(
-        check_public(&pczt, &nf, &policy(6_000), &[]),
+        check_public(&pczt, &nf, &policy(&f, 6_000), &[]),
         Err(PolicyError::UnknownAnchor)
     );
     assert!(matches!(
@@ -342,9 +360,43 @@ fn public_checks_use_nothing_of_the_sellers() {
             &nf,
             &[nf, extra_nf],
             &ivk,
-            &policy(6_000),
+            &policy(&f, 6_000),
             &[f.anchor]
         ),
         Err(PolicyError::ExtraSellerSpend(_))
     ));
+}
+
+/// Only the listed address is payment. A sibling diversified address of the same payout
+/// account is refused with exactly the words a stranger's address gets, so a refusal cannot
+/// tell a sender whether an address is this wallet's.
+#[test]
+fn only_the_listed_address_is_payment() {
+    let f = fixture();
+    let nf = f.item_note.nullifier(&f.fvk_item);
+    let ivk = prepared_ivk(&f.fvk_seller);
+    let sibling = trade_paying_to(
+        &f,
+        &[6_000],
+        TARGET + 10,
+        false,
+        f.fvk_seller.address_at(7u32, Scope::External),
+    );
+    let stranger = trade_paying_to(
+        &f,
+        &[6_000],
+        TARGET + 10,
+        false,
+        f.fvk_buyer.address_at(3u32, Scope::External),
+    );
+    let a = check(&sibling, &nf, &[nf], &ivk, &policy(&f, 6_000), &[f.anchor]);
+    let b = check(&stranger, &nf, &[nf], &ivk, &policy(&f, 6_000), &[f.anchor]);
+    assert_eq!(
+        a,
+        Err(PolicyError::Underpaid {
+            got: 0,
+            want: 6_000
+        })
+    );
+    assert_eq!(a, b);
 }

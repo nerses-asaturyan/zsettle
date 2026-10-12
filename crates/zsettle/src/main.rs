@@ -53,7 +53,7 @@ enum Cmd {
         /// keep it, it is the only way to decrypt the mnemonic. Omit it to protect the
         /// mnemonic with a passphrase instead (asked for twice, or taken from
         /// ZSETTLE_PASSPHRASE).
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_IDENTITY")]
         identity: Option<PathBuf>,
         /// `main` or `test`.
         #[arg(long, default_value = "main")]
@@ -65,14 +65,14 @@ enum Cmd {
     /// List the wallet's accounts: name, UUID, ZIP 32 index, birthday.
     Accounts {
         /// Wallet directory.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_WALLET")]
         wallet: PathBuf,
     },
     /// Print a fresh receiving address of an account (Orchard only). Each call gives a new
     /// one; reuse links payments.
     Address {
         /// Wallet directory.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_WALLET")]
         wallet: PathBuf,
         /// Account UUID.
         #[arg(long)]
@@ -81,7 +81,7 @@ enum Cmd {
     /// Sync a wallet with a lightwalletd server (no other tool needed).
     Sync {
         /// Wallet directory.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_WALLET")]
         wallet: PathBuf,
         /// lightwalletd server URL.
         #[arg(long, default_value = DEFAULT_SERVER)]
@@ -90,7 +90,7 @@ enum Cmd {
     /// Import the item viewing key from a listings file into the buyer wallet (the consignment).
     ImportListing {
         /// Buyer wallet directory.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_WALLET")]
         wallet: PathBuf,
         /// Listings file published by a seller (must be signed).
         #[arg(long)]
@@ -104,11 +104,11 @@ enum Cmd {
     },
     /// Build, prove and redact a trade; writes the full PCZT and the seller's copy.
     Buy {
-        /// Buyer wallet directory (devtool layout).
-        #[arg(long)]
+        /// Buyer wallet directory.
+        #[arg(long, env = "ZSETTLE_WALLET")]
         wallet: PathBuf,
         /// UUID of the buyer's spending account.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_BUYER_ACCOUNT")]
         buyer_account: String,
         /// Listings file (must be signed); fills in the seller address, price and expiry for `--item`.
         #[arg(long)]
@@ -164,12 +164,12 @@ enum Cmd {
     /// Combine the seller's signed copy with the full PCZT, sign the payment action, extract the transaction.
     Finish {
         /// Buyer wallet directory.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_WALLET")]
         wallet: PathBuf,
         /// age identity file that decrypts the wallet's mnemonic. Omit it for a
         /// passphrase-protected wallet: the passphrase is asked for, or taken from
         /// ZSETTLE_PASSPHRASE.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_IDENTITY")]
         identity: Option<PathBuf>,
         /// ZIP 32 account index of the buyer's spending account.
         #[arg(long, default_value_t = 0)]
@@ -214,7 +214,8 @@ enum Cmd {
         /// Listings file(s) providing item viewing keys and birthdays (must be signed).
         #[arg(long, required = true)]
         listings: Vec<PathBuf>,
-        /// Genesis note of the item, as <txid>:<output index>.
+        /// A note of the item, as <txid>:<output index>: its genesis note, or any later note a
+        /// supplied listing decrypts (the trace starts there).
         #[arg(long)]
         item: NoteRef,
         /// lightwalletd server URL.
@@ -233,7 +234,7 @@ enum Cmd {
     /// learned from the envelope can never point at a later payment of yours.
     Rotate {
         /// Buyer wallet directory.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_WALLET")]
         wallet: PathBuf,
         /// UUID of the paying account the reservations belong to.
         #[arg(long)]
@@ -244,7 +245,7 @@ enum Cmd {
         /// age identity file that decrypts the wallet's mnemonic. Omit it for a
         /// passphrase-protected wallet: the passphrase is asked for, or taken from
         /// ZSETTLE_PASSPHRASE.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_IDENTITY")]
         identity: Option<PathBuf>,
         /// Confirmations required on the note.
         #[arg(long, default_value_t = 3)]
@@ -263,7 +264,7 @@ enum Cmd {
     /// note can pay for a trade. Notes reserved for open offers are left alone.
     Consolidate {
         /// Wallet directory.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_WALLET")]
         wallet: PathBuf,
         /// UUID of the account.
         #[arg(long)]
@@ -274,7 +275,7 @@ enum Cmd {
         /// age identity file that decrypts the wallet's mnemonic. Omit it for a
         /// passphrase-protected wallet: the passphrase is asked for, or taken from
         /// ZSETTLE_PASSPHRASE.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_IDENTITY")]
         identity: Option<PathBuf>,
         /// Confirmations required on the notes.
         #[arg(long, default_value_t = 3)]
@@ -293,7 +294,7 @@ enum Cmd {
     /// a counterparty.
     Pay {
         /// Wallet directory.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_WALLET")]
         wallet: PathBuf,
         /// UUID of the paying account.
         #[arg(long)]
@@ -304,7 +305,7 @@ enum Cmd {
         /// age identity file that decrypts the wallet's mnemonic. Omit it for a
         /// passphrase-protected wallet: the passphrase is asked for, or taken from
         /// ZSETTLE_PASSPHRASE.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_IDENTITY")]
         identity: Option<PathBuf>,
         /// Recipient unified address.
         #[arg(long)]
@@ -322,7 +323,7 @@ enum Cmd {
     /// List the unspent Ironwood notes of an account of a wallet, dust included.
     Notes {
         /// Wallet directory.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_WALLET")]
         wallet: PathBuf,
         /// Account UUID.
         #[arg(long)]
@@ -500,6 +501,12 @@ fn main() -> Result<()> {
                     "accounts": created.accounts, "fund": address,
                     "next": "send ZEC to `fund`, then `zsettle sync`; `--buyer-account` is the first UUID, `--receive-account` the second",
                 })
+            );
+            eprintln!(
+                "# paste these so that later commands need no --wallet, --identity or --buyer-account:\nexport ZSETTLE_WALLET={}\nexport ZSETTLE_BUYER_ACCOUNT={}{}",
+                wallet.display(),
+                created.accounts[0].account,
+                identity.as_ref().map(|i| format!("\nexport ZSETTLE_IDENTITY={}", i.display())).unwrap_or_default()
             );
             Ok(())
         }

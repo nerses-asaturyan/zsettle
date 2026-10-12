@@ -22,7 +22,7 @@ use zcash_client_backend::fees::{
 };
 use zcash_client_backend::wallet::OvkPolicy;
 use zcash_client_sqlite::AccountUuid;
-use zcash_keys::address::UnifiedAddress;
+use zcash_keys::address::{Address, UnifiedAddress};
 use zcash_proofs::prover::LocalTxProver;
 use zcash_protocol::{
     consensus::Network,
@@ -215,12 +215,10 @@ pub struct MintRequest {
     pub item_account: AccountUuid,
     /// Value of the item note in zatoshis.
     pub value_zat: u64,
-    /// Item name, written into the memo.
-    pub name: String,
+    /// Item names, one note each, written into the memos; one transaction for all.
+    pub names: Vec<String>,
 }
 
-/// Mint one item: pay the item account from the payout account with the name as the memo.
-/// Returns the raw transaction bytes and its id; the caller broadcasts.
 /// A plain shielded payment from an account of this wallet.
 #[derive(Clone, Debug)]
 pub struct PayRequest {
@@ -236,46 +234,59 @@ pub struct PayRequest {
     pub memo: Option<String>,
 }
 
-/// Mint one item: pay the item account from the payout account with the name as the memo.
-/// Returns the raw transaction bytes, its id and the index of the item note's action, so the
-/// note can be listed as soon as the transaction is mined; the caller broadcasts.
+/// Mint items: one note per name, each at a fresh address of the item account with the name
+/// as the memo, all in one transaction paid by the payout account. Returns the raw
+/// transaction bytes, its id and the index of each item note's action in the order of the
+/// names, so the notes can be listed as soon as the transaction is mined; the caller
+/// broadcasts.
 pub fn mint(
     wallet: &Wallet,
     db: &mut Db,
     seed: &SecretVec<u8>,
     req: &MintRequest,
-) -> Result<(Vec<u8>, String, Option<u32>)> {
+) -> Result<(Vec<u8>, String, Vec<Option<u32>>)> {
     let MintRequest {
         from_account,
         from_account_index,
         item_account,
         value_zat,
-        name,
+        names,
     } = req.clone();
-    let to = item_address(db, wallet.network, item_account)?;
-    let (bytes, txid) = pay(
-        wallet,
-        db,
-        seed,
-        &PayRequest {
-            from_account,
-            from_account_index,
-            to,
-            value_zat,
-            memo: Some(format!("zsettle item: {name}")),
-        },
-    )?;
-    let index = item_output_index(wallet, db, &bytes, item_account)?;
-    Ok((bytes, txid, index))
+    if names.is_empty() {
+        return Err(anyhow!("nothing to mint: give at least one --name"));
+    }
+    let mut payments = Vec::with_capacity(names.len());
+    for name in &names {
+        let to = item_address(db, wallet.network, item_account)?;
+        let memo =
+            Memo::from_str(&format!("zsettle item: {name}")).map_err(|e| anyhow!("memo: {e}"))?;
+        payments.push(
+            Payment::new(
+                ZcashAddress::from_str(&to).map_err(|e| anyhow!("item address: {e}"))?,
+                Some(Zatoshis::from_u64(value_zat).map_err(|_| anyhow!("value"))?),
+                Some(MemoBytes::from(&memo)),
+                None,
+                None,
+                vec![],
+            )
+            .map_err(|e| anyhow!("invalid payment: {e:?}"))?,
+        );
+    }
+    let request = TransactionRequest::new(payments).map_err(|e| anyhow!("payment request: {e}"))?;
+    let (bytes, txid) = pay_request(wallet, db, seed, from_account, from_account_index, request)?;
+    let indices = item_output_indices(wallet, db, &bytes, item_account, &names)?;
+    Ok((bytes, txid, indices))
 }
 
-/// Which action of a transaction this wallet built carries a note for `account`.
-fn item_output_index(
+/// Which action of a transaction this wallet built carries the note for each name, matched by
+/// memo; `None` when a note does not decrypt (it should not happen).
+fn item_output_indices(
     wallet: &Wallet,
     db: &Db,
     bytes: &[u8],
     account: AccountUuid,
-) -> Result<Option<u32>> {
+    names: &[String],
+) -> Result<Vec<Option<u32>>> {
     use orchard::keys::{PreparedIncomingViewingKey, Scope};
     use orchard::note_encryption::IronwoodDomain;
     use zcash_note_encryption::try_note_decryption;
@@ -288,12 +299,31 @@ fn item_output_index(
     .map_err(|e| anyhow!("re-reading the transaction: {e}"))?;
     let fvk = crate::wallet::account_orchard_fvk(db, account)?;
     let ivk = PreparedIncomingViewingKey::new(&fvk.to_ivk(Scope::External));
-    Ok(tx.ironwood_bundle().and_then(|bundle| {
-        bundle.actions().iter().enumerate().find_map(|(i, action)| {
+    let mut found: Vec<(u32, String)> = Vec::new();
+    if let Some(bundle) = tx.ironwood_bundle() {
+        for (i, action) in bundle.actions().iter().enumerate() {
             let domain = IronwoodDomain::for_action(action);
-            try_note_decryption(&domain, &ivk, action).map(|_| i as u32)
+            if let Some((_, _, memo)) = try_note_decryption(&domain, &ivk, action) {
+                let text = MemoBytes::from_bytes(&memo)
+                    .ok()
+                    .and_then(|m| Memo::try_from(m).ok())
+                    .and_then(|m| match m {
+                        Memo::Text(t) => Some(t.to_string()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                found.push((i as u32, text));
+            }
+        }
+    }
+    Ok(names
+        .iter()
+        .map(|name| {
+            let memo = format!("zsettle item: {name}");
+            let at = found.iter().position(|(_, t)| *t == memo)?;
+            Some(found.remove(at).0)
         })
-    }))
+        .collect())
 }
 
 /// Pay a unified address from an account of this wallet. Returns the raw transaction bytes
@@ -314,6 +344,16 @@ pub fn pay(
     let memo = memo
         .map(|m| Memo::from_str(&m).map_err(|e| anyhow!("memo: {e}")))
         .transpose()?;
+    // Shielded only: a transparent or Sapling payment would show its amount on chain.
+    let shielded = matches!(
+        Address::decode(&wallet.network, &to),
+        Some(Address::Unified(ua)) if ua.orchard().is_some()
+    );
+    if !shielded {
+        return Err(anyhow!(
+            "zsettle pays Orchard receivers only: give a unified address with an Orchard receiver"
+        ));
+    }
     let payment = Payment::new(
         ZcashAddress::from_str(&to).map_err(|e| anyhow!("address: {e}"))?,
         Some(Zatoshis::from_u64(value_zat).map_err(|_| anyhow!("value"))?),
@@ -325,7 +365,19 @@ pub fn pay(
     .map_err(|e| anyhow!("invalid payment: {e:?}"))?;
     let request =
         TransactionRequest::new(vec![payment]).map_err(|e| anyhow!("payment request: {e}"))?;
+    pay_request(wallet, db, seed, from_account, from_account_index, request)
+}
 
+/// Pay a whole request from an account of this wallet (the library proposes, proves and
+/// stores the transaction). Returns the raw bytes and the id; the caller broadcasts.
+fn pay_request(
+    wallet: &Wallet,
+    db: &mut Db,
+    seed: &SecretVec<u8>,
+    from_account: AccountUuid,
+    from_account_index: u32,
+    request: TransactionRequest,
+) -> Result<(Vec<u8>, String)> {
     let prover = LocalTxProver::bundled();
     let change_strategy = MultiOutputChangeStrategy::new(
         StandardFeeRule::Zip317,

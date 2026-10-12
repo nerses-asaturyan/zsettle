@@ -333,6 +333,21 @@ pub fn recent_ironwood_anchors(db: &mut Db, depth: u32) -> Result<Vec<orchard::A
     Ok(anchors.unwrap_or_default())
 }
 
+/// Nullifiers of the unspent notes of one account. For the listed item account these are
+/// public knowledge: the published viewing key derives them.
+pub fn account_unspent_nullifiers(
+    db: &Db,
+    account: AccountUuid,
+) -> Result<Vec<orchard::note::Nullifier>> {
+    Ok(db
+        .get_ironwood_nullifiers(NullifierQuery::Unspent)
+        .map_err(|e| anyhow!("{e}"))?
+        .into_iter()
+        .filter(|(owner, _)| *owner == account)
+        .map(|(_, nf)| nf)
+        .collect())
+}
+
 /// Nullifiers of every unspent Ironwood note this wallet can spend: the notes of its derived
 /// accounts. Notes of accounts imported as viewing keys (consignments held for resale, or a
 /// counterparty's listing) are seen here but belong to someone else, so a trade that spends

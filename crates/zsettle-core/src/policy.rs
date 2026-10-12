@@ -104,6 +104,9 @@ pub struct SellerPolicy {
     pub tip: u32,
     /// Consensus branch id in force at the next block.
     pub branch_id: u32,
+    /// The listed payout address. Only outputs to it count as payment: another address of the
+    /// same account would let a sender learn whether an address is this wallet's.
+    pub payout: orchard::Address,
 }
 
 /// Result of a successful check.
@@ -118,6 +121,9 @@ pub struct Approved {
 }
 
 /// Run the seller-side checks against a (redacted) trade PCZT.
+/// `seller_nullifiers` are the nullifiers of the listed item account's unspent notes, which
+/// the published viewing key derives, so the whole decision depends on public data and the
+/// proof: nothing in a refusal reveals what else this wallet holds.
 pub fn check(
     pczt: &Pczt,
     item_nullifier: &Nullifier,
@@ -237,8 +243,10 @@ fn inspect(
                     compact,
                 );
                 let domain = IronwoodDomain::for_compact_action(&act);
-                if let Some((note, _addr)) = try_compact_note_decryption(&domain, seller_ivk, &act)
-                {
+                if let Some((note, addr)) = try_compact_note_decryption(&domain, seller_ivk, &act) {
+                    if addr != policy.payout {
+                        continue;
+                    }
                     // Dust never counts: a note at or below the marginal fee costs more to
                     // spend than it is worth, so it is not a payment.
                     let value = note.value().inner();
