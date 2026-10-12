@@ -12,9 +12,10 @@ use zsettle_core::broadcast::{
 };
 use zsettle_core::listing::Listings;
 use zsettle_core::mint::{note_state, NoteState};
+use zsettle_core::ownership::OwnershipProof;
 use zsettle_core::pczt as pczt_ops;
 use zsettle_core::trade::{build_self_spend, build_trade, TradeRequest};
-use zsettle_core::verify::Consignment;
+use zsettle_core::verify::{Consignment, NoteNotFound, Status};
 use zsettle_core::wallet::{
     account_orchard_fvk, account_ufvk, find_account_by_ufvk, heights, import_viewing_key,
     init_wallet, largest_spendable_note, list_accounts, parse_account, release_note, reservations,
@@ -279,6 +280,28 @@ enum Cmd {
         /// look at): scan from the listings' birthdays instead, and skip the item name.
         #[arg(long)]
         private: bool,
+    },
+    /// Check an ownership proof made by `zsettle-seller prove`: its signature, that it answers
+    /// your challenge, and on chain that the note is still unspent and owned by the proof's
+    /// key.
+    ///
+    /// Prints JSON with `valid` and `held`. Exits with status 1 when the proof is not valid or
+    /// the item is not held; other errors (server unreachable, unreadable proof) also exit
+    /// non-zero, without that JSON.
+    CheckProof {
+        /// The proof: a file path or an http(s) URL. At most 16 KiB.
+        #[arg(long)]
+        proof: String,
+        /// The challenge you gave the holder. Pick a fresh one each time, or an old proof can
+        /// be shown to you again.
+        #[arg(long)]
+        challenge: String,
+        /// Network the proof must be for (`main` or `test`).
+        #[arg(long, default_value = "main")]
+        network: String,
+        /// lightwalletd server URL (defaults to the network's).
+        #[arg(long)]
+        server: Option<String>,
     },
     /// Retire the paying notes of offers that did not settle: each one is moved to a fresh
     /// address of its account in a plain two-action transaction, so the nullifier the seller
@@ -1294,5 +1317,152 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
+        Cmd::CheckProof {
+            proof,
+            challenge,
+            network,
+            server,
+        } => {
+            let network = parse_network(&network)?;
+            let server = pick_server(server, network);
+            let p = OwnershipProof::parse(&read_proof(&proof)?)?;
+            let report = check_proof(&p, &challenge, network, &server)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if !(report.valid && report.held) {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
     }
+}
+
+/// Result of `check-proof`.
+#[derive(serde::Serialize)]
+struct ProofReport {
+    valid: bool,
+    held: bool,
+    note: String,
+    name: Option<String>,
+    challenge: String,
+    signed_at_height: u32,
+    scanned_to: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+/// Check a parsed proof: signature, challenge, network, then the note on chain. A proof
+/// that fails is reported, not returned as an error; errors are reserved for a check that
+/// could not be made.
+fn check_proof(
+    p: &OwnershipProof,
+    challenge: &str,
+    network: Network,
+    server: &str,
+) -> Result<ProofReport> {
+    let mut report = ProofReport {
+        valid: false,
+        held: false,
+        note: p.note.clone(),
+        name: None,
+        challenge: p.challenge.clone(),
+        signed_at_height: p.height,
+        scanned_to: None,
+        reason: None,
+    };
+    let refused = if let Err(e) = p.verify_signature() {
+        Some(format!("{e:#}"))
+    } else if p.challenge != challenge {
+        Some("the proof answers another challenge; it may be an old proof shown again".into())
+    } else if p.network()? != network {
+        Some(format!("the proof is for the {} network", p.network))
+    } else {
+        None
+    };
+    if let Some(reason) = refused {
+        report.reason = Some(reason);
+        return Ok(report);
+    }
+    report.valid = true;
+    let note = p.note_ref()?;
+    let prover = Consignment {
+        label: "prover".into(),
+        fvk: p.item_fvk()?,
+        birthday: p.item_birthday,
+    };
+    let trace = match zsettle_core::verify::trace_blocking(
+        server,
+        network,
+        std::slice::from_ref(&prover),
+        note,
+        None,
+        false,
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            if let Some(missing) = e.downcast_ref::<NoteNotFound>() {
+                report.reason = Some(format!(
+                    "the note is not on chain as a note of the proof's key: {missing}"
+                ));
+                return Ok(report);
+            }
+            return Err(e.context("tracing the proof's note"));
+        }
+    };
+    report.name = trace.name.clone();
+    report.scanned_to = Some(trace.scanned_to);
+    match (&trace.status, trace.hops.len()) {
+        (Status::Held { .. }, 1) => report.held = true,
+        (Status::Held { .. }, _) => {
+            report.reason = Some(format!(
+                "the note was spent in {}; the item moved to another note of the same account, so ask for a proof naming the current note",
+                trace.hops[1].txid
+            ))
+        }
+        (Status::TransferredToUnknownHolder, _) => {
+            report.reason = Some(format!(
+                "the note was spent in {}; the item moved to another holder",
+                trace.hops.last().map(|h| h.txid.as_str()).unwrap_or("?")
+            ))
+        }
+        (Status::LineageBroken { txid }, _) => {
+            report.reason = Some(format!(
+                "the note was spent in {txid}, outside a trade"
+            ))
+        }
+    }
+    Ok(report)
+}
+
+/// Read a `--proof` argument: a file path, or an http(s) URL fetched without writing to
+/// disk. At most 16 KiB.
+fn read_proof(arg: &str) -> Result<String> {
+    use std::io::Read;
+    let limit = zsettle_core::ownership::MAX_PROOF_BYTES;
+    let mut body = String::new();
+    if arg.starts_with("http://") || arg.starts_with("https://") {
+        let resp = http_agent()?
+            .get(arg)
+            .call()
+            .map_err(|e| anyhow!("fetching the proof from {arg}: {e}"))?;
+        if resp.status() != 200 {
+            return Err(anyhow!(
+                "fetching the proof from {arg}: answer {} (redirects are not followed; give the final URL)",
+                resp.status()
+            ));
+        }
+        resp.into_reader()
+            .take(limit + 1)
+            .read_to_string(&mut body)
+            .with_context(|| format!("reading the proof from {arg}"))?;
+    } else {
+        fs::File::open(arg)
+            .with_context(|| format!("reading {arg}"))?
+            .take(limit + 1)
+            .read_to_string(&mut body)
+            .with_context(|| format!("reading {arg}"))?;
+    }
+    if body.len() as u64 > limit {
+        return Err(anyhow!("the proof at {arg} is larger than {limit} bytes"));
+    }
+    Ok(body)
 }
