@@ -2,11 +2,11 @@
 //! binaries for every action, so the page adds no cryptography of its own.
 //!
 //! Two modes. Local (the default): one profile, on this machine only, behind a page key in
-//! the link. Hosted (`--public https://…`): a public demo for many people behind a TLS proxy;
+//! the link. Hosted (`--public https://…`): one server for many people behind a TLS proxy;
 //! each visitor creates a wallet of their own, signs in with a passkey (or a wallet code and a
 //! passphrase), and can open a shop that others reach at `<public>/shop/<code>`. An optional
 //! house shop restocks itself and hands out test coins. Hosted mode is meant for the testnet:
-//! the server holds every demo wallet.
+//! the server holds every wallet.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -136,7 +136,7 @@ fn scrypt_slot() -> Result<Slot> {
 /// to each new wallet.
 const HOUSE: &str = "house";
 const HOUSE_STOCK: usize = 8;
-/// What the house sells: a small catalogue, so the demo market looks like a market. Items are
+/// What the house sells: a small catalogue, so the market looks like a market. Items are
 /// minted as "<name> #<number>" and listed with the entry's icon, description and price.
 struct HouseItem {
     name: &'static str,
@@ -145,18 +145,46 @@ struct HouseItem {
     price: &'static str,
 }
 const HOUSE_ITEMS: &[HouseItem] = &[
-    HouseItem { name: "Concert ticket", icon: "\u{1f39f}\u{fe0f}", description: "One seat at the demo concert. The ticket is a shielded note; whoever holds the note holds the seat.", price: "0.0008 zec" },
-    HouseItem { name: "Museum pass", icon: "\u{1f3ab}", description: "A day pass for the demo museum. Show an ownership proof at the door.", price: "0.0004 zec" },
-    HouseItem { name: "Album code", icon: "\u{1f3b5}", description: "A download code for the demo album, kept in the note's encrypted memo.", price: "0.0003 zec" },
+    HouseItem { name: "Concert ticket", icon: "\u{1f39f}\u{fe0f}", description: "One seat, Saturday night. The ticket is a shielded note; whoever holds the note holds the seat.", price: "0.0008 zec" },
+    HouseItem { name: "Museum pass", icon: "\u{1f3ab}", description: "A day pass for the museum. Show an ownership proof at the door.", price: "0.0004 zec" },
+    HouseItem { name: "Album code", icon: "\u{1f3b5}", description: "A download code for the album, kept in the note's encrypted memo.", price: "0.0003 zec" },
     HouseItem { name: "Art print", icon: "\u{1f3a8}", description: "One print of a small series. Its history can be traced on chain from the first owner.", price: "0.0012 zec" },
-    HouseItem { name: "Beta key", icon: "\u{1f3ae}", description: "Early access to the demo game. Resell it when you are done.", price: "0.0005 zec" },
-    HouseItem { name: "E-book", icon: "\u{1f4da}", description: "The demo e-book: one copy, one note.", price: "0.0006 zec" },
-    HouseItem { name: "Tournament seat", icon: "\u{1f3c6}", description: "A seat at the demo tournament. Sell it on if you cannot come.", price: "0.001 zec" },
+    HouseItem { name: "Beta key", icon: "\u{1f3ae}", description: "Early access to the game. Resell it when you are done.", price: "0.0005 zec" },
+    HouseItem { name: "E-book", icon: "\u{1f4da}", description: "One copy of the e-book, one note.", price: "0.0006 zec" },
+    HouseItem { name: "Tournament seat", icon: "\u{1f3c6}", description: "A seat at the tournament. Sell it on if you cannot come.", price: "0.001 zec" },
     HouseItem { name: "Collectible", icon: "\u{1f48e}", description: "A numbered collectible with a chain history from its first owner.", price: "0.0015 zec" },
-    HouseItem { name: "Members pass", icon: "\u{1f511}", description: "A month of the demo members area. The door checks your proof, never your balance.", price: "0.0007 zec" },
+    HouseItem { name: "Members pass", icon: "\u{1f511}", description: "A month of the members area. The door checks your proof, never your balance.", price: "0.0007 zec" },
     HouseItem { name: "Mystery box", icon: "\u{1f381}", description: "Who knows. A shielded note, like everything else here.", price: "0.0002 zec" },
-    HouseItem { name: "Ticket", icon: "\u{1f39f}\u{fe0f}", description: "A demo ticket: a real shielded note on the Zcash testnet.", price: "0.0005 zec" },
+    HouseItem { name: "Ticket", icon: "\u{1f39f}\u{fe0f}", description: "A plain ticket. Like everything here, a shielded note.", price: "0.0005 zec" },
 ];
+
+/// One unspent note: reference, value in zatoshis, mined height (none while pending), and
+/// whether it is change (received at the account's own change address).
+type NoteRow = (String, u64, Option<u32>, bool);
+
+/// The lines `zsettle notes` prints: `<note>  <value> zat (<zec>)  mined <height|pending>`, with
+/// `  change` at the end of a change note.
+fn parse_notes(text: &str) -> Vec<NoteRow> {
+    let mut notes = Vec::new();
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        let (Some(note), Some(value)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let Ok(value) = value.parse::<u64>() else {
+            continue;
+        };
+        let line = line.trim_end();
+        let change = line.ends_with(" change");
+        let mined = line
+            .trim_end_matches("change")
+            .rsplit("mined ")
+            .next()
+            .and_then(|h| h.trim().parse::<u32>().ok());
+        notes.push((note.to_string(), value, mined, change));
+    }
+    notes
+}
 
 /// The catalogue entry an item name belongs to; the first entry for a name it does not know.
 fn house_item(name: &str) -> &'static HouseItem {
@@ -562,7 +590,7 @@ fn hosted_hub(cli: &Cli, public: &str, base: PathBuf, bins: Bins) -> Result<Hub>
     }
     if cli.network == "test" && !zsettle_core::broadcast::TESTNET_BUILD {
         return Err(anyhow!(
-            "this build syncs mainnet only: build the hosted testnet demo from the nu7-testnet branch"
+            "this build syncs mainnet only: build the hosted testnet server from the nu7-testnet branch"
         ));
     }
     let index: Index = read_state(&base.join("hub.json"))?;
@@ -1054,7 +1082,7 @@ fn handle_hosted(hub: &Arc<Hub>, h: &Hosted, req: Request, mut stream: TcpStream
                 .count();
             if open >= MAX_OPEN_SHOPS && !app.shop_running() {
                 Err(anyhow!(
-                    "the demo server has too many open shops right now; try later"
+                    "the server has too many open shops right now; try later"
                 ))
             } else {
                 app.shop_start(&json!({}))
@@ -1336,7 +1364,7 @@ impl Hub {
                 ));
             }
             if h.apps.lock().unwrap().len() >= MAX_PROFILES {
-                return Err(anyhow!("this demo server is full"));
+                return Err(anyhow!("this server is full"));
             }
             created.push(stamp.clone());
         }
@@ -1522,7 +1550,7 @@ impl Hub {
             all.retain(|t| *t + 3600 > stamp);
             if all.len() >= MAX_FAUCET_PER_HOUR {
                 return Err(anyhow!(
-                    "the demo faucet gave out many coins this hour; try again later"
+                    "the faucet gave out many coins this hour; try again later"
                 ));
             }
             let mut by_ip = h.faucet_by_ip.lock().unwrap();
@@ -1548,7 +1576,7 @@ impl Hub {
         }
         app.free_job("faucet", move |app, id| {
             let _slot = slot;
-            app.step(id, "Sending free test coins from the demo faucet");
+            app.step(id, "Sending free test coins");
             // The house's coins may be confirming after a restock: wait for them a while
             // rather than fail at once. A failure once the payment may have been sent is not
             // tried again, so the faucet never pays twice.
@@ -1582,7 +1610,7 @@ impl Hub {
                     // Give the chance back; the detail goes to the house log, not to the visitor.
                     hub.unfund(&profile, &ip, stamp);
                     house.push_event(json!({ "event": "log", "text": format!("faucet: {e:#}") }));
-                    Err(anyhow!("the demo faucet cannot pay right now (its coins may still be confirming); try again in a few minutes"))
+                    Err(anyhow!("the faucet cannot pay right now (its coins may still be confirming); try again in a few minutes"))
                 }
             }
         })
@@ -1769,7 +1797,7 @@ impl App {
                 .unwrap_or_default();
             let ok = base.strip_prefix(&prefix).is_some_and(valid_name);
             if !ok {
-                return Err(anyhow!("on this demo you can open its own shops only"));
+                return Err(anyhow!("on this server you can open its own shops only"));
             }
         }
         Ok((base, url))
@@ -1920,27 +1948,11 @@ impl App {
         )
     }
 
-    /// Unspent notes of an account: (note, value, mined height or none).
-    fn notes(&self, account: &str) -> Result<Vec<(String, u64, Option<u32>)>> {
+    /// Unspent notes of an account.
+    fn notes(&self, account: &str) -> Result<Vec<NoteRow>> {
         let w = self.w();
         let out = self.buyer(&["notes", "--wallet", &w, "--account", account])?;
-        let text = out.as_str().unwrap_or_default().to_string();
-        let mut notes = Vec::new();
-        for line in text.lines() {
-            let mut parts = line.split_whitespace();
-            let (Some(note), Some(value)) = (parts.next(), parts.next()) else {
-                continue;
-            };
-            let Ok(value) = value.parse::<u64>() else {
-                continue;
-            };
-            let mined = line
-                .rsplit("mined ")
-                .next()
-                .and_then(|h| h.trim().parse::<u32>().ok());
-            notes.push((note.to_string(), value, mined));
-        }
-        Ok(notes)
+        Ok(parse_notes(out.as_str().unwrap_or_default()))
     }
 
     fn add_activity(&self, mut entry: Value) {
@@ -2241,8 +2253,8 @@ impl App {
         let details = self.item_details(own.as_ref());
         Ok(json!({
             "balance_zat": zec.iter().map(|n| n.1).sum::<u64>(),
-            "notes": zec.iter().map(|(n, v, m)| json!({ "note": n, "value_zat": v, "mined": m })).collect::<Vec<_>>(),
-            "items": items.iter().map(|(n, v, m)| json!({
+            "notes": zec.iter().map(|(n, v, m, c)| json!({ "note": n, "value_zat": v, "mined": m, "change": c })).collect::<Vec<_>>(),
+            "items": items.iter().map(|(n, v, m, _)| json!({
                 "note": n, "value_zat": v, "mined": m,
                 "name": names.get(n), "listed_zat": listed.get(n),
                 "icon": details.get(n).and_then(|d| d["icon"].as_str()),
@@ -2345,7 +2357,7 @@ impl App {
             let amount_a = format!("--amount={amount}");
             let r = self.seller(&[
                 "pay", "--wallet", &w, "--account", &payout, &to_a, &amount_a,
-                "--memo=zsettle demo: free test coins",
+                "--memo=zsettle: free test coins",
             ])?;
             self.add_activity(json!({ "kind": "pay", "txid": r["txid"], "amount_zat": zat, "text": "Faucet payment" }));
             Ok(r)
@@ -3225,6 +3237,24 @@ mod tests {
         assert!(back.shop_wanted);
         assert_eq!(back.shop_listen.as_deref(), Some("127.0.0.1:19100"));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn notes_are_parsed_with_their_change_flag() {
+        let text = "aa:0      300000 zat (0.003 ZEC)  mined 4501000\n\
+                    bb:1      235000 zat (0.00235 ZEC)  mined 4501200  change\n\
+                    cc:2        1000 zat (0.00001 ZEC)  mined pending\n\
+                    (no unspent notes)\n";
+        let n = parse_notes(text);
+        assert_eq!(
+            n,
+            vec![
+                ("aa:0".to_string(), 300_000, Some(4_501_000), false),
+                ("bb:1".to_string(), 235_000, Some(4_501_200), true),
+                ("cc:2".to_string(), 1_000, None, false),
+            ]
+        );
+        assert!(parse_notes("(no unspent notes)\n").is_empty());
     }
 
     #[test]

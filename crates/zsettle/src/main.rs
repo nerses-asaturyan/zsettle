@@ -1211,13 +1211,14 @@ fn main() -> Result<()> {
             let notes = zsettle_core::mint::unspent_notes(&w, &db, parse_account(&account)?)?;
             for n in &notes {
                 println!(
-                    "{}  {:>10} zat ({})  mined {}",
+                    "{}  {:>10} zat ({})  mined {}{}",
                     n.note,
                     n.value_zat,
                     zec(n.value_zat),
                     n.mined_height
                         .map(|h| h.to_string())
-                        .unwrap_or_else(|| "pending".into())
+                        .unwrap_or_else(|| "pending".into()),
+                    if n.change { "  change" } else { "" }
                 );
             }
             if notes.is_empty() {

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- App: every transaction (a purchase, a payment, creating items, cancelling offers) has a confirm step that shows the cost and says it cannot be undone; a result screen's icon and title follow the outcome, so a proof that does not hold shows a warning, not a tick.
+- App: the balance card counts confirmations per note, 10 for a note from another wallet and 3 for the wallet's own change (ZIP 315's recommended policy), and "not enough spendable ZEC" says what is still confirming and for how long; the dot in the top bar opens a Network sheet that says what syncing does.
+- App and hosted server: the wording no longer calls a hosted server a demo; the Market says what a seller signs and why the wallet checks it; the ownership texts say exactly what a proof reveals (the item account's viewing key, not the ZEC or payout address); twice as many item icons; the Activity page keeps the explorer note to the link itself.
+- CLI: `zsettle notes` marks change notes.
 - Hosted demo: 5 new wallets an hour and test coins 4 times a day per visitor address, so several people behind one address can try it the same day.
 - Hosted demo: the house shop sells a small catalogue (concert tickets, passes, prints, keys, collectibles) with different icons, descriptions and prices instead of identical tickets; items listed earlier get their details too.
 - App: the balance card says when coins are on their way (a faucet payment or a sale the wallet has not seen yet) and when they are still confirming, with the blocks and minutes left; the demo banner shows the wallet code only to passphrase wallets, which need it to sign in.
