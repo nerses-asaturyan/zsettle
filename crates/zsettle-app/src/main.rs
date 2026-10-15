@@ -135,7 +135,7 @@ fn scrypt_slot() -> Result<Slot> {
 /// Hosted house shop: items it keeps listed, their price, and the test coins it gives once
 /// to each new wallet.
 const HOUSE: &str = "house";
-const HOUSE_STOCK: usize = 6;
+const HOUSE_STOCK: usize = 8;
 /// What the house sells: a small catalogue, so the demo market looks like a market. Items are
 /// minted as "<name> #<number>" and listed with the entry's icon, description and price.
 struct HouseItem {
@@ -2661,10 +2661,10 @@ impl App {
         if self.listings_path().exists() && !self.shop_running() {
             self.shop_start(&json!({}))?;
         }
-        // Make new items in one batch when stock runs low, not one by one after each sale:
+        // Make new items in one batch when stock runs to half, not one by one after each sale:
         // every mint spends the house's coins for a few blocks.
         let have = listed + ready.len() + pending;
-        if have <= 2 {
+        if have <= HOUSE_STOCK / 2 {
             let n = self.cfg.lock().unwrap().minted;
             let names: Vec<String> = (1..=(HOUSE_STOCK - have) as u64)
                 .map(|i| {
