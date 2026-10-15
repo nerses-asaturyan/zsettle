@@ -313,7 +313,7 @@ function sheet({ title, body, foot, dismissable = true, onClose }) {
   layer.append(scrim);
   requestAnimationFrame(() => box.focus({ preventScroll: true }));
   setTimeout(() => {
-    const f = box.querySelector('input, textarea, .foot .btn.primary') || closeBtn;
+    const f = box.querySelector('input:not([type=hidden]), textarea');
     if (f) f.focus({ preventScroll: true });
   }, 30);
   return api_;
@@ -487,6 +487,9 @@ async function refresh() {
   if (S.hosted && !S.status.unlocked) return render(viewWelcomeHosted());
   if (!S.status.wallet) return render(viewCreate());
   if (!S.status.unlocked) return render(viewUnlock());
+  const hv = location.hash.slice(1);
+  if (VIEWS.some((v) => v[0] === hv)) S.view = hv;
+  history.replaceState({ view: S.view }, '', '#' + S.view);
   renderShell();
   loadView();
   startTimers();
@@ -822,8 +825,9 @@ async function openBackup() {
   }
 }
 
-function go(view) {
+function go(view, push = true) {
   S.view = view;
+  if (push && location.hash !== '#' + view) history.pushState({ view }, '', '#' + view);
   document.querySelectorAll('[aria-current="page"]').forEach((b) => b.removeAttribute('aria-current'));
   document.querySelectorAll('.sidenav, .navbtn').forEach((b, i) => {
     if (VIEWS[i % 4][0] === view) b.setAttribute('aria-current', 'page');
@@ -1591,6 +1595,17 @@ function viewActivity() {
 
 // A new link pasted into this tab changes only the part after '#', which does not reload the
 // page: take the new key and start over.
+window.addEventListener('popstate', (e) => {
+  if (/token=[0-9a-f]{32}/.test(location.hash)) return;
+  // Back closes an open sheet first (not one that is busy with a job), then shows the tab.
+  const open = document.querySelector('#layer .scrim');
+  if (open) {
+    const closeBtn = open.querySelector('.iconbtn[aria-label="Close"]');
+    if (closeBtn && !closeBtn.hidden) closeBtn.click();
+  }
+  const v = (e.state && e.state.view) || location.hash.slice(1);
+  if (VIEWS.some((x) => x[0] === v) && v !== S.view && S.status && S.status.unlocked) go(v, false);
+});
 window.addEventListener('hashchange', () => {
   if (/token=[0-9a-f]{32}/.test(location.hash)) location.reload();
 });
