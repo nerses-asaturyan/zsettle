@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Hosted demo: 5 new wallets an hour and test coins 4 times a day per visitor address, so several people behind one address can try it the same day.
 - Hosted demo: the house shop sells a small catalogue (concert tickets, passes, prints, keys, collectibles) with different icons, descriptions and prices instead of identical tickets; items listed earlier get their details too.
 - App: the balance card says when coins are on their way (a faucet payment or a sale the wallet has not seen yet) and when they are still confirming, with the blocks and minutes left; the demo banner shows the wallet code only to passphrase wallets, which need it to sign in.
 - App: each tab has an address (`#market` and so on), so the back button returns to the previous tab and closes an open sheet; a sheet keeps focus itself unless it has a field.

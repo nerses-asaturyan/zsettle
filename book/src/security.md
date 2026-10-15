@@ -103,10 +103,10 @@ Limits built into the code (the constants at the top of `crates/zsettle-app/src/
 
 | What | Limit |
 |---|---|
-| New wallets | 40 an hour in all, 3 an hour per visitor, 500 in total |
+| New wallets | 40 an hour in all, 5 an hour per visitor, 500 in total |
 | Unused wallets | a wallet that was never synced, got no test coins and listed nothing is removed after three days (never the house wallet, a signed-in wallet or one with an open shop) |
 | Open shops | 25 at once |
-| Test coins | once per wallet, twice a day per visitor, 12 an hour in all; at most 4 faucet payments waiting at once |
+| Test coins | once per wallet, four times a day per visitor, 12 an hour in all; at most 4 faucet payments waiting at once |
 | Tasks | 2 per wallet, 12 in all |
 | Commands that prove (pay, mint, buy, ...) | 3 at once |
 | Passphrase checks (scrypt) at once | 4; others wait their turn up to 10 seconds |

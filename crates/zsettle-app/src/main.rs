@@ -85,8 +85,8 @@ const MAX_CHECKS_PER_WALLET_MIN: usize = 6;
 const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
 /// Hosted: per visitor (by the proxy's X-Forwarded-For), new wallets an hour and test coins a
 /// day; failed sign-ins before a wallet or a visitor must wait.
-const MAX_NEW_PER_IP_HOUR: usize = 3;
-const MAX_FAUCET_PER_IP_DAY: usize = 2;
+const MAX_NEW_PER_IP_HOUR: usize = 5;
+const MAX_FAUCET_PER_IP_DAY: usize = 4;
 const FREE_FAILURES: u32 = 5;
 /// Hosted passphrases are at least this long.
 const MIN_HOSTED_PASSPHRASE: usize = 12;
