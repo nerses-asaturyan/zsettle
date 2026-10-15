@@ -134,7 +134,12 @@ function ago(sec) {
   if (d < 45) return 'just now';
   if (d < 3600) return Math.round(d / 60) + ' min ago';
   if (d < 86400) return Math.round(d / 3600) + ' h ago';
-  return new Date(sec * 1000).toLocaleDateString();
+  if (d < 172800) return 'yesterday';
+  if (d < 7 * 86400) return Math.round(d / 86400) + ' days ago';
+  const when = new Date(sec * 1000);
+  const opts = { day: 'numeric', month: 'short' };
+  if (when.getFullYear() !== new Date().getFullYear()) opts.year = 'numeric';
+  return when.toLocaleDateString(undefined, opts);
 }
 function hash(s) {
   let x = 2166136261;
@@ -259,6 +264,7 @@ function sheet({ title, body, foot, dismissable = true, onClose }) {
   const titleEl = h('h2', { id: 'sheet-title' }, title);
   const box = h('div', { class: 'sheet', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'sheet-title' }, h('div', { class: 'grab' }), h('div', { class: 'head' }, titleEl, closeBtn), bodyEl, footEl);
   const scrim = h('div', { class: 'scrim' }, box);
+  box.tabIndex = -1;
   let canClose = dismissable;
   const api_ = {
     box,
@@ -305,6 +311,7 @@ function sheet({ title, body, foot, dismissable = true, onClose }) {
   api_.setDismissable(dismissable);
   footEl.hidden = !footEl.children.length;
   layer.append(scrim);
+  requestAnimationFrame(() => box.focus({ preventScroll: true }));
   setTimeout(() => {
     const f = box.querySelector('input, textarea, .foot .btn.primary') || closeBtn;
     if (f) f.focus({ preventScroll: true });
@@ -900,6 +907,7 @@ function viewWallet() {
   return h(
     'div',
     { class: 'stack lg' },
+    h('h2', { class: 'sr-only' }, 'Wallet'),
     S.hosted ? h('div', { class: 'callout info' }, icon('info'), h('span', null, 'Public demo on the Zcash testnet. Wallet code ', h('b', null, S.status.code || ''), '. Coins here are free and worthless.')) : null,
     S.faucetPending
       ? h('div', { class: 'card row nowrap' }, h('span', { class: 'ico' }, h('span', { class: 'spinner sm', 'aria-hidden': 'true' })), h('div', { class: 'grow' }, h('b', null, 'Free test coins on the way'), h('div', { class: 'small muted' }, 'The demo is sending 0.003 test ZEC to your new wallet. This can take a minute.')))
@@ -1229,7 +1237,7 @@ function viewMarket() {
     h('div', { class: 'card stack' }, h('div', { class: 'field' }, h('label', { for: 'shopurl' }, 'Shop address'), h('div', { class: 'inputwrap' }, input, openBtn)), err, recent.length ? h('div', null, h('div', { class: 'small muted', style: null }, 'Recent shops'), h('div', { class: 'list' }, recent.slice(0, 4).map((s) => h('button', { class: 'li', onclick: () => open(s) }, avatar(s, 'ico'), h('span', { class: 'grow' }, h('div', { class: 'title' }, s.replace(/^https?:\/\//, '')), h('div', { class: 'sub' }, 'Opened before')), icon('chevron'))))) : null),
     S.market ? viewShopFront() : null,
     h('div', { class: 'section-title' }, 'Ownership'),
-    h('div', { class: 'card row nowrap' }, h('span', { class: 'ico' }, icon('shield')), h('div', { class: 'grow' }, h('b', null, 'Check that someone owns an item'), h('div', { class: 'small muted' }, 'For a door check or a members area: they prove it without showing their address or balance.')), h('button', { class: 'btn', onclick: openCheckProof }, 'Check')),
+    h('div', { class: 'card' }, h('div', { class: 'list' }, h('button', { class: 'li', onclick: openCheckProof }, h('span', { class: 'ico' }, icon('shield')), h('span', { class: 'grow' }, h('div', { class: 'title' }, 'Check who owns an item'), h('div', { class: 'sub' }, 'They show a proof; you learn nothing else about them.')), icon('chevron')))),
   );
 }
 
