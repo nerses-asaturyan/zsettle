@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Hosted demo: the house shop sells a small catalogue (concert tickets, passes, prints, keys, collectibles) with different icons, descriptions and prices instead of identical tickets; items listed earlier get their details too.
 - App: the balance card says when coins are on their way (a faucet payment or a sale the wallet has not seen yet) and when they are still confirming, with the blocks and minutes left; the demo banner shows the wallet code only to passphrase wallets, which need it to sign in.
 - App: each tab has an address (`#market` and so on), so the back button returns to the previous tab and closes an open sheet; a sheet keeps focus itself unless it has a field.
 - App, accessibility pass: a separate colour for accent text so links, prices and the active tab read on the light theme too (4.5:1); muted and success colours darkened on light; 44 px touch areas for the sync chip, copy and switch controls, links and small buttons; 12 px tab labels; relative dates for a week, then short dates; a wallet heading for screen readers; the ownership check as a list row; sheets take focus themselves; a browser-safe stylesheet (a mangled rule had dropped the phone list styles).
