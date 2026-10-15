@@ -45,6 +45,10 @@ pub struct ItemNote {
     pub mined_height: Option<u32>,
     /// The memo, when it is text.
     pub memo: Option<String>,
+    /// Received at the account's internal (change) address. The wallet spends such a note
+    /// after 3 confirmations instead of the 10 it asks of a note from another wallet
+    /// (ZIP 315's recommended policy).
+    pub change: bool,
 }
 
 /// SQL condition that a spend recorded in transaction `tx` still counts: the transaction is
@@ -72,7 +76,8 @@ pub fn unspent_notes(wallet: &Wallet, db: &Db, account: AccountUuid) -> Result<V
     let conn = open_read_only(wallet)?;
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT t.txid, n.action_index, n.value, t.mined_height, n.memo
+            "SELECT t.txid, n.action_index, n.value, t.mined_height, n.memo,
+                    n.recipient_key_scope
              FROM ironwood_received_notes n
              JOIN transactions t ON t.id_tx = n.transaction_id
              JOIN accounts a ON a.id = n.account_id
@@ -95,13 +100,14 @@ pub fn unspent_notes(wallet: &Wallet, db: &Db, account: AccountUuid) -> Result<V
                 let value: i64 = row.get(2)?;
                 let mined: Option<u32> = row.get(3)?;
                 let memo: Option<Vec<u8>> = row.get(4)?;
-                Ok((txid, index, value, mined, memo))
+                let scope: Option<i64> = row.get(5)?;
+                Ok((txid, index, value, mined, memo, scope))
             },
         )
         .map_err(|e| anyhow!("{e}"))?;
     let mut out = Vec::new();
     for row in rows {
-        let (txid, index, value, mined_height, memo) = row.map_err(|e| anyhow!("{e}"))?;
+        let (txid, index, value, mined_height, memo, scope) = row.map_err(|e| anyhow!("{e}"))?;
         let memo = memo
             .and_then(|bytes| MemoBytes::from_bytes(&bytes).ok())
             .and_then(|m| Memo::try_from(m).ok())
@@ -120,6 +126,8 @@ pub fn unspent_notes(wallet: &Wallet, db: &Db, account: AccountUuid) -> Result<V
             value_zat: u64::try_from(value).unwrap_or(0),
             mined_height,
             memo,
+            // 1 is the internal scope in the wallet database.
+            change: scope == Some(1),
         });
     }
     Ok(out)
