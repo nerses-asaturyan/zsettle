@@ -220,6 +220,10 @@ struct Config {
     #[serde(default)]
     details: HashMap<String, Value>,
     shop_listen: Option<String>,
+    /// The owner opened the shop and has not closed it: after a restart of the server it
+    /// opens again when the owner next signs in.
+    #[serde(default)]
+    shop_wanted: bool,
     /// The last sync: its report and when.
     last_sync: Option<Value>,
     /// Hosted: how many items the house shop has made, for their names.
@@ -869,7 +873,11 @@ fn handle_local(hub: &Arc<Hub>, app: &Arc<App>, token: &str, req: Request, mut s
     }
     let r = match (req.method.as_str(), req.path.as_str()) {
         ("POST", "/api/wallet/create") => parse_body(&req).and_then(|b| app.create_wallet(&b)),
-        ("POST", "/api/unlock") => parse_body(&req).and_then(|b| app.unlock(&b)),
+        ("POST", "/api/unlock") => parse_body(&req).and_then(|b| {
+            let r = app.unlock(&b)?;
+            app.reopen_shop(true);
+            Ok(r)
+        }),
         ("POST", "/api/backup") => parse_body(&req).and_then(|b| app.backup(&b)),
         _ => api(app, &req),
     };
@@ -1197,6 +1205,7 @@ fn api(app: &Arc<App>, req: &Request) -> Result<Value> {
         ("POST", "/api/shop/start") => app.shop_start(&body),
         ("POST", "/api/shop/stop") => {
             app.stop_shop();
+            app.set_shop_wanted(false);
             app.shop_view()
         }
         ("POST", "/api/market") => app.market(&body),
@@ -1414,6 +1423,14 @@ impl Hub {
             return Err(anyhow!("wrong wallet code or passphrase"));
         }
         h.clear_fails(&wallet_key);
+        let open = h
+            .apps
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|a| a.shop_running())
+            .count();
+        app.reopen_shop(open < MAX_OPEN_SHOPS);
         let token = self.new_session(h, &code);
         Ok((json!({ "unlocked": true, "code": code }), token))
     }
@@ -2691,10 +2708,38 @@ impl App {
         let _guard = self.wallet_lock.lock().unwrap();
         self.stop_shop();
         self.spawn_shop(&listen)?;
-        self.cfg.lock().unwrap().shop_listen = Some(listen);
+        {
+            let mut cfg = self.cfg.lock().unwrap();
+            cfg.shop_listen = Some(listen);
+            cfg.shop_wanted = true;
+        }
         self.save_cfg()?;
         drop(_guard);
         self.shop_view()
+    }
+
+    fn set_shop_wanted(&self, wanted: bool) {
+        self.cfg.lock().unwrap().shop_wanted = wanted;
+        let _ = self.save_cfg();
+    }
+
+    /// After a restart the server has no passphrase, so every shop is closed until its owner
+    /// signs in. Open it again then, if the owner never closed it. `room` says whether the
+    /// server has a place for one more open shop.
+    fn reopen_shop(&self, room: bool) {
+        let wanted = self.cfg.lock().unwrap().shop_wanted;
+        if !wanted || self.shop_running() || !self.listings_path().exists() {
+            return;
+        }
+        if !room {
+            self.push_event(json!({ "event": "log", "text": "the shop stays closed: the server has too many open shops right now; open it again later" }));
+            return;
+        }
+        let listen = self.cfg.lock().unwrap().shop_listen.clone();
+        match self.shop_start(&json!({ "listen": listen })) {
+            Ok(_) => self.push_event(json!({ "event": "log", "text": "the shop is open again after a restart of the server" })),
+            Err(e) => self.push_event(json!({ "event": "error", "error": format!("reopening the shop: {e:#}") })),
+        }
     }
 
     fn spawn_shop(&self, listen: &str) -> Result<()> {
@@ -3126,6 +3171,28 @@ mod tests {
         assert_eq!(back.ports["abc"], 19100);
         // No temporary files left behind.
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn shop_wanted_survives_a_restart_of_the_server() {
+        let dir = std::env::temp_dir().join(format!("zsettle-app-test-{}", rand::random::<u32>()));
+        fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("app.json");
+        // A profile written before the flag existed reads as "not wanted".
+        fs::write(
+            &p,
+            b"{\"network\":\"test\",\"shop_listen\":\"127.0.0.1:19100\"}",
+        )
+        .unwrap();
+        let old: Config = read_state(&p).unwrap();
+        assert!(!old.shop_wanted);
+        let mut cfg = old.clone();
+        cfg.shop_wanted = true;
+        zsettle_core::wallet::write_owner_only(&p, &serde_json::to_vec(&cfg).unwrap()).unwrap();
+        let back: Config = read_state(&p).unwrap();
+        assert!(back.shop_wanted);
+        assert_eq!(back.shop_listen.as_deref(), Some("127.0.0.1:19100"));
         fs::remove_dir_all(&dir).unwrap();
     }
 

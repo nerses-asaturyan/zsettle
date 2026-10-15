@@ -143,6 +143,7 @@ More rules:
   rebuilds every answer with the server's own security headers.
 - Error texts shown to visitors have server paths removed.
 - An open shop keeps signing offers while its owner is away; the page says so at sign-out.
+- After a restart of the server every shop is closed, since no passphrase is kept on disk. A shop its owner never closed opens again when the owner next signs in.
 
 The setup script adds more around the process; see [Hosting the demo](hosting.md#what-the-setup-protects).
 

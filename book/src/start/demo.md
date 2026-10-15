@@ -29,6 +29,8 @@ What you can do there:
 - A session lasts 12 hours. A wallet nobody used for two hours is locked again.
 - An open shop keeps signing offers while you are away. The page warns you about this when you
   sign out with the shop open; stop the shop on the Sell tab first to close it.
+- If the demo server restarts, your shop is closed until you sign in again; then it opens
+  again by itself.
 - A wallet that was never synced, got no test coins and listed nothing is removed after three
   days.
 - The server limits how many wallets and shops it serves. See
