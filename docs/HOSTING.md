@@ -32,8 +32,8 @@ Data lives in `/var/lib/zsettle/data`: one directory per wallet, `hub.json` (whi
 ## Limits built in
 
 - The server talks to its own shops only: a visitor cannot make it fetch or post to any other address.
-- A visitor is an IPv4 address or an IPv6 /64. 40 new wallets an hour in all, 3 an hour per visitor, 500 in total; a wallet that was never once synced, got no test coins and listed nothing is removed after three days. 25 shops open at once.
-- Test coins once per wallet, twice a day per visitor, 12 an hour in all; at most four faucet payments wait at once. A payment that may have reached the network is never sent again.
+- A visitor is an IPv4 address or an IPv6 /64. 40 new wallets an hour in all, 5 an hour per visitor, 500 in total; a wallet that was never once synced, got no test coins and listed nothing is removed after three days. 25 shops open at once.
+- Test coins once per wallet, four times a day per visitor, 12 an hour in all; at most four faucet payments wait at once. A payment that may have reached the network is never sent again.
 - At most two tasks per wallet and twelve in all; at most four passphrase checks at once (others wait their turn a few seconds); at most three commands that prove at once; a request must arrive within 30 seconds.
 - Passphrases are at least 12 characters. Ten passphrase checks a minute per visitor, right or wrong. Five wrong tries in a row make that visitor wait one minute, then longer each time, up to an hour; the count is forgotten an hour after the last wrong try. Wrong tries never hold back the wallet's owner on another connection, nor a passkey sign-in.
 - A session lasts 12 hours; a wallet nobody used for two hours is locked again. An open shop keeps signing offers while its owner is away (the page says so at sign-out). After a restart of the server every shop is closed, since the server keeps no passphrase on disk; a shop its owner never closed opens again when the owner next signs in.

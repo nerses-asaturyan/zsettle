@@ -104,3 +104,7 @@ transaction you look at.
 
 The demo server holds every visitor's wallet and sees the passphrase while a wallet is
 unlocked. It is meant for free test coins only. For real ZEC, run zsettle yourself.
+
+For its limits (new wallets an hour, test coins a day) the server keeps each visitor's IP
+address in memory for at most a day, and nothing else about the visitor. It writes no access
+log; the web proxy in front of it writes none either.
