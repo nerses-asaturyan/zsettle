@@ -700,7 +700,7 @@ function viewWelcomeHosted() {
         inAppBrowser()
           ? h('div', { class: 'callout warn' }, icon('alert'), h('span', null, 'This page is open inside an app, where passkeys usually do not work. Tap the ⋮ or ··· menu and choose “Open in browser” (Chrome or Safari), or use a wallet code and passphrase below.'))
           : null,
-        h('div', { class: 'callout info' }, icon('info'), h('span', null, (S.status && S.status.network === 'test' ? 'This server runs on the Zcash testnet: its coins are free and have no value. ' : '') + 'Your wallet is kept on this server, so there is nothing to install. Run zsettle-app on your own computer to keep the keys there.')),
+        h('div', { class: 'callout info' }, icon('info'), h('span', null, (S.hosted && S.hosted.network === 'test' ? 'This server runs on the Zcash testnet: its coins are free and have no value. ' : '') + 'Your wallet is kept on this server, so there is nothing to install. Run zsettle-app on your own computer to keep the keys there.')),
         h('button', { class: 'btn primary lg block', onclick: createPk, disabled: !passkeyUsable() }, icon('finger'), 'Create a wallet with a passkey'),
         h('button', { class: 'btn lg block', onclick: signInPk, disabled: !passkeyUsable() }, icon('lock'), 'Sign in with your passkey'),
         h('button', { class: 'linkbtn', onclick: () => (pwBox.hidden = !pwBox.hidden) }, 'No passkey? Use a wallet code and passphrase'),
