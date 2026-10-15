@@ -20,7 +20,7 @@ Fund both wallets at the `fund` address that `init` printed:
 - the buyer needs the price plus 0.00015 ZEC per trade.
 
 A note received from another wallet is spendable after ten confirmations (about 13 minutes
-on mainnet).
+on mainnet); the wallet's own change after three. See the [FAQ](../faq.md) for why.
 
 ## Seller terminal
 

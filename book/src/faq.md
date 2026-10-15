@@ -59,7 +59,10 @@ on your own computer.
 ## Why does my buy say there is no spendable note?
 
 A note received from another wallet needs ten confirmations, change from your own wallet
-needs three. Notes reserved for earlier offers are skipped until `rotate` retires them. A trade
+needs three. These are the numbers [ZIP 315](https://zips.z.cash/zip-0315) recommends and the
+wallet library's default policy, not a network rule: the wait guards against a chain
+reorganisation undoing the transaction that paid you. The app's balance card counts them down
+per note. Notes reserved for earlier offers are skipped until `rotate` retires them. A trade
 is paid from one note: use `consolidate` to merge small ones.
 
 ## Why does a command stop with a consensus branch message?
