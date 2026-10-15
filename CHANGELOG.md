@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- App: a shop its owner never closed opens again when the owner signs in after a restart of the server.
 - Items can carry a short description and an icon (one emoji), signed with the listings file (`publish --description --icon`); the app shows them and has an icon picker.
 - Ownership proofs in the app: "Prove I own it" on an item, and a check in the market that hands out a fresh challenge.
 - Hosted demo: a new wallet is sent its test coins right away; the page can be installed on a phone's home screen.
