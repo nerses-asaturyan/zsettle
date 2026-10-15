@@ -1,6 +1,6 @@
 # Hosting the public demo
 
-`zsettle-app --public https://<domain>` serves many people from one server. Each visitor creates a wallet of their own (passkey, or a wallet code and a passphrase), can get free test coins once, buys from any open shop, and can open a shop of their own at `https://<domain>/shop/<code>`. A house shop keeps a few items listed and makes new ones when they sell.
+`zsettle-app --public https://<domain>` serves many people from one server. Each visitor creates a wallet of their own (passkey, or a wallet code and a passphrase), can get free test coins once, buys from any open shop, and can open a shop of their own at `https://<domain>/shop/<code>`. A house shop keeps a few items listed, from a small catalogue with different icons, descriptions and prices (0.0002 to 0.0015), and makes new ones when they sell.
 
 The demo is for the testnet. The server holds every demo wallet, which is fine for free test coins and wrong for real money: for real ZEC, people run zsettle on their own computer.
 

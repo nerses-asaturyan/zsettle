@@ -136,10 +136,38 @@ fn scrypt_slot() -> Result<Slot> {
 /// to each new wallet.
 const HOUSE: &str = "house";
 const HOUSE_STOCK: usize = 6;
-const HOUSE_PRICE: &str = "0.0005 zec";
-const HOUSE_ICON: &str = "\u{1f39f}\u{fe0f}";
-const HOUSE_DESCRIPTION: &str =
-    "A demo ticket from the house shop: a real shielded note on the Zcash testnet.";
+/// What the house sells: a small catalogue, so the demo market looks like a market. Items are
+/// minted as "<name> #<number>" and listed with the entry's icon, description and price.
+struct HouseItem {
+    name: &'static str,
+    icon: &'static str,
+    description: &'static str,
+    price: &'static str,
+}
+const HOUSE_ITEMS: &[HouseItem] = &[
+    HouseItem { name: "Concert ticket", icon: "\u{1f39f}\u{fe0f}", description: "One seat at the demo concert. The ticket is a shielded note; whoever holds the note holds the seat.", price: "0.0008 zec" },
+    HouseItem { name: "Museum pass", icon: "\u{1f3ab}", description: "A day pass for the demo museum. Show an ownership proof at the door.", price: "0.0004 zec" },
+    HouseItem { name: "Album code", icon: "\u{1f3b5}", description: "A download code for the demo album, kept in the note's encrypted memo.", price: "0.0003 zec" },
+    HouseItem { name: "Art print", icon: "\u{1f3a8}", description: "One print of a small series. Its history can be traced on chain from the first owner.", price: "0.0012 zec" },
+    HouseItem { name: "Beta key", icon: "\u{1f3ae}", description: "Early access to the demo game. Resell it when you are done.", price: "0.0005 zec" },
+    HouseItem { name: "E-book", icon: "\u{1f4da}", description: "The demo e-book: one copy, one note.", price: "0.0006 zec" },
+    HouseItem { name: "Tournament seat", icon: "\u{1f3c6}", description: "A seat at the demo tournament. Sell it on if you cannot come.", price: "0.001 zec" },
+    HouseItem { name: "Collectible", icon: "\u{1f48e}", description: "A numbered collectible with a chain history from its first owner.", price: "0.0015 zec" },
+    HouseItem { name: "Members pass", icon: "\u{1f511}", description: "A month of the demo members area. The door checks your proof, never your balance.", price: "0.0007 zec" },
+    HouseItem { name: "Mystery box", icon: "\u{1f381}", description: "Who knows. A shielded note, like everything else here.", price: "0.0002 zec" },
+    HouseItem { name: "Ticket", icon: "\u{1f39f}\u{fe0f}", description: "A demo ticket: a real shielded note on the Zcash testnet.", price: "0.0005 zec" },
+];
+
+/// The catalogue entry an item name belongs to; the first entry for a name it does not know.
+fn house_item(name: &str) -> &'static HouseItem {
+    HOUSE_ITEMS
+        .iter()
+        .find(|h| {
+            name.strip_prefix(h.name)
+                .is_some_and(|r| r.is_empty() || r.starts_with(' '))
+        })
+        .unwrap_or(&HOUSE_ITEMS[0])
+}
 const FAUCET_ZAT: u64 = 300_000;
 /// Variables the commands read; the app passes everything explicitly instead, so none of the
 /// user's shell settings can redirect a command to another wallet.
@@ -2604,8 +2632,9 @@ impl App {
             .filter(|i| i["listed_zat"].is_null() && !i["mined"].is_null())
             .collect();
         let pending = items.iter().filter(|i| i["mined"].is_null()).count();
-        // All new listings in one pause of the shop, not one pause each.
-        let batch: Vec<(String, String)> = ready
+        // All new listings in one pause of the shop, not one pause each. Items listed before
+        // the catalogue existed (no icon yet) are listed again with their details.
+        let mut batch: Vec<(String, String)> = ready
             .iter()
             .take(HOUSE_STOCK.saturating_sub(listed))
             .map(|it| {
@@ -2615,17 +2644,16 @@ impl App {
                 )
             })
             .collect();
+        if let Ok(l) = Listings::read(&self.listings_path()) {
+            for i in l.items.iter().filter(|i| i.icon.is_none()) {
+                batch.push((i.note.clone(), i.name.clone()));
+            }
+        }
         if !batch.is_empty() {
             self.exclusive(|| {
                 for (note, name) in &batch {
-                    self.publish_one(
-                        None,
-                        note,
-                        name,
-                        HOUSE_PRICE,
-                        Some(HOUSE_DESCRIPTION),
-                        Some(HOUSE_ICON),
-                    )?;
+                    let h = house_item(name);
+                    self.publish_one(None, note, name, h.price, Some(h.description), Some(h.icon))?;
                 }
                 Ok(())
             })?;
@@ -2639,7 +2667,10 @@ impl App {
         if have <= 2 {
             let n = self.cfg.lock().unwrap().minted;
             let names: Vec<String> = (1..=(HOUSE_STOCK - have) as u64)
-                .map(|i| format!("Ticket #{}", n + i))
+                .map(|i| {
+                    let h = &HOUSE_ITEMS[((n + i) as usize) % HOUSE_ITEMS.len()];
+                    format!("{} #{}", h.name, n + i)
+                })
                 .collect();
             self.mint_now(None, &names)?;
         }
@@ -3194,6 +3225,18 @@ mod tests {
         assert!(back.shop_wanted);
         assert_eq!(back.shop_listen.as_deref(), Some("127.0.0.1:19100"));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn house_items_are_found_by_name() {
+        assert_eq!(house_item("Art print #12").name, "Art print");
+        assert_eq!(house_item("Ticket #4").name, "Ticket");
+        assert_eq!(house_item("Museum pass").price, "0.0004 zec");
+        assert_eq!(house_item("Something else").name, HOUSE_ITEMS[0].name);
+        for h in HOUSE_ITEMS {
+            zsettle_core::listing::check_details(Some(h.description), Some(h.icon)).unwrap();
+            assert!(zsettle_core::parse_zat(h.price).unwrap() > 5_000);
+        }
     }
 
     #[test]
