@@ -31,7 +31,8 @@
   --top-h: 56px;
   --safe-b: env(safe-area-inset-bottom, 0px);
   --safe-t: env(safe-area-inset-top, 0px);
-  color-scheme: dark;
+  /* "only": the page sets its own colours; a browser must not darken or invert them. */
+  color-scheme: only dark;
 }
 @media (prefers-color-scheme: light) {
   :root {
@@ -52,12 +53,14 @@
     --err: #dc2626;
     --info: #2563eb;
     --shadow: 0 12px 40px rgba(15, 23, 42, 0.14);
-    color-scheme: light;
+    color-scheme: only light;
   }
 }
 
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
+/* Empty message lines take no space (a flex gap would still show). */
+.onboard p:empty { display: none; }
 p.err:empty, p.small.err:empty { display: none; }
 html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 html, body { margin: 0; background: var(--bg); color: var(--text); }

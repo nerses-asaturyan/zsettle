@@ -363,6 +363,17 @@ const hexOf = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padSta
 const NO_PRF = 'This passkey cannot derive a key. Use a passphrase, or a passkey saved in Chrome, Edge, Safari or a recent Firefox.';
 const passkeyUsable = () =>
   !!window.PublicKeyCredential && window.isSecureContext && (location.hostname === 'localhost' || location.protocol === 'https:');
+// A browser built into another app (Instagram, Facebook, Telegram, WeChat, a plain Android
+// WebView, an iOS app view without Safari): passkeys usually fail there, and some force
+// their own dark colours onto the page.
+function inAppBrowser(ua = navigator.userAgent || '') {
+  if (/FBAN|FBAV|FB_IAB|Instagram|Line\/|MicroMessenger|Snapchat|TikTok|; wv\)/i.test(ua)) return true;
+  return /iPhone|iPad/.test(ua) && !/Safari\//.test(ua) && !/CriOS|FxiOS|EdgiOS/.test(ua);
+}
+const passkeyCancelled = () =>
+  inAppBrowser()
+    ? 'The passkey prompt did not open. Browsers inside apps often block passkeys: open this page in Chrome or Safari, or use a passphrase instead.'
+    : 'The passkey prompt was cancelled. Try again, or use a passphrase instead.';
 
 // The passkey's PRF output, never stored, is the wallet's passphrase.
 async function passkeyCreate() {
@@ -533,7 +544,7 @@ function viewCreate() {
       await refresh();
       openReceive(r.fund, true);
     } catch (e) {
-      err.textContent = e.name === 'NotAllowedError' ? 'The passkey prompt was cancelled.' : human(e.message);
+      err.textContent = e.name === 'NotAllowedError' ? passkeyCancelled() : human(e.message);
     } finally {
       pkBtn.disabled = !passkeyUsable();
     }
@@ -581,7 +592,7 @@ function viewWelcomeHosted() {
     try {
       await fn();
     } catch (e) {
-      err.textContent = e.name === 'NotAllowedError' ? 'The passkey prompt was cancelled.' : human(e.message);
+      err.textContent = e.name === 'NotAllowedError' ? passkeyCancelled() : human(e.message);
     } finally {
       busy(false);
       say('');
@@ -623,7 +634,7 @@ function viewWelcomeHosted() {
   });
   const pwBox = h(
     'div',
-    { class: 'stack', hidden: true },
+    { class: 'stack', hidden: !inAppBrowser() },
     h('div', { class: 'field' }, h('label', { for: 'code' }, 'Wallet code (to sign in)'), code),
     h('div', { class: 'field' }, h('label', { for: 'pw' }, 'Passphrase'), pass),
     h('div', { class: 'row' }, h('button', { class: 'btn', onclick: signInPw }, 'Sign in'), h('button', { class: 'btn', onclick: createPw }, 'New wallet with this passphrase')),
@@ -638,7 +649,10 @@ function viewWelcomeHosted() {
       h(
         'div',
         { class: 'card stack lg' },
-        h('div', { class: 'callout info' }, icon('info'), h('span', null, 'This is a public demo on the Zcash testnet: the coins are free and have no value. The demo server keeps your wallet; for real money, run zsettle on your own computer.')),
+        inAppBrowser()
+          ? h('div', { class: 'callout warn' }, icon('alert'), h('span', null, 'This page is open inside an app, where passkeys usually do not work. Tap the ⋮ or ··· menu and choose “Open in browser” (Chrome or Safari), or use a wallet code and passphrase below.'))
+          : null,
+        h('div', { class: 'callout info' }, icon('info'), h('span', null, 'Public demo on the Zcash testnet: the coins are free and have no value. Your demo wallet lives on this server, so there is nothing to install; the real app keeps your keys on your own device.')),
         h('button', { class: 'btn primary lg block', onclick: createPk, disabled: !passkeyUsable() }, icon('finger'), 'Create a wallet with a passkey'),
         h('button', { class: 'btn lg block', onclick: signInPk, disabled: !passkeyUsable() }, icon('lock'), 'Sign in with your passkey'),
         h('button', { class: 'linkbtn', onclick: () => (pwBox.hidden = !pwBox.hidden) }, 'No passkey? Use a wallet code and passphrase'),
@@ -688,7 +702,7 @@ function viewUnlock() {
       await api('/api/unlock', { passphrase });
       await refresh();
     } catch (e) {
-      err.textContent = e.name === 'NotAllowedError' ? 'The passkey prompt was cancelled.' : human(e.message);
+      err.textContent = e.name === 'NotAllowedError' ? passkeyCancelled() : human(e.message);
     } finally {
       btn.disabled = false;
     }
@@ -796,7 +810,7 @@ async function openBackup() {
       sh.setBody(h('div', { class: 'callout warn' }, icon('alert'), h('span', null, 'Write these down in order. Close this when you are done.')), grid);
       sh.setFoot(h('button', { class: 'btn primary', onclick: () => sh.close() }, 'I wrote them down'));
     } catch (e) {
-      err.textContent = e.name === 'NotAllowedError' ? 'The passkey prompt was cancelled.' : human(e.message);
+      err.textContent = e.name === 'NotAllowedError' ? passkeyCancelled() : human(e.message);
     }
   }
 }

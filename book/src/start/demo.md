@@ -22,6 +22,13 @@ What you can do there:
 - **Add it to your phone's home screen.** The page has a web app manifest, so a phone browser
   can install it and open it like an app.
 
+## Open it in a real browser
+
+Links tapped inside apps (Instagram, Facebook, Telegram, Slack, X) often open in that app's
+own small browser. Passkeys usually do not work there, and some of these browsers change the
+page's colours. The page notices this and says so: use the app's menu (⋮ or ···) and choose
+"Open in browser", or use a wallet code and a passphrase instead.
+
 ## Know the limits
 
 - The demo is for test coins only. The server holds every demo wallet, so whoever runs it

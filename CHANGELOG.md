@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- App: the welcome page notices a browser built into another app (where passkeys usually fail), explains how to open the page in a real browser, and shows the passphrase sign-in at once; passkey errors say what to do; the page tells browsers not to recolour it.
 - App: a shop its owner never closed opens again when the owner signs in after a restart of the server.
 - Items can carry a short description and an icon (one emoji), signed with the listings file (`publish --description --icon`); the app shows them and has an icon picker.
 - Ownership proofs in the app: "Prove I own it" on an item, and a check in the market that hands out a fresh challenge.
