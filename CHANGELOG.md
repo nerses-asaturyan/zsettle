@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- App, accessibility pass: a separate colour for accent text so links, prices and the active tab read on the light theme too (4.5:1); muted and success colours darkened on light; 44 px touch areas for the sync chip, copy and switch controls, links and small buttons; 12 px tab labels; relative dates for a week, then short dates; a wallet heading for screen readers; the ownership check as a list row; sheets take focus themselves; a browser-safe stylesheet (a mangled rule had dropped the phone list styles).
 - App: the welcome page notices a browser built into another app (where passkeys usually fail), explains how to open the page in a real browser, and shows the passphrase sign-in at once; passkey errors say what to do; the page tells browsers not to recolour it.
 - App: a shop its owner never closed opens again when the owner signs in after a restart of the server.
 - Items can carry a short description and an icon (one emoji), signed with the listings file (`publish --description --icon`); the app shows them and has an icon picker.
