@@ -906,13 +906,26 @@ async function loadView(quiet) {
 
 function viewWallet() {
   const w = S.wallet || { balance_zat: 0, notes: [], items: [] };
-  const incoming = w.notes.filter((n) => !n.mined).reduce((a, n) => a + n.value_zat, 0);
+  // Coins the wallet cannot see yet: a payment it was told about (the faucet, a sale) that is
+  // not among its notes. The next block brings it in.
+  const known = new Set(w.notes.map((n) => String(n.note).split(':')[0]));
+  const nowSec = Date.now() / 1000;
+  const told = (S.activity || []).filter((a) => (a.kind === 'faucet' || a.kind === 'sale') && a.txid && !known.has(a.txid) && nowSec - a.at < 1800);
+  const incoming = w.notes.filter((n) => !n.mined).reduce((a, n) => a + n.value_zat, 0) + told.reduce((a, x) => a + (x.amount_zat || x.price_zat || 0), 0);
+  // Coins in the wallet that still need confirmations before they can be spent.
+  const tip = ((S.status.last_sync || {}).report || {}).chain_tip || 0;
+  const maturing = w.notes.filter((n) => n.mined && tip && tip - n.mined + 1 < 10);
+  const maturingZat = maturing.reduce((a, n) => a + n.value_zat, 0);
+  const blocksLeft = maturing.length ? Math.max(...maturing.map((n) => 10 - (tip - n.mined + 1))) : 0;
+  const minutesLeft = Math.max(1, Math.ceil((blocksLeft * (S.status.network === 'test' ? 25 : 75)) / 60));
   const empty = !w.notes.length && !w.items.length;
   return h(
     'div',
     { class: 'stack lg' },
     h('h2', { class: 'sr-only' }, 'Wallet'),
-    S.hosted ? h('div', { class: 'callout info' }, icon('info'), h('span', null, 'Public demo on the Zcash testnet. Wallet code ', h('b', null, S.status.code || ''), '. Coins here are free and worthless.')) : null,
+    S.hosted
+      ? h('div', { class: 'callout info' }, icon('info'), h('span', null, 'Public demo on the Zcash testnet: the coins are free and have no value.', S.status.passkey ? null : [' Your wallet code is ', h('b', null, S.status.code || ''), '; you need it to sign in again.']))
+      : null,
     S.faucetPending
       ? h('div', { class: 'card row nowrap' }, h('span', { class: 'ico' }, h('span', { class: 'spinner sm', 'aria-hidden': 'true' })), h('div', { class: 'grow' }, h('b', null, 'Free test coins on the way'), h('div', { class: 'small muted' }, 'The demo is sending 0.003 test ZEC to your new wallet. This can take a minute.')))
       : S.status.faucet ? h('div', { class: 'card row nowrap' }, h('span', { class: 'ico' }, icon('spark')), h('div', { class: 'grow' }, h('b', null, 'Free test coins'), h('div', { class: 'small muted' }, 'Get 0.003 test ZEC to try buying and selling.')), h('button', { class: 'btn primary', onclick: getCoins }, 'Get coins')) : null,
@@ -921,7 +934,17 @@ function viewWallet() {
       { class: 'balance-card', 'aria-label': 'Balance' },
       h('div', { class: 'label' }, 'Balance'),
       h('div', { class: 'amount' }, zec(w.balance_zat, { bare: true }), h('small', null, 'ZEC')),
-      h('div', { class: 'small muted' }, incoming ? zec(incoming) + ' on its way' : w.notes.length ? w.notes.length + ' note' + (w.notes.length > 1 ? 's' : '') + ' · shielded' : 'Shielded'),
+      h(
+        'div',
+        { class: 'small muted' },
+        incoming
+          ? zec(incoming) + ' on its way · arrives with the next block'
+          : maturingZat
+            ? zec(maturingZat) + ' confirming · spendable in ' + blocksLeft + ' block' + (blocksLeft === 1 ? '' : 's') + ' (about ' + minutesLeft + ' min)'
+            : w.notes.length
+              ? w.notes.length + ' note' + (w.notes.length > 1 ? 's' : '') + ' · shielded'
+              : 'Shielded',
+      ),
       h(
         'div',
         { class: 'actions' },
