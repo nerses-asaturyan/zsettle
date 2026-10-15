@@ -62,7 +62,10 @@
 /* Empty message lines take no space (a flex gap would still show). */
 .onboard p:empty { display: none; }
 p.err:empty, p.small.err:empty { display: none; }
-html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 8px; border: 2px solid transparent; background-clip: padding-box; }
 html, body { margin: 0; background: var(--bg); color: var(--text); }
 body {
   font: 16px/1.5 var(--font);
@@ -371,6 +374,12 @@ ol.steps li.failed .mark { background: var(--err); border-color: var(--err); }
 /* onboarding */
 .onboard { min-height: 100dvh; display: grid; place-items: center; padding: calc(24px + var(--safe-t)) 18px calc(24px + var(--safe-b)); }
 .onboard .panel { width: 100%; max-width: 440px; }
+@media (min-width: 760px) {
+  .onboard .panel { max-width: 760px; }
+  .onboard .hero, .onboard .panel > .card { max-width: 440px; margin-left: auto; margin-right: auto; }
+  .how { grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .how-step { flex-direction: column; gap: 8px; padding: 14px; }
+}
 .onboard .hero { text-align: center; margin-bottom: 20px; }
 .onboard .hero .logo { width: 64px; height: 64px; margin: 0 auto 16px; }
 .onboard h1 { font-size: 30px; line-height: 1.15; letter-spacing: -0.03em; margin: 0 0 8px; }
