@@ -102,10 +102,7 @@ $DOMAIN {
 	request_body {
 		max_size 2MB
 	}
-	reverse_proxy 127.0.0.1:$PORT {
-		# Whole bodies reach the app at once, so slow senders hold no app connection.
-		request_buffers 2MB
-	}
+	reverse_proxy 127.0.0.1:$PORT
 	header Strict-Transport-Security "max-age=31536000"
 }
 CADDY
