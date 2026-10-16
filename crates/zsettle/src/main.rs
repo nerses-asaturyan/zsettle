@@ -70,6 +70,12 @@ enum Cmd {
         #[arg(long, env = "ZSETTLE_WALLET")]
         wallet: PathBuf,
     },
+    /// Print the height the wallet has scanned to (no network access).
+    Height {
+        /// Wallet directory.
+        #[arg(long, env = "ZSETTLE_WALLET")]
+        wallet: PathBuf,
+    },
     /// Print a fresh receiving address of an account (Orchard only). Each call gives a new
     /// one; reuse links payments.
     Address {
@@ -649,6 +655,13 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string(&list_accounts(&db)?)?);
             Ok(())
         }
+        Cmd::Height { wallet } => {
+            let w = Wallet::open(&wallet)?;
+            let db = w.db()?;
+            let h = zsettle_core::wallet::max_scanned_height(&db)?;
+            println!("{}", serde_json::json!({ "scanned_to": h, "chain_tip": h }));
+            Ok(())
+        }
         Cmd::Address { wallet, account } => {
             let w = Wallet::open(&wallet)?;
             let mut db = w.db()?;
@@ -959,6 +972,11 @@ fn main() -> Result<()> {
                 let msg =
                     zsettle_core::broadcast::send_raw_transaction_blocking(&server, bytes.clone())?;
                 sent = serde_json::json!({ "server": server, "response": msg });
+                // The wallet learns of its own spend now, not at the next block.
+                let mut db = w.db()?;
+                if let Err(e) = zsettle_core::wallet::record_transaction(&w, &mut db, &tx) {
+                    eprintln!("warning: {e:#}");
+                }
             }
             println!(
                 "{}",
@@ -1067,6 +1085,11 @@ fn main() -> Result<()> {
                             let tx = pczt_ops::extract(pczt)?;
                             let bytes = pczt_ops::tx_bytes(&tx)?;
                             zsettle_core::broadcast::send_raw_transaction_blocking(&server, bytes)?;
+                            if let Err(e) =
+                                zsettle_core::wallet::record_transaction(&w, &mut db, &tx)
+                            {
+                                eprintln!("warning: {e:#}");
+                            }
                             reserve_note(&w, note, built.expiry_height)?;
                             rotated += 1;
                             println!(
@@ -1189,6 +1212,9 @@ fn main() -> Result<()> {
             let tx = pczt_ops::extract(pczt)?;
             let bytes = pczt_ops::tx_bytes(&tx)?;
             zsettle_core::broadcast::send_raw_transaction_blocking(&server, bytes)?;
+            if let Err(e) = zsettle_core::wallet::record_transaction(&w, &mut db, &tx) {
+                eprintln!("warning: {e:#}");
+            }
             for n in &notes {
                 reserve_note(&w, *n, built.expiry_height)?;
             }

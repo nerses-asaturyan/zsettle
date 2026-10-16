@@ -857,6 +857,9 @@ fn main() -> Result<()> {
             let tx = pczt_ops::extract(pczt)?;
             let bytes = pczt_ops::tx_bytes(&tx)?;
             zsettle_core::broadcast::send_raw_transaction_blocking(&server, bytes)?;
+            if let Err(e) = zsettle_core::wallet::record_transaction(&wallet, &mut db, &tx) {
+                eprintln!("warning: {e:#}");
+            }
             let mut delisted = false;
             if let Some(path) = listings {
                 let mut l = Listings::read_verified(&path)?;

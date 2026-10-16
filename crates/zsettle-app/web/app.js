@@ -64,6 +64,7 @@ const ICONS = {
   check: ['M5 12l5 5L20 7'],
   x: ['M6 6l12 12', 'M18 6L6 18'],
   copy: ['M9 9h11v11H9z', 'M5 15H4V4h11v1'],
+  camera: ['M4 8h3l2-3h6l2 3h3v11H4z', 'M12 17a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z'],
   history: ['M3 12a9 9 0 1 0 3-6.7L3 8', 'M3 3v5h5', 'M12 7v5l4 2'],
   plus: ['M12 5v14', 'M5 12h14'],
   shield: ['M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6l8-3z', 'M9 12l2 2 4-4'],
@@ -474,6 +475,32 @@ async function passkeySecret(pk) {
   const r = a.getClientExtensionResults().prf;
   if (!r || !r.results || !r.results.first) throw new Error(NO_PRF);
   return r.results.first;
+}
+
+// A passkey wallet confirms each transaction with the passkey: the secret that opened the
+// wallet is derived once more and sent with the request, and the server checks it is the same.
+// A passphrase wallet confirms with the confirm step alone.
+async function confirmSecret() {
+  const pk = S.status && S.status.passkey;
+  if (!pk) return {};
+  const salt = pk.salt || (S.hosted && S.hosted.salt);
+  const secret = await passkeySecret({ id: pk.id, salt });
+  return { confirm: 'passkey:' + hexOf(secret) };
+}
+// The label of a confirm button: a passkey wallet is told the passkey will be asked.
+function confirmLabel(text) {
+  return S.status && S.status.passkey ? 'Confirm with passkey' : text;
+}
+// Ask the passkey; a refusal or a cancel shows a short message and returns null.
+async function askConfirm(err) {
+  try {
+    return await confirmSecret();
+  } catch (e) {
+    const text = e.name === 'NotAllowedError' ? 'Confirm with your passkey to continue.' : human(e.message);
+    if (err) err.textContent = text;
+    else toast(text, 'err');
+    return null;
+  }
 }
 
 // ------------------------------------------------------------ boot and routing
@@ -972,7 +999,12 @@ function viewWallet() {
   const known = new Set(w.notes.map((n) => String(n.note).split(':')[0]));
   const nowSec = Date.now() / 1000;
   const told = (S.activity || []).filter((a) => (a.kind === 'faucet' || a.kind === 'sale') && a.txid && !known.has(a.txid) && nowSec - a.at < 1800);
-  const incoming = w.notes.filter((n) => !n.mined).reduce((a, n) => a + n.value_zat, 0) + told.reduce((a, x) => a + (x.amount_zat || x.price_zat || 0), 0);
+  const incoming = w.notes.filter((n) => !n.mined && !n.change).reduce((a, n) => a + n.value_zat, 0) + told.reduce((a, x) => a + (x.amount_zat || x.price_zat || 0), 0);
+  // Change that is not mined yet means a payment of ours is on its way out: the wallet
+  // records its own transactions when it sends them, before the next block.
+  const settling = w.notes.some((n) => !n.mined && n.change);
+  const out = settling ? (S.activity || []).find((a) => ['buy', 'pay', 'mint', 'rotate', 'cancel'].includes(a.kind) && nowSec - a.at < 1800) : null;
+  const leaving = out ? (out.kind === 'buy' ? (out.price_zat || 0) + (out.fee_zat || 0) : out.kind === 'pay' ? (out.amount_zat || 0) + FEE_ZAT : 0) : 0;
   // Coins in the wallet that still need confirmations before they can be spent.
   const mat = maturity(w);
   const empty = !w.notes.length && !w.items.length;
@@ -994,7 +1026,9 @@ function viewWallet() {
       h(
         'div',
         { class: 'small muted' },
-        incoming
+        settling
+          ? (leaving ? zec(leaving) + ' leaving' : 'A payment is settling') + ' · the next block confirms it'
+          : incoming
           ? zec(incoming) + ' on its way · arrives with the next block'
           : mat.zat
             ? zec(mat.zat) + ' confirming · ' + mat.have + ' of ' + mat.need + ' confirmations · spendable in about ' + mat.minutes + ' min'
@@ -1128,10 +1162,18 @@ function openProve(it) {
               const text = JSON.stringify(r.proof, null, 2);
               const box = h('textarea', { class: 'input mono proof', readonly: true, rows: '6', 'aria-label': 'Ownership proof' });
               box.value = text;
+              // The same proof as a QR code, for a checker standing next to you.
+              const qr = h('div', { class: 'qr big' });
+              try {
+                qr.append(QR.svg(JSON.stringify(r.proof), { ecl: 'L' }));
+                qr.querySelector('svg').setAttribute('aria-label', 'QR code of the proof');
+              } catch {
+                qr.remove();
+              }
               return {
                 title: 'Proof ready',
-                text: 'Send this to the checker. It stops working once the item leaves your wallet.',
-                extra: box,
+                text: 'Show this code to the checker, or send them the text. It stops working once the item leaves your wallet.',
+                extra: [qr, box],
                 actions: [
                   h('button', { class: 'btn', onclick: () => copy(text, 'Proof copied') }, icon('copy'), 'Copy'),
                   h('button', { class: 'btn', onclick: () => download('ownership-proof.json', text) }, icon('down'), 'Save'),
@@ -1167,7 +1209,7 @@ function openCheckProof() {
     body: [
       h('ol', { class: 'small muted plainlist' }, h('li', null, 'Give the holder this challenge.'), h('li', null, 'They make a proof in their wallet and send it to you.'), h('li', null, 'Paste it below.')),
       h('div', { class: 'summary' }, h('div', { class: 'r' }, h('span', null, 'Challenge'), h('span', { class: 'row nowrap' }, h('b', { class: 'mono' }, challenge), h('button', { class: 'linkbtn', onclick: () => copy(challenge, 'Challenge copied') }, 'Copy')))),
-      h('div', { class: 'field' }, h('label', { for: 'proof' }, 'Their proof'), proof),
+      h('div', { class: 'field' }, h('label', { for: 'proof' }, 'Their proof'), proof, 'BarcodeDetector' in window ? h('div', { class: 'row', style: null }, h('button', { class: 'btn sm', type: 'button', onclick: () => scanProof(proof) }, icon('camera'), 'Scan their QR code')) : null),
       err,
     ],
     foot: [
@@ -1175,7 +1217,7 @@ function openCheckProof() {
         class: 'btn primary lg',
         onclick: async () => {
           const text = proof.value.trim();
-          if (!text) return (err.textContent = 'Paste the proof first.');
+          if (!text) return (err.textContent = 'Paste the proof, or scan it.');
           sh.setTitle('Checking the proof');
           await runInSheet(sh, '/api/check-proof', { proof: text, challenge }, {
             total: 2,
@@ -1198,6 +1240,43 @@ function openCheckProof() {
       }, icon('shield'), 'Check'),
     ],
   });
+}
+
+// Read a proof's QR code with the camera (browsers with a barcode detector: Chrome, Edge,
+// Samsung Internet). The result goes into the proof field.
+async function scanProof(into) {
+  const video = h('video', { class: 'scanvid', autoplay: '', playsinline: '', muted: '' });
+  video.muted = true;
+  let stream = null;
+  const stop = () => {
+    if (stream) stream.getTracks().forEach((t) => t.stop());
+    stream = null;
+  };
+  const sh = sheet({ title: 'Scan the proof', body: [video, h('p', { class: 'small muted' }, 'Point the camera at the code on the holder’s screen.')], onClose: stop });
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+    video.srcObject = stream;
+  } catch {
+    sh.close();
+    return toast('The camera is not available; paste the proof instead', 'err');
+  }
+  const det = new BarcodeDetector({ formats: ['qr_code'] });
+  const tick = async () => {
+    if (!stream) return;
+    try {
+      const codes = await det.detect(video);
+      if (codes.length && codes[0].rawValue) {
+        into.value = codes[0].rawValue;
+        sh.close();
+        toast('Proof scanned');
+        return;
+      }
+    } catch {
+      /* not ready yet */
+    }
+    setTimeout(tick, 250);
+  };
+  video.addEventListener('loadeddata', () => setTimeout(tick, 300), { once: true });
 }
 
 async function openReceive(given, first) {
@@ -1263,11 +1342,13 @@ function openSend() {
       h('button', {
         class: 'btn primary',
         onclick: async () => {
+          const ok = await askConfirm();
+          if (!ok) return;
           sh.setTitle('Sending');
-          await runInSheet(sh, '/api/pay', { to: a, amount: amt + ' zec', memo: memo.value.trim() }, { total: 2, doneTitle: 'Payment', success: (r) => ({ title: 'Sent', text: zec(zat) + ' is on its way. It arrives in about a minute.', extra: txRow(r.txid) }), failTitle: 'Not sent' });
+          await runInSheet(sh, '/api/pay', { to: a, amount: amt + ' zec', memo: memo.value.trim(), ...ok }, { total: 2, doneTitle: 'Payment', success: (r) => ({ title: 'Sent', text: zec(zat) + ' is on its way. It arrives in about a minute.', extra: txRow(r.txid) }), failTitle: 'Not sent' });
           loadView(true);
         },
-      }, 'Confirm and send'),
+      }, confirmLabel('Confirm and send')),
     );
   }
 }
@@ -1399,8 +1480,10 @@ function buyReview(sh, it) {
     h('button', {
       class: 'btn primary',
       onclick: async () => {
+        const ok = await askConfirm();
+        if (!ok) return;
         sh.setTitle('Buying ' + (it.name || 'item'));
-        const r = await runInSheet(sh, '/api/buy', { url: S.market.base, item: it.note, name: it.name, description: it.description, icon: it.icon }, {
+        const r = await runInSheet(sh, '/api/buy', { url: S.market.base, item: it.note, name: it.name, description: it.description, icon: it.icon, ...ok }, {
           total: 5,
           success: (r) => ({
             title: (it.name || 'The item') + ' is yours',
@@ -1420,7 +1503,7 @@ function buyReview(sh, it) {
           if (S.view === 'market') loadView(true);
         }
       },
-    }, 'Confirm and pay'),
+    }, confirmLabel('Confirm and pay')),
   );
 }
 
@@ -1590,7 +1673,7 @@ function confirmCancel(sh, it) {
   );
   sh.setFoot(
     h('button', { class: 'btn', onclick: () => sh.close() }, 'Back'),
-    h('button', { class: 'btn danger', onclick: async () => { sh.setTitle('Cancelling offers'); await runInSheet(sh, '/api/cancel', { note: it.note }, { total: 1, doneTitle: 'Offers', success: () => ({ title: 'Offers cancelled', text: 'The item moved to a fresh note of yours.' }), failTitle: 'Not cancelled' }); loadView(true); } }, 'Confirm and cancel'),
+    h('button', { class: 'btn danger', onclick: async () => { const ok = await askConfirm(); if (!ok) return; sh.setTitle('Cancelling offers'); await runInSheet(sh, '/api/cancel', { note: it.note, ...ok }, { total: 1, doneTitle: 'Offers', success: () => ({ title: 'Offers cancelled', text: 'The item moved to a fresh note of yours.' }), failTitle: 'Not cancelled' }); loadView(true); } }, confirmLabel('Confirm and cancel')),
   );
 }
 
@@ -1616,11 +1699,13 @@ function mint(text) {
       h('button', {
         class: 'btn primary',
         onclick: async () => {
+          const ok = await askConfirm();
+          if (!ok) return;
           sh.setTitle('Creating ' + n + ' item' + (n > 1 ? 's' : ''));
-          await runInSheet(sh, '/api/mint', { names }, { total: 2, doneTitle: 'New items', success: () => ({ title: 'Created', text: 'They can be listed once the block is mined, in about a minute.' }), failTitle: 'Not created' });
+          await runInSheet(sh, '/api/mint', { names, ...ok }, { total: 2, doneTitle: 'New items', success: () => ({ title: 'Created', text: 'They can be listed once the block is mined, in about a minute.' }), failTitle: 'Not created' });
           loadView(true);
         },
-      }, 'Confirm and create'),
+      }, confirmLabel('Confirm and create')),
     ],
   });
 }
