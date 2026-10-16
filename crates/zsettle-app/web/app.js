@@ -193,6 +193,7 @@ function human(msg) {
   if (/too recent for the anchor|wait a few blocks/i.test(m)) return 'Your newest funds are a few blocks too fresh to spend. Try again in a minute.';
   if (/^the faucet/i.test(m)) return m.charAt(0).toUpperCase() + m.slice(1) + '.';
   if (/; your coins were freed for the next purchase$/i.test(m)) return human(m.replace(/; your coins were freed for the next purchase$/i, '')) + ' Your coins were freed for the next purchase.';
+  if (/would be dust/i.test(m)) return 'This would leave less than 0.00005 ZEC of change, too little to ever spend. Pick a cheaper item, or add coins first.';
   if (/insufficient|not enough|no spendable|InsufficientFunds/i.test(m)) return 'Not enough spendable ZEC. ' + confirmingNote();
   if (/Connection (Failed|refused)|fetching http|could not be reached|timed out/i.test(m)) return 'Could not reach the shop. Check the address and that the shop is open.';
   if (/seller refused the offer/i.test(m)) return m.replace(/^.*?seller refused the offer:\s*/i, 'The seller refused the offer: ');
@@ -1004,7 +1005,7 @@ function viewWallet() {
   // records its own transactions when it sends them, before the next block.
   const settling = w.notes.some((n) => !n.mined && n.change);
   const out = settling ? (S.activity || []).find((a) => ['buy', 'pay', 'mint', 'rotate', 'cancel'].includes(a.kind) && nowSec - a.at < 1800) : null;
-  const leaving = out ? (out.kind === 'buy' ? (out.price_zat || 0) + (out.fee_zat || 0) : out.kind === 'pay' ? (out.amount_zat || 0) + FEE_ZAT : 0) : 0;
+  const leaving = out ? (out.kind === 'buy' ? (out.price_zat || 0) + (out.fee_zat || 0) : out.kind === 'pay' ? (out.amount_zat || 0) + mintFee(1) : 0) : 0;
   // Coins in the wallet that still need confirmations before they can be spent.
   const mat = maturity(w);
   const empty = !w.notes.length && !w.items.length;
