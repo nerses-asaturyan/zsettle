@@ -2609,6 +2609,11 @@ impl App {
                     let net_a = format!("--network={network}");
                     match self.buyer(&["broadcast", &tx_a, &net_a]) {
                         Ok(_) => Ok(json!({ "txid": txid, "resent": true })),
+                        // "already exists in mempool", "already in block chain": the first
+                        // broadcast did go through.
+                        Err(e2) if format!("{e2:#}").contains("already") => {
+                            Ok(json!({ "txid": txid, "resent": false }))
+                        }
                         Err(e2) => Err(anyhow!(
                             "send_transaction: the payment {txid} was made but its broadcast is uncertain ({e:#}; resend: {e2:#})"
                         )),
