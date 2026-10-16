@@ -82,12 +82,16 @@ pub fn unspent_notes(wallet: &Wallet, db: &Db, account: AccountUuid) -> Result<V
              JOIN transactions t ON t.id_tx = n.transaction_id
              JOIN accounts a ON a.id = n.account_id
              WHERE a.uuid = ?1
+               AND {live_tx}
                AND NOT EXISTS (
                  SELECT 1 FROM ironwood_received_note_spends s
                  JOIN transactions st ON st.id_tx = s.transaction_id
                  WHERE s.ironwood_received_note_id = n.id
                    AND {live})
              ORDER BY t.mined_height IS NULL, t.mined_height, n.action_index",
+            // A note of an unmined transaction counts only while that transaction can still
+            // be mined: the change of a payment that expired or was rejected is not money.
+            live_tx = live_spend("t", "?2"),
             live = live_spend("st", "?2")
         ))
         .map_err(|e| anyhow!("{e}"))?;

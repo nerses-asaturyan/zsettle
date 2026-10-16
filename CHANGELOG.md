@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- A note of an unmined transaction is counted only while that transaction can still be mined; the change of an expired or rejected payment no longer shows in the balance.
 - The wallet records the transactions it builds itself (a trade, a rotation, a cancel) as soon as they are sent: the balance is right at once, change shows as settling, and a payment made meanwhile cannot pick a note that is already spent.
 - App: a passkey wallet confirms every transaction with the passkey ("Confirm with passkey"); the balance card shows coins leaving after a purchase; a seller with an open shop sees confirmations (`zsettle height`); an ownership proof is shown as a QR code and the checker can scan it.
 - Tracing stops at the item's first block when the note is not there, instead of reading the chain to its tip; `zsettle check-proof` bounds the challenge like `prove`; the app checks proofs only for an unlocked wallet, a few a minute, and writes the proof file only when the check runs.
