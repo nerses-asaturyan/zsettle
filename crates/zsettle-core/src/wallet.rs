@@ -242,6 +242,25 @@ impl Wallet {
     }
 }
 
+/// Record a transaction this wallet made outside the library's own builder (a trade, a
+/// rotation, a cancel) as soon as it is sent. The wallet then knows the spent notes are gone
+/// and sees its change before the next block: the balance is right at once, and a payment
+/// made meanwhile does not pick a note that is already spent. Until the transaction is mined
+/// or expires, the library treats it like one of its own pending transactions.
+pub fn record_transaction(
+    wallet: &Wallet,
+    db: &mut Db,
+    tx: &zcash_primitives::transaction::Transaction,
+) -> Result<()> {
+    zcash_client_backend::data_api::wallet::decrypt_and_store_transaction(
+        &wallet.network,
+        db,
+        tx,
+        None,
+    )
+    .map_err(|e| anyhow!("recording the transaction in the wallet: {e}"))
+}
+
 /// Target height (next block) and anchor height for the given confirmation requirement.
 pub fn heights(
     db: &Db,

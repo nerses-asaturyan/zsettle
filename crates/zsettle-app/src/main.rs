@@ -2008,6 +2008,31 @@ impl App {
         Ok(())
     }
 
+    /// A wallet opened by a passkey confirms each transaction with the passkey again: the
+    /// page derives the secret once more and sends it; it must be the one that opened the
+    /// wallet. A passphrase wallet confirms with its confirm step alone.
+    fn check_confirm(&self, body: &Value) -> Result<()> {
+        if self.cfg.lock().unwrap().passkey.is_none() {
+            return Ok(());
+        }
+        let given = body
+            .get("confirm")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let held = self.passphrase.lock().unwrap();
+        let same = held.as_ref().is_some_and(|p| {
+            p.len() == given.len()
+                && p.bytes()
+                    .zip(given.bytes())
+                    .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+                    == 0
+        });
+        if !same {
+            return Err(anyhow!("confirm with your passkey first"));
+        }
+        Ok(())
+    }
+
     /// Run one command and return the JSON it printed, or its text.
     fn run(&self, bin: &Path, args: &[String]) -> Result<Value> {
         let mut cmd = Command::new(bin);
@@ -2474,8 +2499,16 @@ impl App {
             // leave a gap in its service.
             return Ok(self.job("sync", |app, id| {
                 app.step(id, "The open shop keeps the wallet in sync");
-                app.record_sync(json!({ "report": { "by": "shop" }, "at": now() }));
-                Ok(json!({ "by": "shop" }))
+                // The shop syncs this wallet every few seconds: read the height it reached,
+                // so the page can count confirmations.
+                let w = app.w();
+                let mut report = app
+                    .buyer(&["height", "--wallet", &w])
+                    .unwrap_or_else(|_| json!({}));
+                report["by"] = json!("shop");
+                app.record_sync(json!({ "report": report, "at": now() }));
+                app.rotate_expired(&report);
+                Ok(report)
             }));
         }
         Ok(self.job("sync", |app, id| {
@@ -2549,6 +2582,7 @@ impl App {
 
     fn start_pay(self: &Arc<Self>, body: &Value) -> Result<Value> {
         self.require_unlocked()?;
+        self.check_confirm(body)?;
         let (payout, _) = self.accounts()?;
         let (to, amount) = (field(body, "to")?, field(body, "amount")?);
         let memo = body
@@ -2647,6 +2681,7 @@ impl App {
 
     fn start_mint(self: &Arc<Self>, body: &Value) -> Result<Value> {
         self.require_unlocked()?;
+        self.check_confirm(body)?;
         let names: Vec<String> = body
             .get("names")
             .and_then(Value::as_array)
@@ -2804,6 +2839,7 @@ impl App {
 
     fn start_cancel(self: &Arc<Self>, body: &Value) -> Result<Value> {
         self.require_unlocked()?;
+        self.check_confirm(body)?;
         let note = note_field(body, "note")?;
         let wa = self.wallet_args()?;
         let listings = self.listings_path();
@@ -3178,6 +3214,7 @@ impl App {
 
     fn start_buy(self: &Arc<Self>, body: &Value) -> Result<Value> {
         self.require_unlocked()?;
+        self.check_confirm(body)?;
         let (payout, _) = self.accounts()?;
         let (base, url) = self.shop_urls(&field(body, "url")?)?;
         if self.public_shop.as_deref() == Some(base.as_str()) {

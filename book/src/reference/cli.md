@@ -19,6 +19,7 @@ Common values:
 |---|---|
 | `init` | Create a wallet with accounts `buyer` (index 0) and `item` (index 1). |
 | `accounts` | List the wallet's accounts. |
+| `height` | Print the height the wallet has scanned to (no network). |
 | `address` | Print a fresh Orchard-only address of an account. |
 | `sync` | Sync the wallet. |
 | `list` | Show a listings file and whether its signature checks out. |

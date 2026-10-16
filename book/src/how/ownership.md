@@ -75,6 +75,10 @@ unspent and owned by the proof's key. When either is false, a `reason` field say
 command exits with status 1. `name` is read from the note's transaction memo and may be
 `null`.
 
+In the app, the holder's "Prove I own it" shows the proof as text and as a QR code; the
+checker's sheet reads the code with the camera in browsers that have a barcode detector
+(Chrome, Edge, Samsung Internet) and takes pasted text everywhere.
+
 ## What it reveals
 
 The proof carries the **item account's viewing key**. With it the checker can see every item

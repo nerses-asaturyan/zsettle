@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- The wallet records the transactions it builds itself (a trade, a rotation, a cancel) as soon as they are sent: the balance is right at once, change shows as settling, and a payment made meanwhile cannot pick a note that is already spent.
+- App: a passkey wallet confirms every transaction with the passkey ("Confirm with passkey"); the balance card shows coins leaving after a purchase; a seller with an open shop sees confirmations (`zsettle height`); an ownership proof is shown as a QR code and the checker can scan it.
 - Tracing stops at the item's first block when the note is not there, instead of reading the chain to its tip; `zsettle check-proof` bounds the challenge like `prove`; the app checks proofs only for an unlocked wallet, a few a minute, and writes the proof file only when the check runs.
 - A failed offer no longer locks the buyer's coins: when the seller never received it the note is released at once, when the seller saw it the note moves to a fresh one (`zsettle rotate --abandon <note>`, `--release <note>`), and a reservation whose offer expired is retired after the next sync.
 - Faucet: the payment's transaction is written before it is broadcast, so a paying process that is lost resends it instead of paying twice; payments cut short by a restart are looked at when the server starts, and a wallet that received nothing gets its chance back.
