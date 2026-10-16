@@ -55,9 +55,18 @@ const MAX_LISTINGS_BYTES: u64 = 1024 * 1024;
 /// Hosted: wallets the server keeps at most, and new ones per hour.
 const MAX_PROFILES: usize = 500;
 const MAX_NEW_PER_HOUR: usize = 40;
-/// Hosted: a wallet nobody ever used (never synced, no coins from the faucet, nothing listed)
+/// Hosted: a wallet nothing ever happened to (no coins, no items, nothing listed, no shop)
 /// is removed after this long, so made-and-left wallets do not fill the server.
-const UNUSED_WALLET_SECS: u64 = 3 * 86_400;
+const UNUSED_WALLET_SECS: u64 = 86_400;
+/// Hosted: new wallets an hour from one wider network (an IPv6 /48 or an IPv4 /24), so a
+/// handful of addresses cannot fill the server either.
+const MAX_NEW_PER_NET_HOUR: usize = 12;
+/// Hosted: API calls a minute per visitor, so one visitor cannot keep the server forking
+/// processes for everyone else. A busy page makes about a hundred.
+const MAX_CALLS_PER_IP_MIN: usize = 240;
+/// Ownership proofs a wallet checks a minute: each reads the chain from the item's first
+/// block.
+const MAX_PROOF_CHECKS_PER_WALLET_MIN: usize = 3;
 /// Hosted: shops open at once (each is a process that syncs every few seconds).
 const MAX_OPEN_SHOPS: usize = 25;
 /// Hosted: a session lasts this long; an idle wallet is locked after this long.
@@ -327,6 +336,8 @@ struct App {
     events: Arc<Mutex<Vec<Value>>>,
     last_sync: Mutex<Value>,
     last_seen: AtomicU64,
+    /// When this wallet checked ownership proofs lately.
+    proof_checks: Mutex<Vec<u64>>,
 }
 
 /// The hosted side: every profile, who may use which, and the sessions.
@@ -338,6 +349,10 @@ struct Index {
     ports: HashMap<String, u16>,
     /// Profiles that got their test coins.
     funded: HashSet<String>,
+    /// Profiles whose faucet payment was under way: after a restart each is looked at, and a
+    /// wallet that never received anything gets its chance back.
+    #[serde(default)]
+    faucet_pending: HashSet<String>,
 }
 
 struct Session {
@@ -456,6 +471,22 @@ fn visitor(ip: &str) -> String {
         Ok(a) => a.to_string(),
         Err(_) => ip.to_string(),
     }
+}
+
+/// The wider network a visitor key belongs to: the /48 of an IPv6 /64, the /24 of an IPv4
+/// address.
+fn wider_net(key: &str) -> String {
+    if let Some(v6) = key.strip_suffix("::/64") {
+        let segs: Vec<&str> = v6.split(':').collect();
+        if segs.len() == 4 {
+            return format!("{}:{}:{}::/48", segs[0], segs[1], segs[2]);
+        }
+    }
+    if let Ok(std::net::IpAddr::V4(a)) = key.parse::<std::net::IpAddr>() {
+        let o = a.octets();
+        return format!("{}.{}.{}.0/24", o[0], o[1], o[2]);
+    }
+    key.to_string()
 }
 
 enum Mode {
@@ -986,6 +1017,16 @@ fn handle_hosted(hub: &Arc<Hub>, h: &Hosted, req: Request, mut stream: TcpStream
     if !req.path.starts_with("/api/") {
         return respond(&mut stream, 404, "text/plain", b"not found");
     }
+    if h.count_check(&[(format!("c:{ip}"), MAX_CALLS_PER_IP_MIN)])
+        .is_err()
+    {
+        return respond(
+            &mut stream,
+            429,
+            "application/json",
+            br#"{"error":"too many requests from you; wait a moment"}"#,
+        );
+    }
     // A cross-site form cannot set this header, and a cross-site script cannot send it
     // without a CORS preflight this server never answers.
     if req.method == "POST" && req.headers.get("x-zsettle").map(String::as_str) != Some("1") {
@@ -1341,6 +1382,11 @@ impl Hub {
                 "use a passphrase of at least {MIN_HOSTED_PASSPHRASE} characters"
             ));
         }
+        // The light scrypt factor is for passkey secrets only: the `passkey:` shape comes
+        // with a passkey, never typed.
+        if field(body, "passphrase")?.starts_with("passkey:") != body["passkey"].is_object() {
+            return Err(anyhow!("that passphrase shape is reserved for passkeys"));
+        }
         let cred = body["passkey"]["id"].as_str().map(str::to_string);
         if let Some(id) = &cred {
             if id.len() > 1400 || h.index.lock().unwrap().by_cred.contains_key(id) {
@@ -1361,6 +1407,17 @@ impl Hub {
             if created.iter().filter(|(_, who)| who == ip).count() >= MAX_NEW_PER_IP_HOUR {
                 return Err(anyhow!(
                     "you created several wallets this hour; try again later"
+                ));
+            }
+            let net = wider_net(ip);
+            if created
+                .iter()
+                .filter(|(_, who)| wider_net(who) == net)
+                .count()
+                >= MAX_NEW_PER_NET_HOUR
+            {
+                return Err(anyhow!(
+                    "many wallets were created from your network this hour; try again later"
                 ));
             }
             if h.apps.lock().unwrap().len() >= MAX_PROFILES {
@@ -1561,8 +1618,12 @@ impl Hub {
                     "you got test coins for several wallets today; try again tomorrow"
                 ));
             }
-            if !h.index.lock().unwrap().funded.insert(app.profile.clone()) {
-                return Err(anyhow!("this wallet already got its test coins"));
+            {
+                let mut idx = h.index.lock().unwrap();
+                if !idx.funded.insert(app.profile.clone()) {
+                    return Err(anyhow!("this wallet already got its test coins"));
+                }
+                idx.faucet_pending.insert(app.profile.clone());
             }
             times.push(stamp);
             all.push(stamp);
@@ -1596,7 +1657,7 @@ impl Hub {
                     Err(e) => break Err(e),
                 }
             };
-            match paid {
+            let r = match paid {
                 Ok(r) => {
                     app.add_activity(json!({ "kind": "faucet", "txid": r["txid"], "amount_zat": FAUCET_ZAT, "text": "Received free test coins" }));
                     Ok(json!({ "txid": r["txid"], "amount_zat": FAUCET_ZAT }))
@@ -1612,14 +1673,62 @@ impl Hub {
                     house.push_event(json!({ "event": "log", "text": format!("faucet: {e:#}") }));
                     Err(anyhow!("the faucet cannot pay right now (its coins may still be confirming); try again in a few minutes"))
                 }
-            }
+            };
+            hub.faucet_settled(&profile);
+            r
         })
+    }
+
+    /// The faucet payment of a wallet ended, one way or the other.
+    fn faucet_settled(&self, profile: &str) {
+        if let Mode::Hosted(h) = &self.mode {
+            if h.index.lock().unwrap().faucet_pending.remove(profile) {
+                let _ = self.save_index(h);
+            }
+        }
+    }
+
+    /// After a restart: every wallet whose faucet payment was under way is looked at. One
+    /// that holds a note was paid; one that holds nothing gets its chance back.
+    fn reconcile_faucet(&self, h: &Hosted) {
+        let pending: Vec<String> = h
+            .index
+            .lock()
+            .unwrap()
+            .faucet_pending
+            .iter()
+            .cloned()
+            .collect();
+        for profile in pending {
+            let app = h.apps.lock().unwrap().get(&profile).cloned();
+            let paid = app.as_ref().is_some_and(|a| {
+                let _ = a.exclusive(|| a.sync());
+                a.accounts()
+                    .and_then(|(payout, _)| a.notes(&payout))
+                    .map(|n| !n.is_empty())
+                    .unwrap_or(true)
+            });
+            let mut idx = h.index.lock().unwrap();
+            idx.faucet_pending.remove(&profile);
+            if !paid {
+                idx.funded.remove(&profile);
+                eprintln!(
+                    "faucet: {profile} was marked paid but holds nothing; its chance is given back"
+                );
+            }
+            drop(idx);
+            let _ = self.save_index(h);
+        }
     }
 
     /// Give back a faucet chance: the wallet's, the visitor's and the hour's.
     fn unfund(&self, profile: &str, ip: &str, stamp: u64) {
         if let Mode::Hosted(h) = &self.mode {
-            h.index.lock().unwrap().funded.remove(profile);
+            {
+                let mut idx = h.index.lock().unwrap();
+                idx.funded.remove(profile);
+                idx.faucet_pending.remove(profile);
+            }
             let _ = self.save_index(h);
             if let Some(v) = h.faucet_by_ip.lock().unwrap().get_mut(ip) {
                 if let Some(i) = v.iter().position(|t| *t == stamp) {
@@ -1633,9 +1742,9 @@ impl Hub {
         }
     }
 
-    /// Remove wallets made and never used: never synced, no test coins, nothing listed, no
-    /// shop, no one signed in, and older than a few days. Nothing in them can hold coins the
-    /// owner knows of, since they never once looked at the chain.
+    /// Remove wallets made and never used: no test coins, nothing in the activity log, nothing
+    /// listed, no shop, no one signed in, older than a day, and (a last look at the wallet
+    /// itself) no note in either account.
     fn remove_unused(&self, h: &Hosted) {
         let apps: Vec<Arc<App>> = h.apps.lock().unwrap().values().cloned().collect();
         let funded = h.index.lock().unwrap().funded.clone();
@@ -1656,11 +1765,16 @@ impl Hub {
             let unused = a.profile != HOUSE
                 && made.saturating_add(UNUSED_WALLET_SECS) < now()
                 && a.last_seen.load(Ordering::SeqCst) + UNUSED_WALLET_SECS < now()
-                && a.cfg.lock().unwrap().last_sync.is_none()
                 && !funded.contains(&a.profile)
                 && !signed_in.contains(&a.profile)
                 && !a.listings_path().exists()
-                && !a.shop_running();
+                && !a.shop_running()
+                && a.cfg
+                    .lock()
+                    .unwrap()
+                    .activity
+                    .iter()
+                    .all(|e| e["kind"] == "wallet");
             if !unused {
                 continue;
             }
@@ -1668,6 +1782,15 @@ impl Hub {
             let Ok(_g) = a.wallet_lock.try_lock() else {
                 continue;
             };
+            // Coins sent from elsewhere leave no activity entry, but they do leave notes.
+            let holds_something = a.accounts().ok().is_none_or(|(payout, item)| {
+                [payout, item]
+                    .iter()
+                    .any(|acct| a.notes(acct).map(|n| !n.is_empty()).unwrap_or(true))
+            });
+            if holds_something {
+                continue;
+            }
             if a.jobs
                 .lock()
                 .unwrap()
@@ -1715,6 +1838,13 @@ impl Hub {
 }
 
 fn start_hosted_threads(hub: &Arc<Hub>) {
+    // Faucet payments cut short by the last stop are looked at once, first.
+    let hb = hub.clone();
+    thread::spawn(move || {
+        if let Mode::Hosted(h) = &hb.mode {
+            hb.reconcile_faucet(h);
+        }
+    });
     // Lock idle wallets and drop expired sessions.
     let hb = hub.clone();
     thread::spawn(move || loop {
@@ -1727,6 +1857,7 @@ fn start_hosted_threads(hub: &Arc<Hub>) {
             if a.profile != HOUSE && a.last_seen.load(Ordering::SeqCst) + IDLE_LOCK_SECS < now() {
                 *a.passphrase.lock().unwrap() = None;
             }
+            a.prune_trade_files();
         }
         hb.remove_unused(h);
     });
@@ -1779,7 +1910,45 @@ impl App {
             events: Arc::new(Mutex::new(Vec::new())),
             last_sync: Mutex::new(last_sync),
             last_seen: AtomicU64::new(now()),
+            proof_checks: Mutex::new(Vec::new()),
         }))
+    }
+
+    /// No server paths in what a visitor sees.
+    fn scrub_text(&self, text: &str) -> String {
+        let mut paths = vec![self.dir.display().to_string()];
+        for p in [self.dir.parent(), self.buyer_bin.parent()]
+            .into_iter()
+            .flatten()
+        {
+            paths.push(p.display().to_string());
+        }
+        // The longest first, so a directory is removed before its parent.
+        paths.sort_by_key(|p| std::cmp::Reverse(p.len()));
+        let mut t = text.to_string();
+        for p in paths.iter().filter(|p| p.len() > 1) {
+            t = t.replace(p, "");
+        }
+        t
+    }
+
+    /// Files a trade or a check leaves in `trades/` are kept an hour at most.
+    fn prune_trade_files(&self) {
+        let Ok(entries) = fs::read_dir(self.dir.join("trades")) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            let old = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|d| d.as_secs() > 3600);
+            if old && (name.starts_with("proof-") || name.starts_with("faucet-")) {
+                let _ = fs::remove_file(e.path());
+            }
+        }
     }
 
     fn hosted(&self) -> bool {
@@ -1855,7 +2024,7 @@ impl App {
         // Commands that open the seed and prove take a few hundred MB each: a few at a time.
         let heavy = matches!(
             args.first().map(String::as_str),
-            Some("init" | "pay" | "mint" | "publish" | "cancel" | "buy" | "prove")
+            Some("init" | "pay" | "mint" | "publish" | "cancel" | "buy" | "prove" | "rotate")
         );
         let _slot = if heavy {
             Some(
@@ -2063,7 +2232,7 @@ impl App {
                     }
                     Err(e) => {
                         j.state = "failed".into();
-                        j.error = Some(format!("{e:#}"));
+                        j.error = Some(app.scrub_text(&format!("{e:#}")));
                     }
                 }
             }
@@ -2311,8 +2480,71 @@ impl App {
         }
         Ok(self.job("sync", |app, id| {
             app.step(id, "Syncing with the network");
-            app.exclusive(|| app.sync())
+            let r = app.exclusive(|| app.sync())?;
+            app.rotate_expired(&r);
+            Ok(r)
         }))
+    }
+
+    /// A note reserved for an offer that can no longer be mined is retired (or released, if
+    /// spent), so the wallet can buy again and the seller cannot link its next offer. Runs
+    /// after a sync, only when there is such a note and the wallet is unlocked.
+    fn rotate_expired(&self, report: &Value) {
+        let Some(tip) = report["chain_tip"].as_u64() else {
+            return;
+        };
+        if self.passphrase.lock().unwrap().is_none() {
+            return;
+        }
+        let path = PathBuf::from(self.w()).join("reserved-notes.json");
+        let Ok(text) = fs::read_to_string(&path) else {
+            return;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(&text) else {
+            return;
+        };
+        let expired = v["notes"].as_array().is_some_and(|n| {
+            n.iter()
+                .any(|x| x["expiry_height"].as_u64().is_some_and(|e| e <= tip))
+        });
+        if !expired {
+            return;
+        }
+        let Ok((payout, _)) = self.accounts() else {
+            return;
+        };
+        let w = self.w();
+        match self.exclusive(|| {
+            self.buyer(&["rotate", "--wallet", &w, "--account", &payout, "--no-sync"])
+        }) {
+            Ok(r) if r["rotated"].as_u64().unwrap_or(0) > 0 => {
+                self.add_activity(json!({ "kind": "rotate", "text": "Coins moved to a fresh note after an offer that was not settled" }));
+            }
+            Ok(_) => {}
+            Err(e) => self.push_event(json!({ "event": "log", "text": format!("rotate: {e:#}") })),
+        }
+    }
+
+    /// After an offer that will never settle: drop the note's reservation, or, when the
+    /// seller saw the offer (and so the note's nullifier), move the note to a fresh one.
+    fn free_note(&self, w: &str, payout: &str, note: &str, retire: bool) {
+        if note.is_empty() {
+            return;
+        }
+        let flag = if retire {
+            format!("--abandon={note}")
+        } else {
+            format!("--release={note}")
+        };
+        match self.exclusive(|| self.buyer(&["rotate", "--wallet", w, "--account", payout, &flag]))
+        {
+            Ok(r) if r["rotated"].as_u64().unwrap_or(0) > 0 => {
+                self.add_activity(json!({ "kind": "rotate", "text": "Coins moved to a fresh note after a failed offer" }));
+            }
+            Ok(_) => {}
+            Err(e) => self
+                .push_event(json!({ "event": "log", "text": format!("freeing the note: {e:#}") })),
+        }
     }
 
     fn start_pay(self: &Arc<Self>, body: &Value) -> Result<Value> {
@@ -2355,10 +2587,38 @@ impl App {
             let amount = zat.to_string();
             let to_a = format!("--to={to}");
             let amount_a = format!("--amount={amount}");
-            let r = self.seller(&[
+            // The raw transaction is written before the broadcast: if the paying process is
+            // lost (killed, or the server stopped) after the transaction was made, the file
+            // says so, and the payment is sent again instead of made again.
+            let tx_file = self.dir.join("trades").join(format!(
+                "faucet-{}.tx",
+                hex::encode(rand::random::<[u8; 4]>())
+            ));
+            let tx_out = format!("--tx-out={}", tx_file.display());
+            let paid = self.seller(&[
                 "pay", "--wallet", &w, "--account", &payout, &to_a, &amount_a,
-                "--memo=zsettle: free test coins",
-            ])?;
+                "--memo=zsettle: free test coins", &tx_out,
+            ]);
+            let txid_file = PathBuf::from(format!("{}.txid", tx_file.display()));
+            let r = match paid {
+                Ok(r) => Ok(r),
+                Err(e) if txid_file.exists() => {
+                    let txid = fs::read_to_string(&txid_file).unwrap_or_default().trim().to_string();
+                    let network = self.cfg.lock().unwrap().network.clone().unwrap_or_else(|| "main".into());
+                    let tx_a = format!("--tx={}", tx_file.display());
+                    let net_a = format!("--network={network}");
+                    match self.buyer(&["broadcast", &tx_a, &net_a]) {
+                        Ok(_) => Ok(json!({ "txid": txid, "resent": true })),
+                        Err(e2) => Err(anyhow!(
+                            "send_transaction: the payment {txid} was made but its broadcast is uncertain ({e:#}; resend: {e2:#})"
+                        )),
+                    }
+                }
+                Err(e) => Err(e),
+            };
+            let _ = fs::remove_file(&tx_file);
+            let _ = fs::remove_file(&txid_file);
+            let r = r?;
             self.add_activity(json!({ "kind": "pay", "txid": r["txid"], "amount_zat": zat, "text": "Faucet payment" }));
             Ok(r)
         })
@@ -2453,6 +2713,9 @@ impl App {
             .filter(|n| !n.trim().is_empty())
             .or_else(|| self.item_names().get(&note).cloned())
             .unwrap_or_default();
+        if name.chars().count() > 80 {
+            return Err(anyhow!("a name has at most 80 characters"));
+        }
         self.accounts()?;
         Ok(self.job("publish", move |app, id| {
             app.publish_now(
@@ -2590,6 +2853,7 @@ impl App {
     /// Check an ownership proof someone gave, against the challenge given them. The proof is
     /// read from a file: the app never fetches a proof from an address.
     fn start_check_proof(self: &Arc<Self>, body: &Value) -> Result<Value> {
+        self.require_unlocked()?;
         let proof = field(body, "proof")?;
         if proof.len() > 16 * 1024 {
             return Err(anyhow!("that proof is too large"));
@@ -2597,6 +2861,18 @@ impl App {
         serde_json::from_str::<Value>(&proof)
             .map_err(|_| anyhow!("that is not an ownership proof"))?;
         let challenge = field(body, "challenge")?;
+        zsettle_core::ownership::check_challenge(&challenge)?;
+        // A check reads the chain from the item's first block: a few a minute per wallet.
+        {
+            let mut t = self.proof_checks.lock().unwrap();
+            t.retain(|x| *x + 60 > now());
+            if t.len() >= MAX_PROOF_CHECKS_PER_WALLET_MIN {
+                return Err(anyhow!(
+                    "several proofs were checked this minute; wait a moment"
+                ));
+            }
+            t.push(now());
+        }
         let network = self
             .cfg
             .lock()
@@ -2608,8 +2884,9 @@ impl App {
             "proof-{}.json",
             hex::encode(rand::random::<[u8; 6]>())
         ));
-        zsettle_core::wallet::write_owner_only(&path, proof.as_bytes())?;
         Ok(self.job("check-proof", move |app, id| {
+            // Written here, so a job refused by the limits leaves no file behind.
+            zsettle_core::wallet::write_owner_only(&path, proof.as_bytes())?;
             app.step(id, "Checking the signature and the challenge");
             app.step(id, "Looking on the chain whether the item is still held");
             let args = vec![
@@ -2933,12 +3210,16 @@ impl App {
                     "--out", &full, &seller_a,
                 ])
             })?;
+            let note = built["buyer_note"].as_str().unwrap_or_default().to_string();
             if built["reply_url"].is_null() {
+                // The seller never saw the offer: the note can pay again at once.
+                app.free_note(&w, &payout, &note, false);
                 return Err(anyhow!(
                     "the offer is built but the seller could not be reached at {base}"
                 ));
             }
             app.step(id, "Offer sent; waiting for the seller to check it and sign its part");
+            let finished = (|| -> Result<Value> {
             let done = app.buyer(&[
                 "finish", "--wallet", &w, "--full", &full, "--out", &tx, "--broadcast", "--wait",
                 "300",
@@ -2964,6 +3245,20 @@ impl App {
                 "text": format!("Bought {}", if name.is_empty() { &item } else { &name }),
             }));
             Ok(json!({ "txid": txid, "price_zat": built["price_zat"], "fee_zat": built["fee_zat"] }))
+            })();
+            if let Err(e) = &finished {
+                // The seller saw the offer but the trade will not be finished by this wallet
+                // (refused, no answer, or a definite rejection): retire the note, so the next
+                // purchase has a fresh one and this seller cannot link it to the offer. After
+                // a broadcast whose outcome is unknown the note stays reserved; the next sync
+                // retires it once the offer has expired.
+                if !maybe_sent(e) {
+                    app.step(id, "Freeing your coins for the next purchase");
+                    app.free_note(&w, &payout, &note, true);
+                    return Err(anyhow!("{e:#}; your coins were freed for the next purchase"));
+                }
+            }
+            finished
         }))
     }
 
@@ -3237,6 +3532,13 @@ mod tests {
         assert!(back.shop_wanted);
         assert_eq!(back.shop_listen.as_deref(), Some("127.0.0.1:19100"));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn wider_nets_group_addresses() {
+        assert_eq!(wider_net("203.0.113.9"), "203.0.113.0/24");
+        assert_eq!(wider_net("2001:db8:1:2::/64"), "2001:db8:1::/48");
+        assert_eq!(wider_net("local"), "local");
     }
 
     #[test]

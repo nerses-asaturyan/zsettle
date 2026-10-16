@@ -242,8 +242,8 @@ async fn trace(
     };
     // Unless privacy from the server matters, ask it where the genesis transaction is: start
     // there instead of at the birthday, and keep the bytes for the name.
-    let (from_height, raw) = if private {
-        (from_height, None)
+    let (from_height, raw, genesis_height) = if private {
+        (from_height, None, None)
     } else {
         let raw = client
             .get_transaction(TxFilter {
@@ -258,7 +258,11 @@ async fn trace(
         if genesis_height == 0 {
             return Err(NoteNotFound("the genesis transaction is not mined yet".into()).into());
         }
-        (from_height.max(genesis_height), Some(raw.data))
+        (
+            from_height.max(genesis_height),
+            Some(raw.data),
+            Some(genesis_height),
+        )
     };
     let genesis_txid = genesis.txid.to_string();
 
@@ -359,10 +363,16 @@ async fn trace(
                 }
             }
         }
+        // The genesis transaction sits in a known block: once that block is behind without
+        // the note, no later block can hold it. Stop instead of reading on to the tip, which
+        // a checker handed a bad proof would otherwise do for the whole chain.
+        if hops.is_empty() && genesis_height.is_some_and(|g| height >= g) {
+            break;
+        }
     }
     if hops.is_empty() {
         return Err(NoteNotFound(format!(
-            "genesis note {}:{} not found between heights {from_height} and {tip}",
+            "genesis note {}:{} not found between heights {from_height} and {scanned_to}",
             genesis.txid, genesis.index
         ))
         .into());

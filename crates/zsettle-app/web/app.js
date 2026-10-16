@@ -191,6 +191,7 @@ function human(msg) {
   if (/wrong passphrase/i.test(m)) return 'Wrong passphrase.';
   if (/too recent for the anchor|wait a few blocks/i.test(m)) return 'Your newest funds are a few blocks too fresh to spend. Try again in a minute.';
   if (/^the faucet/i.test(m)) return m.charAt(0).toUpperCase() + m.slice(1) + '.';
+  if (/; your coins were freed for the next purchase$/i.test(m)) return human(m.replace(/; your coins were freed for the next purchase$/i, '')) + ' Your coins were freed for the next purchase.';
   if (/insufficient|not enough|no spendable|InsufficientFunds/i.test(m)) return 'Not enough spendable ZEC. ' + confirmingNote();
   if (/Connection (Failed|refused)|fetching http|could not be reached|timed out/i.test(m)) return 'Could not reach the shop. Check the address and that the shop is open.';
   if (/seller refused the offer/i.test(m)) return m.replace(/^.*?seller refused the offer:\s*/i, 'The seller refused the offer: ');
@@ -1111,7 +1112,7 @@ function openProve(it) {
     body: [
       h('p', { class: 'small muted' }, 'Ask the person checking for a challenge (a short code), and type it here. The proof shows that you hold this item right now. It does not show your ZEC balance or the address you get paid at.'),
       h('div', { class: 'field' }, h('label', { for: 'challenge' }, 'Their challenge'), ch),
-      h('div', { class: 'callout info' }, icon('info'), h('span', null, 'The proof carries the viewing key of your item account. The checker can see every item this account has held and when each one moved, and can recognise the account if you prove to them again. Your ZEC sits in another account and stays private.')),
+      h('div', { class: 'callout info' }, icon('info'), h('span', null, 'The proof carries the viewing key of your item account. The checker can see every item this account has held and when each one moved, and can recognise the account if you prove to them again, or match it to your shop if you have one. Your ZEC sits in another account and stays private.')),
       err,
     ],
     foot: [
@@ -1381,7 +1382,7 @@ function buyReview(sh, it) {
     h('div', { class: 'row nowrap' }, art(it.note, it.name, 'ico', it.icon), h('div', null, h('b', null, it.name || 'Item'), h('div', { class: 'small muted' }, 'from ' + S.market.base.replace(/^https?:\/\//, '')))),
     h('div', { class: 'summary' }, h('div', { class: 'r' }, h('span', null, 'Price'), h('span', null, zec(it.price_zat))), h('div', { class: 'r' }, h('span', null, 'Network fee'), h('span', null, 'about ' + zec(FEE_ZAT))), h('div', { class: 'r total' }, h('span', null, 'Total'), h('span', null, 'about ' + zec(it.price_zat + FEE_ZAT)))),
     bal !== null && bal < it.price_zat + FEE_ZAT ? h('div', { class: 'callout warn' }, icon('alert'), h('span', null, 'Your balance may be too low for this purchase.')) : null,
-    h('div', { class: 'callout' }, icon('shield'), h('span', null, 'Your payment and the item move in one transaction. If someone else buys it first, nothing happens and your ZEC stays with you.')),
+    h('div', { class: 'callout' }, icon('shield'), h('span', null, 'Your payment and the item move in one transaction. If someone else buys it first, your ZEC stays with you.')),
     h('p', { class: 'small muted' }, 'Confirming sends the transaction. It cannot be undone.'),
   );
   const art2 = sh.box.querySelector('.row .ico');

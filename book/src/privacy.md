@@ -107,4 +107,6 @@ unlocked. It is meant for free test coins only. For real ZEC, run zsettle yourse
 
 For its limits (new wallets an hour, test coins a day) the server keeps each visitor's IP
 address in memory for at most a day, and nothing else about the visitor. It writes no access
-log; the web proxy in front of it writes none either.
+log, and the web proxy in front of it writes none either; the proxy's error log (a request it
+could not pass on, for example during a restart) and the firewall's log of blocked packets
+can record an address in the system journal.

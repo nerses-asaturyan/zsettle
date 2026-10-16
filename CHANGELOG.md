@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Tracing stops at the item's first block when the note is not there, instead of reading the chain to its tip; `zsettle check-proof` bounds the challenge like `prove`; the app checks proofs only for an unlocked wallet, a few a minute, and writes the proof file only when the check runs.
+- A failed offer no longer locks the buyer's coins: when the seller never received it the note is released at once, when the seller saw it the note moves to a fresh one (`zsettle rotate --abandon <note>`, `--release <note>`), and a reservation whose offer expired is retired after the next sync.
+- Faucet: the payment's transaction is written before it is broadcast, so a paying process that is lost resends it instead of paying twice; payments cut short by a restart are looked at when the server starts, and a wallet that received nothing gets its chance back.
+- Hosted server: wallets nothing happened to are removed after a day (a synced but empty wallet included), new wallets are also limited per wider network, API calls are limited per visitor, the `passkey:` passphrase shape is accepted only with a passkey, job errors carry no server paths, and listing names are at most 80 characters.
 - App: every transaction (a purchase, a payment, creating items, cancelling offers) has a confirm step that shows the cost and says it cannot be undone; a result screen's icon and title follow the outcome, so a proof that does not hold shows a warning, not a tick.
 - App: the balance card counts confirmations per note, 10 for a note from another wallet and 3 for the wallet's own change (ZIP 315's recommended policy), and "not enough spendable ZEC" says what is still confirming and for how long; the dot in the top bar opens a Network sheet that says what syncing does.
 - App and hosted server: the wording no longer calls a hosted server a demo; the Market says what a seller signs and why the wallet checks it; the ownership texts say exactly what a proof reveals (the item account's viewing key, not the ZEC or payout address); twice as many item icons; the Activity page keeps the explorer note to the link itself.

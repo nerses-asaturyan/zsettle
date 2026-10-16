@@ -285,6 +285,14 @@ enum Cmd {
         /// Skip the sync before deciding (the wallet must be fresh).
         #[arg(long)]
         no_sync: bool,
+        /// Treat this note's offer as given up, whatever its expiry: the note is retired now
+        /// (or released, if already spent). For an offer the buyer will never finish.
+        #[arg(long)]
+        abandon: Option<String>,
+        /// Only drop the reservation of this note, with no transaction: for an offer the
+        /// seller never received, so nothing links the note to it.
+        #[arg(long)]
+        release: Option<String>,
     },
     /// Merge every spendable note of an account into one note at its change address, so that one
     /// note can pay for a trade. Notes reserved for open offers are left alone.
@@ -988,8 +996,21 @@ fn main() -> Result<()> {
             server,
             dry_run,
             no_sync,
+            abandon,
+            release,
         } => {
             let w = Wallet::open(&wallet)?;
+            if let Some(note) = release {
+                let note: zsettle_core::wallet::NoteRef = note.parse()?;
+                release_note(&w, note)?;
+                println!(
+                    "{}",
+                    serde_json::json!({ "note": note.to_string(), "action": "released" })
+                );
+                return Ok(());
+            }
+            let abandon: Option<zsettle_core::wallet::NoteRef> =
+                abandon.map(|n| n.parse()).transpose()?;
             let mut db = w.db()?;
             if !no_sync {
                 sync_blocking(&w, &mut db, &server)?;
@@ -1022,8 +1043,9 @@ fn main() -> Result<()> {
                         "released: already spent"
                     }
                     NoteState::Unknown => "kept: not in this wallet",
-                    // Mineable while the next block (tip + 1) is at or below the expiry.
-                    NoteState::Unspent { .. } if expiry > tip => {
+                    // Mineable while the next block (tip + 1) is at or below the expiry,
+                    // unless the buyer gave the offer up.
+                    NoteState::Unspent { .. } if expiry > tip && abandon != Some(note) => {
                         "kept: its offer can still be mined"
                     }
                     NoteState::Unspent { .. } => match &ask {
@@ -1305,6 +1327,8 @@ fn check_proof(
     network: Network,
     server: &str,
 ) -> Result<ProofReport> {
+    // The checker's challenge is bounded like the holder's: it goes onto a command line.
+    zsettle_core::ownership::check_challenge(challenge)?;
     let mut report = ProofReport {
         valid: false,
         held: false,
