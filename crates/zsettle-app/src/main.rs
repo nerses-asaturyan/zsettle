@@ -2070,7 +2070,12 @@ impl App {
             let msg: Vec<&str> = stderr
                 .lines()
                 .map(str::trim)
-                .filter(|l| !l.is_empty() && !l.starts_with("warning:") && !l.starts_with('#'))
+                .filter(|l| {
+                    !l.is_empty()
+                        && !l.starts_with("warning:")
+                        && !l.starts_with("note:")
+                        && !l.starts_with('#')
+                })
                 .collect();
             let mut text = msg.join(" ").replace("Error: ", "");
             if self.hosted() {
