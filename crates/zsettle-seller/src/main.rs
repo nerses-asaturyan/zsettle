@@ -36,6 +36,9 @@ use zsettle_core::DEFAULT_MAX_EXPIRY_DELTA;
 use zsettle_core::ZIP317_MARGINAL_FEE;
 use zsettle_core::{MAX_ENVELOPE_BYTES, MIN_PRICE_ZAT};
 
+/// Longest item name a listing carries.
+const MAX_NAME_CHARS: usize = 80;
+
 /// How many recent blocks' tree roots count as acceptable anchors (the wallet keeps that
 /// many checkpoints).
 const ANCHOR_DEPTH: u32 = 100;
@@ -165,6 +168,11 @@ enum Cmd {
         /// Optional memo.
         #[arg(long)]
         memo: Option<String>,
+        /// Write the raw transaction here (and its id to `<path>.txid`) before broadcasting,
+        /// so a caller that loses this process can tell whether a payment was made and can
+        /// send it again.
+        #[arg(long)]
+        tx_out: Option<PathBuf>,
         /// lightwalletd server URL (defaults to the network's).
         #[arg(long)]
         server: Option<String>,
@@ -590,6 +598,7 @@ fn main() -> Result<()> {
             to,
             amount,
             memo,
+            tx_out,
             server,
         } => {
             let wallet = Wallet::open(&wallet)?;
@@ -605,6 +614,15 @@ fn main() -> Result<()> {
                 memo,
             };
             let (bytes, txid) = zsettle_core::mint::pay(&wallet, &mut db, &seed, &req)?;
+            if let Some(p) = &tx_out {
+                zsettle_core::wallet::write_owner_only(p, &bytes)?;
+                let mut id = p.clone().into_os_string();
+                id.push(".txid");
+                zsettle_core::wallet::write_owner_only(
+                    std::path::Path::new(&id),
+                    txid.to_string().as_bytes(),
+                )?;
+            }
             let response = zsettle_core::broadcast::send_raw_transaction_blocking(&server, bytes)?;
             println!(
                 "{}",
@@ -709,6 +727,9 @@ fn main() -> Result<()> {
                 let note = ironwood_note(&db, item_note, target)?;
                 if item_fvk.scope_for_address(&note.note.recipient()).is_none() {
                     return Err(anyhow!("note {item_note} is not owned by the item account"));
+                }
+                if name.chars().count() > MAX_NAME_CHARS {
+                    return Err(anyhow!("a name has at most {MAX_NAME_CHARS} characters"));
                 }
                 let description = description
                     .map(|d| d.trim().to_string())

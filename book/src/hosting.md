@@ -85,9 +85,10 @@ link-local and private ranges (`169.254.0.0/16`, `fe80::/10`, `10.0.0.0/8`, `172
 `192.168.0.0/16`, `100.64.0.0/10`, `fc00::/7`; so no cloud metadata, while loopback stays open
 for the app's own shops), `MemoryMax=3G`, `TasksMax=512` and `CPUQuota=180%`.
 
-Caddy refuses request bodies above 2 MB, has timeouts of 10 seconds for headers, 30 seconds
-for bodies and 60 seconds idle, and buffers each request body (up to 2 MB) so the app gets it
-whole and slow senders hold no app connection. If a Caddyfile not written by this script is
+Caddy refuses request bodies above 2 MB and has timeouts of 10 seconds for headers, 30 seconds
+for bodies and 60 seconds idle. It does not buffer request bodies (the Caddy that Ubuntu 24.04
+ships, 2.6, has no such setting): a slow sender holds one of the app's 200 connections for up
+to 30 seconds, and the app counts calls per visitor. If a Caddyfile not written by this script is
 already there, the script keeps a copy (`/etc/caddy/Caddyfile.before-zsettle.<time>`) before
 replacing it.
 
