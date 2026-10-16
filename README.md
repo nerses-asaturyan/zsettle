@@ -30,7 +30,9 @@ read from the chain.
 
 - Documentation: <https://nerses-asaturyan.github.io/zsettle/book/>
 - Project page: <https://nerses-asaturyan.github.io/zsettle/>
-- Hosted testnet demo: the link is on the [project page](https://nerses-asaturyan.github.io/zsettle/)
+- Hosted testnet demo: the link is on the [project page](https://nerses-asaturyan.github.io/zsettle/).
+  That server holds its visitors' wallets, which is fine for free test coins only; for real
+  ZEC, run the app on your own computer.
 - Releases: <https://github.com/nerses-asaturyan/zsettle/releases>
 
 The book's source is in [`book/`](book/src/SUMMARY.md). The protocol notes are in
