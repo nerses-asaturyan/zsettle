@@ -447,6 +447,17 @@ fn pay_request(
         .get_transaction(txid)
         .map_err(|e| anyhow!("{e}"))?
         .ok_or_else(|| anyhow!("transaction {txid} not stored"))?;
+    // The library records an output to another account of the same wallet as a plain sent
+    // output until a block brings it back. Decrypting the transaction with the wallet's own
+    // keys records the new notes now, so new items show (as arriving) before the block.
+    if let Err(e) = zcash_client_backend::data_api::wallet::decrypt_and_store_transaction(
+        &wallet.network,
+        db,
+        &tx,
+        None,
+    ) {
+        eprintln!("warning: recording the new notes: {e}");
+    }
     let mut bytes = Vec::new();
     tx.write(&mut bytes)?;
     Ok((bytes, txid.to_string()))
