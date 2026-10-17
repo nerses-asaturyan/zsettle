@@ -61,9 +61,12 @@ const UNUSED_WALLET_SECS: u64 = 86_400;
 /// Hosted: new wallets an hour from one wider network (an IPv6 /48 or an IPv4 /24), so a
 /// handful of addresses cannot fill the server either.
 const MAX_NEW_PER_NET_HOUR: usize = 12;
-/// Hosted: API calls a minute per visitor, so one visitor cannot keep the server forking
-/// processes for everyone else. A busy page makes about a hundred.
-const MAX_CALLS_PER_IP_MIN: usize = 240;
+/// Hosted: API calls a minute per signed-in wallet (a busy page makes about seventy), and
+/// per visitor before sign-in, so one page cannot keep the server forking processes for
+/// everyone else. Counted per wallet, not per address, so people behind one shared address
+/// (an office, a phone network) do not count against each other.
+const MAX_CALLS_PER_WALLET_MIN: usize = 240;
+const MAX_CALLS_PER_IP_MIN: usize = 120;
 /// Ownership proofs a wallet checks a minute: each reads the chain from the item's first
 /// block.
 const MAX_PROOF_CHECKS_PER_WALLET_MIN: usize = 3;
@@ -1017,16 +1020,6 @@ fn handle_hosted(hub: &Arc<Hub>, h: &Hosted, req: Request, mut stream: TcpStream
     if !req.path.starts_with("/api/") {
         return respond(&mut stream, 404, "text/plain", b"not found");
     }
-    if h.count_check(&[(format!("c:{ip}"), MAX_CALLS_PER_IP_MIN)])
-        .is_err()
-    {
-        return respond(
-            &mut stream,
-            429,
-            "application/json",
-            br#"{"error":"too many requests from you; wait a moment"}"#,
-        );
-    }
     // A cross-site form cannot set this header, and a cross-site script cannot send it
     // without a CORS preflight this server never answers.
     if req.method == "POST" && req.headers.get("x-zsettle").map(String::as_str) != Some("1") {
@@ -1048,6 +1041,18 @@ fn handle_hosted(hub: &Arc<Hub>, h: &Hosted, req: Request, mut stream: TcpStream
         .and_then(|(_, p)| h.apps.lock().unwrap().get(p).cloned());
     if let Some(a) = &app {
         a.last_seen.store(now(), Ordering::SeqCst);
+    }
+    let call_key = match &session {
+        Some((_, p)) => (format!("c:w:{p}"), MAX_CALLS_PER_WALLET_MIN),
+        None => (format!("c:{ip}"), MAX_CALLS_PER_IP_MIN),
+    };
+    if h.count_check(&[call_key]).is_err() {
+        return respond(
+            &mut stream,
+            429,
+            "application/json",
+            br#"{"error":"too many requests; wait a moment"}"#,
+        );
     }
     match (req.method.as_str(), req.path.as_str()) {
         ("GET", "/api/hello") => {
@@ -1384,7 +1389,10 @@ impl Hub {
         }
         // The light scrypt factor is for passkey secrets only: the `passkey:` shape comes
         // with a passkey, never typed.
-        if field(body, "passphrase")?.starts_with("passkey:") != body["passkey"].is_object() {
+        let with_passkey = body["passkey"]["id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty());
+        if field(body, "passphrase")?.starts_with("passkey:") != with_passkey {
             return Err(anyhow!("that passphrase shape is reserved for passkeys"));
         }
         let cred = body["passkey"]["id"].as_str().map(str::to_string);
@@ -1701,16 +1709,31 @@ impl Hub {
             .collect();
         for profile in pending {
             let app = h.apps.lock().unwrap().get(&profile).cloned();
-            let paid = app.as_ref().is_some_and(|a| {
-                let _ = a.exclusive(|| a.sync());
-                a.accounts()
-                    .and_then(|(payout, _)| a.notes(&payout))
-                    .map(|n| !n.is_empty())
-                    .unwrap_or(true)
-            });
+            let Some(a) = app else {
+                h.index.lock().unwrap().faucet_pending.remove(&profile);
+                let _ = self.save_index(h);
+                continue;
+            };
+            // A payment still in the mempool is not a note yet: a wallet is judged only once
+            // it is an hour old and the look at the chain worked; until then it stays pending
+            // and is looked at again a minute later.
+            let synced = a.exclusive(|| a.sync()).is_ok();
+            let has_note = a
+                .accounts()
+                .and_then(|(payout, _)| a.notes(&payout))
+                .map(|n| !n.is_empty())
+                .unwrap_or(true);
+            let made = fs::metadata(a.dir.join("app.json"))
+                .and_then(|m| m.created().or_else(|_| m.modified()))
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(u64::MAX);
             let mut idx = h.index.lock().unwrap();
-            idx.faucet_pending.remove(&profile);
-            if !paid {
+            if has_note {
+                idx.faucet_pending.remove(&profile);
+            } else if synced && made.saturating_add(3600) < now() {
+                idx.faucet_pending.remove(&profile);
                 idx.funded.remove(&profile);
                 eprintln!(
                     "faucet: {profile} was marked paid but holds nothing; its chance is given back"
@@ -1782,7 +1805,12 @@ impl Hub {
             let Ok(_g) = a.wallet_lock.try_lock() else {
                 continue;
             };
-            // Coins sent from elsewhere leave no activity entry, but they do leave notes.
+            // Coins sent from elsewhere leave no activity entry, but they do leave notes:
+            // look at the chain once more before deciding, and keep the wallet when that
+            // look fails.
+            if a.sync().is_err() {
+                continue;
+            }
             let holds_something = a.accounts().ok().is_none_or(|(payout, item)| {
                 [payout, item]
                     .iter()
@@ -1860,6 +1888,7 @@ fn start_hosted_threads(hub: &Arc<Hub>) {
             a.prune_trade_files();
         }
         hb.remove_unused(h);
+        hb.reconcile_faucet(h);
     });
     // Keep the house shop stocked and open.
     let hb = hub.clone();
@@ -2528,7 +2557,12 @@ impl App {
     /// spent), so the wallet can buy again and the seller cannot link its next offer. Runs
     /// after a sync, only when there is such a note and the wallet is unlocked.
     fn rotate_expired(&self, report: &Value) {
-        let Some(tip) = report["chain_tip"].as_u64() else {
+        // Judged against the height the wallet scanned to, as `rotate` judges it, so a
+        // backlog does not start rotations that then find nothing to do.
+        let Some(tip) = report["scanned_to"]
+            .as_u64()
+            .or(report["chain_tip"].as_u64())
+        else {
             return;
         };
         if self.passphrase.lock().unwrap().is_none() {
@@ -2565,9 +2599,9 @@ impl App {
 
     /// After an offer that will never settle: drop the note's reservation, or, when the
     /// seller saw the offer (and so the note's nullifier), move the note to a fresh one.
-    fn free_note(&self, w: &str, payout: &str, note: &str, retire: bool) {
+    fn free_note(&self, w: &str, payout: &str, note: &str, retire: bool) -> bool {
         if note.is_empty() {
-            return;
+            return false;
         }
         let flag = if retire {
             format!("--abandon={note}")
@@ -2578,10 +2612,15 @@ impl App {
         {
             Ok(r) if r["rotated"].as_u64().unwrap_or(0) > 0 => {
                 self.add_activity(json!({ "kind": "rotate", "text": "Coins moved to a fresh note after a failed offer" }));
+                true
             }
-            Ok(_) => {}
-            Err(e) => self
-                .push_event(json!({ "event": "log", "text": format!("freeing the note: {e:#}") })),
+            Ok(_) => true,
+            Err(e) => {
+                self.push_event(
+                    json!({ "event": "log", "text": format!("freeing the note: {e:#}") }),
+                );
+                false
+            }
         }
     }
 
@@ -2652,6 +2691,10 @@ impl App {
                         // broadcast did go through.
                         Err(e2) if format!("{e2:#}").contains("already") => {
                             Ok(json!({ "txid": txid, "resent": false }))
+                        }
+                        // The node refused it outright: nothing was sent, the chance goes back.
+                        Err(e2) if format!("{e2:#}").contains("server rejected transaction") => {
+                            Err(anyhow!("{e:#}; resend refused: {e2:#}"))
                         }
                         Err(e2) => Err(anyhow!(
                             "send_transaction: the payment {txid} was made but its broadcast is uncertain ({e:#}; resend: {e2:#})"
@@ -3301,8 +3344,12 @@ impl App {
                 // retires it once the offer has expired.
                 if !maybe_sent(e) {
                     app.step(id, "Freeing your coins for the next purchase");
-                    app.free_note(&w, &payout, &note, true);
-                    return Err(anyhow!("{e:#}; your coins were freed for the next purchase"));
+                    if app.free_note(&w, &payout, &note, true) {
+                        return Err(anyhow!("{e:#}; your coins were freed for the next purchase"));
+                    }
+                    return Err(anyhow!(
+                        "{e:#}; your coins stay set aside until the offer expires, about 40 blocks"
+                    ));
                 }
             }
             finished

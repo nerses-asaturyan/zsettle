@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Hosted server: API calls are counted per signed-in wallet (per visitor only before sign-in), so people behind one shared address do not block each other; a wallet is removed only after a fresh look at the chain finds nothing; a faucet payment cut short by a restart is judged only once the wallet is an hour old; the `passkey:` passphrase shape needs a real credential id; a failed offer says whether the coins were freed or stay set aside.
 - A note of an unmined transaction is counted only while that transaction can still be mined; the change of an expired or rejected payment no longer shows in the balance.
 - The wallet records the transactions it builds itself (a trade, a rotation, a cancel) as soon as they are sent: the balance is right at once, change shows as settling, and a payment made meanwhile cannot pick a note that is already spent.
 - App: a passkey wallet confirms every transaction with the passkey ("Confirm with passkey"); the balance card shows coins leaving after a purchase; a seller with an open shop sees confirmations (`zsettle height`); an ownership proof is shown as a QR code and the checker can scan it.
