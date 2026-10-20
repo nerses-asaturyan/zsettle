@@ -292,7 +292,8 @@ button.li:hover { background: var(--surface-2); }
 
 /* ---------- overlays ---------- */
 #layer .scrim {
-  position: fixed; inset: 0; z-index: 40; background: rgba(4, 6, 10, 0.62);
+  position: fixed; inset: 0; z-index: 40; background: rgba(4, 6, 10, 0.78);
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
   display: flex; align-items: flex-end; justify-content: center;
   animation: fade 0.15s ease;
 }
