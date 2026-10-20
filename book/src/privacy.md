@@ -12,7 +12,7 @@ This page says what each party can see, and where the limits are. The threat mod
 | Holder of the listings file | The item notes of the listed account, their values and names, and the block in which each one is spent; the payout address and prices; `issued_at`; the account birthday. | The buyer's new item note, the buyer's address or balance, the seller's other accounts. |
 | The seller | The price paid, the trade's expiry, the nullifier of the buyer's paying note. With an exact-value two-action offer: that note's value (price plus fee). Over HTTP: the buyer's IP, unless the buyer uses Tor. | The buyer's viewing key, addresses, other notes, balance, the change amount. |
 | The buyer | The listings file and what it shows (above). | The seller's other notes and accounts. |
-| The light server | IP addresses, block ranges scanned, imported listing birthdays, transactions broadcast. | The wallet's transparent addresses (zsettle never sends them). |
+| The light server | IP addresses, block ranges scanned, imported listing birthdays, transactions broadcast. | The wallet's transparent addresses (zsettle is Orchard-only and queries none). |
 | A hosted demo server | Everything about the wallets it holds. | Nothing is hidden from it: it holds the keys. |
 
 ## The buyer
@@ -58,7 +58,9 @@ This page says what each party can see, and where the limits are. The threat mod
 A trade uses the standard expiry delta (40 blocks), standard ZIP 317 fees and the standard
 anchor depth, and has two or three actions like any wallet transaction. Without the listings
 file it is not marked. **Limit:** whoever holds the listings file can derive the listed items'
-nullifiers, and so spot every trade of that account.
+nullifiers, and so spot every trade of that account. **Limit:** a non-default confirmation count
+(`--min-confirmations`, default 3) changes the anchor depth and would make a trade stand out, so
+the default is kept.
 
 ## The light server
 
@@ -74,15 +76,20 @@ Every sync, broadcast and `verify` talks to a lightwalletd server over TLS. The 
 - from a running seller service: a sync every few seconds, which marks the IP as a running
   service.
 
-It never receives the wallet's transparent addresses: the wallet library would ask for them on
-every sync, and zsettle answers that request inside the process (`broadcast::Shielded`).
+It is not sent the wallet's transparent addresses. zsettle is Orchard-only and makes no
+transparent-address query; the one transparent-UTXO refresh the wallet library performs on each
+sync is answered inside the process (`broadcast::Shielded`) instead of reaching the server. This
+holds as long as the pinned libraries make no other transparent query.
 
 Use Tor or your own lightwalletd if the rest matters to you.
 
 ## Network and proxies
 
-- Offers over plain HTTP carry the redacted envelope and the signed copy, which are safe to
-  see. But an observer can link an IP to an offer. For the internet, put a TLS reverse proxy or
+- Offers over plain HTTP carry the redacted envelope and the signed copy, which hold no buyer or
+  seller secret beyond the item account's viewing key (the consignment), which is already
+  semi-public (see “The seller” above). But an observer can link an IP to an offer, and the
+  content tag that routes replies is a hash of the plaintext envelope, so it separates buyers
+  from each other but hides nothing from an on-path observer. For the internet, put a TLS reverse proxy or
   a Tor onion service in front of `serve --listen`.
 - Fetching listings by URL shows the seller's service your IP, the time and the client's
   `User-Agent`, nothing from the wallet. A window-shopper is visible to the seller as such.

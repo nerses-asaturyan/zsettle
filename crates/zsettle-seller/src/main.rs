@@ -759,6 +759,12 @@ fn main() -> Result<()> {
                         item.note
                     ));
                 }
+                if item.max_expiry_delta > DEFAULT_MAX_EXPIRY_DELTA {
+                    return Err(anyhow!(
+                        "{}: an expiry limit above {DEFAULT_MAX_EXPIRY_DELTA} blocks would let a buyer hold a signed offer as a long free option; keep it at {DEFAULT_MAX_EXPIRY_DELTA} or lower",
+                        item.note
+                    ));
+                }
                 if item.max_expiry_delta != DEFAULT_MAX_EXPIRY_DELTA {
                     eprintln!(
                         "warning: {}: an expiry limit other than {DEFAULT_MAX_EXPIRY_DELTA} blocks makes every trade of this item recognisable on chain",
@@ -1002,6 +1008,12 @@ fn main() -> Result<()> {
             check_payout(&l, &payout_key(&db, &w)?, wallet.network)?;
             let bytes = fs::read(&input).with_context(|| format!("reading {}", input.display()))?;
             let pczt = pczt_ops::from_bytes(&bytes)?;
+            let actions = pczt_ops::action_count(&pczt)?;
+            if actions > MAX_TRADE_ACTIONS {
+                return Err(anyhow!(
+                    "refused: {actions} actions; a trade has two or three"
+                ));
+            }
             let vk = pczt_ops::verifying_key();
             pczt_ops::verify_proof(&pczt, &vk).context("refused: proof")?;
             eprintln!("proof verified");

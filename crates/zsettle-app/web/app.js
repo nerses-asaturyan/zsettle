@@ -1176,8 +1176,8 @@ function openProve(it) {
                 text: 'Show this code to the checker, or send them the text. It stops working once the item leaves your wallet.',
                 extra: [qr, box],
                 actions: [
+                  navigator.share ? h('button', { class: 'btn', onclick: () => navigator.share({ text }).catch(() => {}) }, icon('share'), 'Share') : h('button', { class: 'btn', onclick: () => copy(text, 'Proof copied') }, icon('copy'), 'Copy'),
                   h('button', { class: 'btn', onclick: () => copy(text, 'Proof copied') }, icon('copy'), 'Copy'),
-                  h('button', { class: 'btn', onclick: () => download('ownership-proof.json', text) }, icon('down'), 'Save'),
                   h('button', { class: 'btn primary', onclick: () => sh.close() }, 'Done'),
                 ],
               };

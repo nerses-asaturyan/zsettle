@@ -29,6 +29,7 @@ const SIGNATURE_DOMAIN: &[u8] = b"zsettle-listings-v1\n";
 
 /// One item for sale.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ListedItem {
     /// The item note, as `<txid>:<output index>`.
     pub note: String,
@@ -90,6 +91,7 @@ pub fn check_details(description: Option<&str>, icon: Option<&str>) -> Result<()
 
 /// A seller's published listings.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Listings {
     /// Format version.
     pub version: u32,

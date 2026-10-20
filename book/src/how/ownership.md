@@ -86,7 +86,11 @@ that account has held, now and in the past, and when each one moved. If you keep
 account (`new-item-account`), that is the history of this one item.
 
 It reveals nothing about your ZEC: payments and change live in the payout account, whose key
-is not in the proof. The proof carries no payout address.
+is not in the proof. The proof carries no payout address. This holds when the item account is
+separate from your payout account, which is the default (`new-item-account`); a proof made from
+your payout account would expose that account's history. The proof also carries the chain height
+your wallet had reached when signing, about the current tip, which shows roughly how up to date
+your wallet is.
 
 Like `verify`, `check-proof` asks the lightwalletd server for the note's transaction, so the
 server learns which item is being checked.
@@ -103,4 +107,9 @@ server learns which item is being checked.
 - A proof shows control of the item account's key. It does not say who the person is. If that
   matters, check the viewing key against one you already trust, such as the key in their
   signed listings file.
+- **A proof can be relayed.** A fresh challenge stops an *old* proof being shown again, but not
+  a live relay: someone standing between you and the holder can pass your challenge to the real
+  holder and forward the genuine proof back, since the proof is bound to the challenge, not to
+  who is asking or to the channel. Comparing the viewing key out of band, over a channel you
+  already trust, is what closes this. A proof you make to post publicly is relayable by nature.
 - The checker's view is only as fresh as its server: `scanned_to` is the last block it saw.
