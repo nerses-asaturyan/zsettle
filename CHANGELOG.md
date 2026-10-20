@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Docs, from the same red team: the "transparent addresses are never sent" and on-chain-indistinguishability claims now state what the code actually enforces (and that a non-default confirmation count is a fingerprint); the ownership-proof pages add the relay limitation, the height it reveals, and that ZEC stays private only with a separate item account; the security page documents why reusing the item key to sign messages is safe and that delisting does not cancel signed offers; the protocol spec notes the item pairing is enforced by the buyer, not the seller.
+- Security hardening from an independent crypto red team: `publish` refuses an expiry limit above the default (no long free option for a buyer); the paying note is reserved before its offer leaves the wallet; the manual `sign` applies the same action-count cap as the service; `check-proof --private` hides the checked item from the lightwalletd server; the signed listings and ownership-proof structures reject unknown fields.
+- App: a darker, blurred backdrop behind sheets, so a sheet no longer looks like it overlaps the balance card on a phone; an ownership proof can be shared straight to a messaging app.
 - New items show as arriving right after they are created, before their block, like a bought item does.
 - Hosted server: API calls are counted per signed-in wallet (per visitor only before sign-in), so people behind one shared address do not block each other; a wallet is removed only after a fresh look at the chain finds nothing; a faucet payment cut short by a restart is judged only once the wallet is an hour old; the `passkey:` passphrase shape needs a real credential id; a failed offer says whether the coins were freed or stay set aside.
 - A note of an unmined transaction is counted only while that transaction can still be mined; the change of an expired or rejected payment no longer shows in the balance.

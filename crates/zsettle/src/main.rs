@@ -260,6 +260,10 @@ enum Cmd {
         /// lightwalletd server URL.
         #[arg(long, default_value = DEFAULT_SERVER)]
         server: String,
+        /// Do not tell the server which item is checked: scan from the item birthday instead
+        /// of asking the server for the note's transaction. Slower, more private.
+        #[arg(long)]
+        private: bool,
     },
     /// Retire the paying notes of offers that did not settle: each one is moved to a fresh
     /// address of its account in a plain two-action transaction, so the nullifier the seller
@@ -865,11 +869,14 @@ fn main() -> Result<()> {
                 p.push(".seller.pczt");
                 PathBuf::from(p)
             });
+            // Reserve the paying note before the envelope leaves this wallet. If this process
+            // dies between handing the envelope over and recording the reservation, the note
+            // could otherwise be picked for a second offer, linking the two spends on chain.
+            reserve_note(&w, buyer_note, built.expiry_height)?;
             // The redacted copy is made to be handed over, and a shared inbox may belong to
             // another user: an ordinary file, unlike the full PCZT and the reply file.
             fs::write(&seller_copy, &envelope)
                 .with_context(|| format!("writing {}", seller_copy.display()))?;
-            reserve_note(&w, buyer_note, built.expiry_height)?;
             let stem = seller_copy
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -1317,10 +1324,11 @@ fn main() -> Result<()> {
             challenge,
             network,
             server,
+            private,
         } => {
             let network = parse_network(&network)?;
             let p = OwnershipProof::parse(&read_proof(&proof)?)?;
-            let report = check_proof(&p, &challenge, network, &server)?;
+            let report = check_proof(&p, &challenge, network, &server, private)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             if !(report.valid && report.held) {
                 std::process::exit(1);
@@ -1352,6 +1360,7 @@ fn check_proof(
     challenge: &str,
     network: Network,
     server: &str,
+    private: bool,
 ) -> Result<ProofReport> {
     // The checker's challenge is bounded like the holder's: it goes onto a command line.
     zsettle_core::ownership::check_challenge(challenge)?;
@@ -1391,7 +1400,7 @@ fn check_proof(
         std::slice::from_ref(&prover),
         note,
         None,
-        false,
+        private,
     ) {
         Ok(t) => t,
         Err(e) => {

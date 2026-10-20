@@ -33,6 +33,7 @@ pub const MAX_PROOF_BYTES: u64 = 16 * 1024;
 
 /// A signed statement that the holder of an item account controls one of its notes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct OwnershipProof {
     /// Format version.
     pub version: u32,

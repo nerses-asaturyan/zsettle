@@ -22,6 +22,19 @@ Report problems privately as described in `SECURITY.md`. The full threat table i
 | Seller signs against an old view of the chain | The service syncs before every pass and signs nothing in a pass whose sync failed. |
 | Network upgrade this build does not know | The tools compare the server's consensus branch with their own before building or sending, and stop. |
 
+**Message signing.** Listings files and ownership proofs are signed with the item account's
+Orchard spend key, the same key that authorizes its spends. This cannot be abused to forge a
+transaction. A transaction is signed over a 32-byte ZIP 244 sighash under a *randomized* key
+(`rk = ak + alpha*G`); a listing or a proof is signed over a longer, `zsettle-...`-prefixed
+message under the base key. So a message signature can never be, nor be turned into, a spend
+authorization, and the two message kinds cannot stand in for each other either (different
+prefixes). As defence in depth the policy refuses any item action whose spend randomizer is
+zero, so the bare key never reaches the chain.
+
+**Delisting is not cancelling.** `publish --remove` only takes an item out of the file; an offer
+the service already signed for it stays valid until it expires. To end outstanding offers for
+good, spend the item with `cancel`, which moves it to a fresh note of the same account.
+
 ## Wallet files
 
 - The mnemonic is age-encrypted: to an identity file created owner-only, or to a passphrase
