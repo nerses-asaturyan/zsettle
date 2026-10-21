@@ -17,6 +17,8 @@ const ITEM_ZAT = 1000; // the value of an item note
 // undoing the transaction that paid you.
 const CONFS = { other: 10, change: 3 };
 const BLOCK_SECS = { main: 75, test: 25 };
+// An ownership proof is accepted for this many blocks after the block it names.
+const PROOF_MAX_AGE = 100;
 const SYNC_EVERY_MS = 60000;
 
 const S = {
@@ -1140,14 +1142,17 @@ function newChallenge() {
 }
 
 function openProve(it) {
+  const label = h('input', { class: 'input', id: 'plabel', maxlength: '80', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', placeholder: '@yourname' });
   const ch = h('input', { class: 'input', id: 'challenge', maxlength: '200', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', placeholder: 'zs-abcd-efgh' });
   const err = h('p', { class: 'small err', role: 'alert' });
+  const life = minutesFor(PROOF_MAX_AGE);
   const sh = sheet({
     title: 'Prove you own ' + (it.name || 'this item'),
     body: [
-      h('p', { class: 'small muted' }, 'Ask the person checking for a challenge (a short code), and type it here. The proof shows that you hold this item right now. It does not show your ZEC balance or the address you get paid at.'),
-      h('div', { class: 'field' }, h('label', { for: 'challenge' }, 'Their challenge'), ch),
-      h('div', { class: 'callout info' }, icon('info'), h('span', null, 'The proof carries the viewing key of your item account. The checker can see every item this account has held and when each one moved, and can recognise the account if you prove to them again, or match it to your shop if you have one. Your ZEC sits in another account and stays private.')),
+      h('p', { class: 'small muted' }, 'Make a proof once and share it, like an address. Anyone can check it for about the next ' + life + ' minutes, and it stops working at once if the item leaves your wallet. It does not show your ZEC balance or the address you get paid at.'),
+      h('div', { class: 'field' }, h('label', { for: 'plabel' }, 'Your name or handle (optional)'), label, h('div', { class: 'hint' }, 'Signed into the proof, so a copy still says it was you.')),
+      h('details', null, h('summary', { class: 'small muted' }, 'Live check (optional)'), h('div', { class: 'field', style: null }, h('label', { for: 'challenge' }, 'Their code'), ch, h('div', { class: 'hint' }, 'Only if the checker is with you and gave you a code. The proof then answers that one check.'))),
+      h('div', { class: 'callout info' }, icon('info'), h('span', null, 'The proof carries the viewing key of your item account. Whoever checks it can see every item this account has held and when each one moved, and can match it to your shop if you have one. Your ZEC sits in another account and stays private.')),
       err,
     ],
     foot: [
@@ -1155,9 +1160,9 @@ function openProve(it) {
         class: 'btn primary lg',
         onclick: async () => {
           const c = ch.value.trim();
-          if (!c) return (err.textContent = 'Type the challenge the checker gave you.');
+          const l = label.value.trim();
           sh.setTitle('Making the proof');
-          await runInSheet(sh, '/api/prove', { note: it.note, challenge: c }, {
+          await runInSheet(sh, '/api/prove', { note: it.note, challenge: c, label: l }, {
             total: 2,
             success: (r) => {
               const text = JSON.stringify(r.proof, null, 2);
@@ -1173,10 +1178,12 @@ function openProve(it) {
               }
               return {
                 title: 'Proof ready',
-                text: 'Show this code to the checker, or send them the text. It stops working once the item leaves your wallet.',
+                text: c
+                  ? 'Show this code to the checker, or send them the text. It answers their code only.'
+                  : 'Share it, post it, or show the code. Anyone can check it for about the next ' + life + ' minutes.',
                 extra: [qr, box],
                 actions: [
-                  navigator.share ? h('button', { class: 'btn', onclick: () => navigator.share({ text }).catch(() => {}) }, icon('share'), 'Share') : h('button', { class: 'btn', onclick: () => copy(text, 'Proof copied') }, icon('copy'), 'Copy'),
+                  navigator.share ? h('button', { class: 'btn', onclick: () => navigator.share({ text }).catch(() => {}) }, icon('share'), 'Share') : null,
                   h('button', { class: 'btn', onclick: () => copy(text, 'Proof copied') }, icon('copy'), 'Copy'),
                   h('button', { class: 'btn primary', onclick: () => sh.close() }, 'Done'),
                 ],
@@ -1203,14 +1210,20 @@ function download(name, text) {
 
 function openCheckProof() {
   const challenge = newChallenge();
-  const proof = h('textarea', { class: 'input mono proof', id: 'proof', rows: '6', placeholder: '{ "version": 1, ... }', spellcheck: 'false' });
+  const proof = h('textarea', { class: 'input mono proof', id: 'proof', rows: '6', placeholder: '{ "version": 2, ... }', spellcheck: 'false' });
   const err = h('p', { class: 'small err', role: 'alert' });
   const sh = sheet({
     title: 'Check that someone owns an item',
     body: [
-      h('ol', { class: 'small muted plainlist' }, h('li', null, 'Give the holder this challenge.'), h('li', null, 'They make a proof in their wallet and send it to you.'), h('li', null, 'Paste it below.')),
-      h('div', { class: 'summary' }, h('div', { class: 'r' }, h('span', null, 'Challenge'), h('span', { class: 'row nowrap' }, h('b', { class: 'mono' }, challenge), h('button', { class: 'linkbtn', onclick: () => copy(challenge, 'Challenge copied') }, 'Copy')))),
+      h('p', { class: 'small muted' }, 'Paste or scan the proof they shared. It counts if it was made in the last ' + PROOF_MAX_AGE + ' blocks (about ' + minutesFor(PROOF_MAX_AGE) + ' minutes) and the item is still theirs.'),
       h('div', { class: 'field' }, h('label', { for: 'proof' }, 'Their proof'), proof, 'BarcodeDetector' in window ? h('div', { class: 'row', style: null }, h('button', { class: 'btn sm', type: 'button', onclick: () => scanProof(proof) }, icon('camera'), 'Scan their QR code')) : null),
+      h(
+        'details',
+        null,
+        h('summary', { class: 'small muted' }, 'Live check (optional)'),
+        h('p', { class: 'small muted', style: null }, 'If the holder is with you, give them this code before they make the proof. The proof then answers only this check, so it cannot be one made earlier.'),
+        h('div', { class: 'summary' }, h('div', { class: 'r' }, h('span', null, 'Code'), h('span', { class: 'row nowrap' }, h('b', { class: 'mono' }, challenge), h('button', { class: 'linkbtn', onclick: () => copy(challenge, 'Code copied') }, 'Copy')))),
+      ),
       err,
     ],
     foot: [
@@ -1219,20 +1232,40 @@ function openCheckProof() {
         onclick: async () => {
           const text = proof.value.trim();
           if (!text) return (err.textContent = 'Paste the proof, or scan it.');
+          // A proof made for a live check carries a code: it is checked against ours. A shared
+          // proof carries none and is checked without one.
+          let parsed = null;
+          try {
+            parsed = JSON.parse(text);
+          } catch {
+            /* the server says what is wrong */
+          }
+          const body = { proof: text };
+          if (parsed && parsed.challenge) body.challenge = challenge;
           sh.setTitle('Checking the proof');
-          await runInSheet(sh, '/api/check-proof', { proof: text, challenge }, {
+          await runInSheet(sh, '/api/check-proof', body, {
             total: 2,
             doneTitle: 'Proof check',
             success: (r) => {
               const ok = r.valid && r.held;
               const reason = human(r.reason || 'The proof does not hold.');
+              const who = r.label ? r.label : 'Whoever made this proof';
+              const made = r.age_blocks != null ? r.age_blocks + ' block' + (r.age_blocks === 1 ? '' : 's') + ' ago, about ' + minutesFor(Math.max(1, r.age_blocks)) + ' min' : null;
+              const rows = [
+                h('div', { class: 'r' }, h('span', null, 'Item note'), h('span', { class: 'mono' }, short(r.note || '', 8))),
+                r.label ? h('div', { class: 'r' }, h('span', null, 'Signed name'), h('span', null, r.label)) : null,
+                h('div', { class: 'r' }, h('span', null, 'Made after block'), h('span', null, String(r.block_height || '') + (made ? ' (' + made + ')' : ''))),
+                h('div', { class: 'r' }, h('span', null, 'Live check'), h('span', null, r.live ? 'Yes, it answers your code' : 'No, a shared proof')),
+                h('div', { class: 'r' }, h('span', null, 'Signature and block'), h('span', null, r.valid ? 'Match' : 'Do not match')),
+                h('div', { class: 'r' }, h('span', null, 'Item still held'), h('span', null, r.valid ? (r.held ? 'Yes' : 'No') : 'Not checked')),
+              ];
               return {
                 title: ok ? 'They hold it' : 'Not proven',
                 tone: ok ? 'ok' : 'bad',
                 text: ok
-                  ? (r.name ? r.name + ' is' : 'The item is') + ' held right now by whoever made this proof (checked up to block ' + r.scanned_to + ').'
+                  ? who + ' holds ' + (r.name || 'this item') + ' right now (checked up to block ' + r.scanned_to + ').'
                   : reason.charAt(0).toUpperCase() + reason.slice(1),
-                extra: h('div', { class: 'summary' }, h('div', { class: 'r' }, h('span', null, 'Item note'), h('span', { class: 'mono' }, short(r.note || '', 8))), h('div', { class: 'r' }, h('span', null, 'Signature and challenge'), h('span', null, r.valid ? 'Match' : 'Do not match')), h('div', { class: 'r' }, h('span', null, 'Item still held'), h('span', null, r.valid ? (r.held ? 'Yes' : 'No') : 'Not checked'))),
+                extra: h('div', { class: 'summary' }, rows),
               };
             },
             failTitle: 'Could not check',
@@ -1407,7 +1440,7 @@ function viewMarket() {
     h('div', { class: 'card stack' }, h('div', { class: 'field' }, h('label', { for: 'shopurl' }, 'Shop address'), h('div', { class: 'inputwrap' }, input, openBtn)), err, recent.length ? h('div', null, h('div', { class: 'small muted', style: null }, 'Recent shops'), h('div', { class: 'list' }, recent.slice(0, 4).map((s) => h('button', { class: 'li', onclick: () => open(s) }, avatar(s, 'ico'), h('span', { class: 'grow' }, h('div', { class: 'title' }, s.replace(/^https?:\/\//, '')), h('div', { class: 'sub' }, 'Opened before')), icon('chevron'))))) : null),
     S.market ? viewShopFront() : null,
     h('div', { class: 'section-title' }, 'Ownership'),
-    h('div', { class: 'card' }, h('div', { class: 'list' }, h('button', { class: 'li', onclick: openCheckProof }, h('span', { class: 'ico' }, icon('shield')), h('span', { class: 'grow' }, h('div', { class: 'title' }, 'Check who owns an item'), h('div', { class: 'sub' }, 'Their proof shows they hold it now, and the items of that account. Their ZEC and payout address stay hidden.')), icon('chevron')))),
+    h('div', { class: 'card' }, h('div', { class: 'list' }, h('button', { class: 'li', onclick: openCheckProof }, h('span', { class: 'ico' }, icon('shield')), h('span', { class: 'grow' }, h('div', { class: 'title' }, 'Check who owns an item'), h('div', { class: 'sub' }, 'Paste or scan a proof they shared. It shows the item is theirs now; their ZEC and payout address stay hidden.')), icon('chevron')))),
   );
 }
 

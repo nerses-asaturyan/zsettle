@@ -341,9 +341,14 @@ enum Cmd {
         /// item account.
         #[arg(long)]
         item_note: NoteRef,
-        /// The text the checker gave you (1 to 200 characters, no line breaks).
+        /// A code from a checker who wants a live check (1 to 200 characters, no line
+        /// breaks). Leave it out for a shared proof, which anyone can check until it expires.
         #[arg(long)]
-        challenge: String,
+        challenge: Option<String>,
+        /// A name or handle to sign into the proof (at most 80 characters), so a copy still
+        /// says who made it.
+        #[arg(long)]
+        label: Option<String>,
         /// Also write the proof to this file.
         #[arg(long)]
         out: Option<PathBuf>,
@@ -919,11 +924,14 @@ fn main() -> Result<()> {
             identity,
             item_note,
             challenge,
+            label,
             out,
             server,
             no_sync,
         } => {
-            check_challenge(&challenge)?;
+            if let Some(c) = &challenge {
+                check_challenge(c)?;
+            }
             let wallet = Wallet::open(&wallet)?;
             let server = pick_server(server, wallet.network);
             let mut db = wallet.db()?;
@@ -969,13 +977,23 @@ fn main() -> Result<()> {
                 item_account,
                 item_account_index,
             )?;
+            // The proof names the last block this wallet scanned: that block's hash is what
+            // makes the proof fresh, since nobody knows it before the block is mined.
+            let (height, block_hash) = zsettle_core::wallet::scanned_tip(&db)?
+                .ok_or_else(|| anyhow!("the wallet has not scanned any block yet; sync first"))?;
+            if no_sync {
+                eprintln!(
+                    "warning: without a sync the proof names the wallet's last scanned block, which a checker may already find too old"
+                );
+            }
             let mut proof = OwnershipProof::new(
                 wallet.network,
                 &item_fvk,
                 account_birthday(&db, item_account)?,
                 item_note,
-                &challenge,
-                max_scanned_height(&db)?.unwrap_or(0),
+                (height, &block_hash),
+                label.as_deref(),
+                challenge.as_deref(),
             )?;
             proof.sign(&ask)?;
             proof.verify_signature()?;

@@ -28,7 +28,7 @@ Common values:
 | `finish` | Combine with the seller's signed copy, sign, extract, optionally broadcast. |
 | `broadcast` | Send a raw transaction file. |
 | `verify` | Trace an item's history with viewing keys only. |
-| `check-proof` | Check an ownership proof against your challenge and the chain. |
+| `check-proof` | Check an ownership proof against the chain (and your code, for a live check). |
 | `rotate` | Retire the paying notes of offers that did not settle. |
 | `consolidate` | Merge an account's spendable notes into one. |
 | `pay` | Send ZEC to any unified address with an Orchard receiver. |
@@ -125,13 +125,15 @@ Checks a proof made by `zsettle-seller prove`. See [Ownership proofs](../how/own
 | Flag | Default | Meaning |
 |---|---|---|
 | `--proof <path or url>` | required | The proof file, or an `http://` or `https://` URL. At most 16 KiB. |
-| `--challenge <text>` | required | The challenge you gave the holder. |
+| `--challenge <text>` | | For a live check: the code you gave the holder. Without it, a shared proof is checked. |
+| `--max-age <blocks>` | `100` | Oldest proof accepted, in blocks after the block it names. |
 | `--network <main\|test>` | `main` | Network the proof must be for. |
 | `--server <url>` | default server | |
+| `--private` | off | Do not ask the server for the note's transaction; scan from the item account's birthday. |
 
-It prints JSON with `valid`, `held`, `note`, `name`, `challenge`, `signed_at_height`,
-`scanned_to` and, when the check fails, `reason`. The exit status is 0 only when the proof is
-valid and the note is held; otherwise 1.
+It prints JSON with `valid`, `held`, `note`, `name`, `label`, `live`, `block_height`,
+`block_hash`, `age_blocks`, `max_age_blocks`, `scanned_to` and, when the check fails, `reason`.
+The exit status is 0 only when the proof is valid and the note is held; otherwise 1.
 
 ### zsettle rotate
 
@@ -191,7 +193,7 @@ Several commands share the **wallet flags**:
 | `items` | List the item account's unspent notes. |
 | `publish` | Create or update the signed listings file. |
 | `cancel` | Take an item off the market for good. |
-| `prove` | Sign an ownership proof for an item note, bound to a checker's challenge. |
+| `prove` | Sign an ownership proof for an item note, made after a recent block; shareable. |
 | `sign` | Check and sign one trade PCZT. |
 | `serve` | Run the seller service. |
 
@@ -287,7 +289,8 @@ held. It does not need `--payout-account`.
 | `--item-account-index <n>` [`ZSETTLE_ITEM_ACCOUNT_INDEX`] | `1` | Derives the signing key. |
 | `--identity <file>` [`ZSETTLE_IDENTITY`] | | |
 | `--item-note <note>` | required | An unspent, mined note of the item account. |
-| `--challenge <text>` | required | The checker's text: 1 to 200 characters, no line breaks. |
+| `--label <text>` | | A name or handle signed into the proof, at most 80 characters. |
+| `--challenge <text>` | | Only for a live check: the checker's code, 1 to 200 characters, no line breaks. |
 | `--out <file>` | | Also write the proof here. |
 | `--server <url>` | default server | |
 | `--no-sync` | off | Skip the sync first. |

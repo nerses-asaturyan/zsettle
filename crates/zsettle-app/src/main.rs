@@ -2911,17 +2911,21 @@ impl App {
     fn start_prove(self: &Arc<Self>, body: &Value) -> Result<Value> {
         self.require_unlocked()?;
         let note = note_field(body, "note")?;
-        let challenge = field(body, "challenge")?;
-        let n = challenge.chars().count();
-        if n > 200 || challenge.chars().any(char::is_control) {
-            return Err(anyhow!("a challenge is one line of at most 200 characters"));
+        // Both optional: a label signed into the proof, and a checker's code for a live check.
+        let challenge = opt_text(body, "challenge");
+        if let Some(c) = &challenge {
+            zsettle_core::ownership::check_challenge(c)?;
+        }
+        let label = opt_text(body, "label");
+        if let Some(l) = &label {
+            zsettle_core::ownership::check_label(l)?;
         }
         let (_, item) = self.accounts()?;
         Ok(self.job("prove", move |app, id| {
             app.exclusive(|| {
                 app.step(id, "Syncing with the network");
                 app.step(id, "Signing the proof with the item's key");
-                let args = vec![
+                let mut args = vec![
                     "prove".to_string(),
                     "--wallet".into(),
                     app.w(),
@@ -2930,8 +2934,13 @@ impl App {
                     "--item-account-index".into(),
                     "1".into(),
                     format!("--item-note={note}"),
-                    format!("--challenge={challenge}"),
                 ];
+                if let Some(c) = &challenge {
+                    args.push(format!("--challenge={c}"));
+                }
+                if let Some(l) = &label {
+                    args.push(format!("--label={l}"));
+                }
                 let proof = app.run(&app.seller_bin, &args)?;
                 app.add_activity(json!({ "kind": "prove", "text": format!("Made an ownership proof for {}", app.item_names().get(&note).cloned().unwrap_or_else(|| note.clone())) }));
                 Ok(json!({ "proof": proof }))
@@ -2949,8 +2958,11 @@ impl App {
         }
         serde_json::from_str::<Value>(&proof)
             .map_err(|_| anyhow!("that is not an ownership proof"))?;
-        let challenge = field(body, "challenge")?;
-        zsettle_core::ownership::check_challenge(&challenge)?;
+        // A checker's code only for a live check; a shared proof is checked without one.
+        let challenge = opt_text(body, "challenge");
+        if let Some(c) = &challenge {
+            zsettle_core::ownership::check_challenge(c)?;
+        }
         // A check reads the chain from the item's first block: a few a minute per wallet.
         {
             let mut t = self.proof_checks.lock().unwrap();
@@ -2976,14 +2988,16 @@ impl App {
         Ok(self.job("check-proof", move |app, id| {
             // Written here, so a job refused by the limits leaves no file behind.
             zsettle_core::wallet::write_owner_only(&path, proof.as_bytes())?;
-            app.step(id, "Checking the signature and the challenge");
+            app.step(id, "Checking the signature and the block the proof names");
             app.step(id, "Looking on the chain whether the item is still held");
-            let args = vec![
+            let mut args = vec![
                 "check-proof".to_string(),
                 format!("--proof={}", path.display()),
-                format!("--challenge={challenge}"),
                 format!("--network={network}"),
             ];
+            if let Some(c) = &challenge {
+                args.push(format!("--challenge={c}"));
+            }
             let r = app.run_report(&app.buyer_bin, &args);
             let _ = fs::remove_file(&path);
             r

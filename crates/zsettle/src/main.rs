@@ -298,10 +298,13 @@ enum Cmd {
         /// The proof: a file path or an http(s) URL. At most 16 KiB.
         #[arg(long)]
         proof: String,
-        /// The challenge you gave the holder. Pick a fresh one each time, or an old proof can
-        /// be shown to you again.
+        /// For a live check: the code you gave the holder before they made the proof. Without
+        /// it any proof recent enough is accepted, the way a shared proof is meant to be.
         #[arg(long)]
-        challenge: String,
+        challenge: Option<String>,
+        /// Oldest proof accepted, in blocks after the block it names.
+        #[arg(long, default_value_t = zsettle_core::ownership::DEFAULT_MAX_AGE_BLOCKS)]
+        max_age: u32,
         /// Network the proof must be for (`main` or `test`).
         #[arg(long, default_value = "main")]
         network: String,
@@ -1376,6 +1379,7 @@ fn main() -> Result<()> {
         Cmd::CheckProof {
             proof,
             challenge,
+            max_age,
             network,
             server,
             private,
@@ -1383,7 +1387,7 @@ fn main() -> Result<()> {
             let network = parse_network(&network)?;
             let server = pick_server(server, network);
             let p = OwnershipProof::parse(&read_proof(&proof)?)?;
-            let report = check_proof(&p, &challenge, network, &server, private)?;
+            let report = check_proof(&p, challenge.as_deref(), network, &server, private, max_age)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             if !(report.valid && report.held) {
                 std::process::exit(1);
@@ -1400,8 +1404,16 @@ struct ProofReport {
     held: bool,
     note: String,
     name: Option<String>,
-    challenge: String,
-    signed_at_height: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    challenge: Option<String>,
+    /// The proof answered the checker's own code.
+    live: bool,
+    block_height: u32,
+    block_hash: String,
+    age_blocks: Option<u32>,
+    max_age_blocks: u32,
     scanned_to: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
@@ -1412,34 +1424,80 @@ struct ProofReport {
 /// could not be made.
 fn check_proof(
     p: &OwnershipProof,
-    challenge: &str,
+    challenge: Option<&str>,
     network: Network,
     server: &str,
     private: bool,
+    max_age: u32,
 ) -> Result<ProofReport> {
-    // The checker's challenge is bounded like the holder's: it goes onto a command line.
-    zsettle_core::ownership::check_challenge(challenge)?;
+    // The checker's code is bounded like the holder's: it goes onto a command line.
+    if let Some(c) = challenge {
+        zsettle_core::ownership::check_challenge(c)?;
+    }
     let mut report = ProofReport {
         valid: false,
         held: false,
         note: p.note.clone(),
         name: None,
+        label: p.label.clone(),
         challenge: p.challenge.clone(),
-        signed_at_height: p.height,
+        live: false,
+        block_height: p.height,
+        block_hash: p.block_hash.clone(),
+        age_blocks: None,
+        max_age_blocks: max_age,
         scanned_to: None,
         reason: None,
     };
     let refused = if let Err(e) = p.verify_signature() {
         Some(format!("{e:#}"))
-    } else if p.challenge != challenge {
-        Some("the proof answers another challenge; it may be an old proof shown again".into())
     } else if p.network()? != network {
         Some(format!("the proof is for the {} network", p.network))
     } else {
-        None
+        match (challenge, p.challenge.as_deref()) {
+            (Some(want), Some(got)) if want == got => None,
+            (Some(_), Some(_)) => {
+                Some("the proof answers another code; it was made for a different check".into())
+            }
+            (Some(_), None) => Some(
+                "you asked for a live check, but the proof carries no code: it is a shared proof"
+                    .into(),
+            ),
+            (None, _) => None,
+        }
     };
     if let Some(reason) = refused {
         report.reason = Some(reason);
+        return Ok(report);
+    }
+    report.live = challenge.is_some();
+    // The block the proof names must be on this chain with that hash, and recent. Nobody
+    // knows a block's hash before it is mined, so the proof was made after that block.
+    let (tip, hash) = zsettle_core::broadcast::block_hash_at_blocking(server, p.height)
+        .context("reading the proof's block from the server")?;
+    match hash {
+        None => {
+            report.reason = Some(format!(
+                "the proof names block {}, which the server does not have yet (its tip is {tip}); try again in a minute",
+                p.height
+            ));
+            return Ok(report);
+        }
+        Some(h) if h != p.block_hash => {
+            report.reason = Some(format!(
+                "block {} on this chain has another hash: the proof names a block that is not on this chain (another chain, a reorganised block, or an altered proof)",
+                p.height
+            ));
+            return Ok(report);
+        }
+        Some(_) => {}
+    }
+    let age = tip.saturating_sub(p.height);
+    report.age_blocks = Some(age);
+    if age > max_age {
+        report.reason = Some(format!(
+            "the proof was made {age} blocks ago; this check accepts proofs up to {max_age} blocks old, so ask for a fresh one"
+        ));
         return Ok(report);
     }
     report.valid = true;
