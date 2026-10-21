@@ -9,7 +9,8 @@ use tonic::body::Body;
 use tonic::codegen::{http, BoxFuture, Service};
 use tonic::transport::{Channel, ClientTlsConfig};
 use zcash_client_backend::proto::service::{
-    compact_tx_streamer_client::CompactTxStreamerClient, BlockId, Empty, RawTransaction, TreeState,
+    compact_tx_streamer_client::CompactTxStreamerClient, BlockId, ChainSpec, Empty, RawTransaction,
+    TreeState,
 };
 use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
 
@@ -141,6 +142,37 @@ pub async fn fetch_tree_state(server: &str, height: u32) -> Result<TreeState> {
 /// Blocking wrapper around [`fetch_tree_state`].
 pub fn fetch_tree_state_blocking(server: &str, height: u32) -> Result<TreeState> {
     runtime()?.block_on(fetch_tree_state(server, height))
+}
+
+/// The server's chain tip, and the hash of the block at `height` as block explorers show it
+/// (`None` when the server does not have that block yet).
+pub async fn block_hash_at(server: &str, height: u32) -> Result<(u32, Option<String>)> {
+    let mut client = connect(server).await?;
+    let tip = client
+        .get_latest_block(ChainSpec {})
+        .await
+        .map_err(|e| anyhow!("get_latest_block: {e}"))?
+        .into_inner();
+    let tip = u32::try_from(tip.height).map_err(|_| anyhow!("height out of range"))?;
+    if height > tip {
+        return Ok((tip, None));
+    }
+    let block = client
+        .get_block(BlockId {
+            height: u64::from(height),
+            hash: vec![],
+        })
+        .await
+        .map_err(|e| anyhow!("get_block({height}): {e}"))?
+        .into_inner();
+    let hash = zcash_primitives::block::BlockHash::try_from_slice(&block.hash)
+        .ok_or_else(|| anyhow!("the server sent a malformed hash for block {height}"))?;
+    Ok((tip, Some(hash.to_string())))
+}
+
+/// Blocking wrapper around [`block_hash_at`].
+pub fn block_hash_at_blocking(server: &str, height: u32) -> Result<(u32, Option<String>)> {
+    runtime()?.block_on(block_hash_at(server, height))
 }
 
 /// What a lightwalletd server reports about its chain.

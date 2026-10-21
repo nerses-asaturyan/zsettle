@@ -15,9 +15,10 @@ What you can do there:
 - **Open your own shop.** Mint items, set prices, and open the shop. Other visitors reach it at
   `https://<demo domain>/shop/<your wallet code>`.
 - **See an item's history**, traced from the chain with viewing keys.
-- **Prove you own an item**, or check that someone else does: the checker gives a challenge,
-  the holder makes a proof in the wallet, and the checker pastes it in the market's Ownership
-  card. See [Ownership proofs](../how/ownership.md).
+- **Prove you own an item**, or check that someone else does: the holder makes a proof in the
+  wallet and shares it (text, QR code or the Share button), and anyone pastes or scans it in the
+  market's Ownership card. No code needs to go back and forth; a live check with a code is
+  optional. See [Ownership proofs](../how/ownership.md).
 - **Describe what you sell.** When you list an item, add a short description and pick an icon.
 - **Add it to your phone's home screen.** The page has a web app manifest, so a phone browser
   can install it and open it like an app.

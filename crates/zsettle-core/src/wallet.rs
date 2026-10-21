@@ -360,6 +360,15 @@ pub fn max_scanned_height(db: &Db) -> Result<Option<u32>> {
         .map(|m| u32::from(m.block_height())))
 }
 
+/// The last block the wallet scanned: its height and its hash as block explorers show it. An
+/// ownership proof names this block, so it was provably made after the block was mined.
+pub fn scanned_tip(db: &Db) -> Result<Option<(u32, String)>> {
+    Ok(db
+        .block_max_scanned()
+        .map_err(|e| anyhow!("{e}"))?
+        .map(|m| (u32::from(m.block_height()), m.block_hash().to_string())))
+}
+
 /// Ironwood tree roots at the wallet's checkpoints for the last `depth` scanned blocks: the
 /// anchors a trade may legitimately use. An envelope whose anchor is not among them was
 /// proven against a tree the chain does not have.
