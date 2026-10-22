@@ -61,9 +61,11 @@ function human(msg) {
   if (/would be dust/i.test(m)) return 'This would leave too little change to ever spend. Pick a cheaper item, or add coins first.';
   if (/the shop refused the offer: (.*)/i.test(m)) return 'The shop refused the offer: ' + m.match(/refused the offer: (.*)/i)[1];
   if (/too many requests/i.test(m)) return 'The server is busy. Wait a minute and try again.';
+  if (/pays Orchard receivers only|address: /i.test(m)) return 'This wallet cannot pay that address. Use a unified address of this network: u1… on mainnet, utest1… on the testnet.';
   if (/not a valid recovery phrase/i.test(m)) return 'That is not a valid recovery phrase. Check the words and their order: it has 24 words (12 for some other wallets).';
   if (/is busy|try again in a moment/i.test(m)) return 'The server is busy. Try again in a moment.';
-  return m.charAt(0).toUpperCase() + m.slice(1);
+  const t = m.charAt(0).toUpperCase() + m.slice(1);
+  return /[.!?)]$/.test(t) ? t : t + '.';
 }
 
 // ------------------------------------------------------------ sheets

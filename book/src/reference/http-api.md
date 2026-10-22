@@ -67,6 +67,7 @@ The relay passes public chain data from the server's light server, for either ne
 | `GET /api/chain/blocks?net=&start=&end=` | Compact blocks `start..=end` (at most 500 blocks and 16 MB), each length-delimited. |
 | `GET /api/chain/tree-state?net=&height=` | The tree state after `height`, an encoded `TreeState`. |
 | `GET /api/chain/subtree-roots?net=&pool=&start=&max=` | Subtree roots of `sapling`, `orchard` or `ironwood` (at most 10,000), each length-delimited. |
+| `GET /api/chain/raw-tx?net=&txid=` | A mined transaction: its height (4 bytes, little-endian) and then its raw bytes. |
 | `GET /api/chain/tx?net=&txid=` | `{ height }` as JSON: the block the transaction is in, or `null`. |
 | `GET /api/chain/info?net=` | `{ chain_name, consensus_branch_id, block_height }` as JSON. |
 | `POST /api/chain/send?net=` | Sends the raw transaction in the body (needs `X-Zsettle: 1`); the server's message as text. |

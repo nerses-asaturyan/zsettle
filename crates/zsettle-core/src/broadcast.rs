@@ -490,6 +490,38 @@ pub mod relay {
         })
     }
 
+    /// A mined transaction's raw bytes and height; `None` while it is unmined or unknown.
+    pub fn raw_tx(server: &str, txid: &TxId) -> Result<Option<(Vec<u8>, u32)>> {
+        let hash = txid.as_ref().to_vec();
+        call(server, |mut c| {
+            let hash = hash.clone();
+            async move {
+                match c
+                    .get_transaction(TxFilter {
+                        block: None,
+                        index: 0,
+                        hash,
+                    })
+                    .await
+                {
+                    Ok(r) => {
+                        let r = r.into_inner();
+                        Ok(u32::try_from(r.height)
+                            .ok()
+                            .filter(|h| *h > 0)
+                            .map(|h| (r.data, h)))
+                    }
+                    Err(s)
+                        if s.code() == tonic::Code::NotFound || s.message().contains("No such") =>
+                    {
+                        Ok(None)
+                    }
+                    Err(s) => Err(anyhow!("get_transaction: {s}")),
+                }
+            }
+        })
+    }
+
     /// The height a transaction was mined at; `None` while it is unmined or unknown.
     pub fn tx_height(server: &str, txid: &TxId) -> Result<Option<u32>> {
         let hash = txid.as_ref().to_vec();

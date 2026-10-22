@@ -42,8 +42,8 @@ use zsettle_core::{
     wallet::{
         account_birthday, account_orchard_fvk, find_account_by_ufvk, heights,
         import_viewing_key_at, largest_spendable_note, list_accounts, max_scanned_height,
-        parse_account, record_transaction, reserve_note, reserved_notes, reservations,
-        release_note, scanned_tip, MemBlockCache, NoteRef, Wallet, WalletAccount,
+        parse_account, record_transaction, release_note, reservations, reserve_note,
+        reserved_notes, scanned_tip, MemBlockCache, NoteRef, Wallet, WalletAccount,
         BIRTHDAY_ROUNDING,
     },
 };
@@ -226,6 +226,16 @@ impl Relay {
         Ok(out)
     }
 
+    /// A mined transaction: its height and raw bytes.
+    async fn raw_tx(&self, txid: &zcash_protocol::TxId) -> Result<(u32, Vec<u8>)> {
+        let b = fetch_ok(&self.url("raw-tx", &format!("&txid={txid}")), None).await?;
+        if b.len() < 4 {
+            return Err(anyhow!("the relay sent a short answer"));
+        }
+        let height = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+        Ok((height, b[4..].to_vec()))
+    }
+
     /// The height a transaction was mined at, if it was.
     async fn tx_height(&self, txid: &zcash_protocol::TxId) -> Result<Option<u32>> {
         let b = fetch_ok(&self.url("tx", &format!("&txid={txid}")), None).await?;
@@ -274,6 +284,8 @@ pub struct WebWallet {
     _keep: rusqlite::Connection,
     relay: Relay,
     cache: MemBlockCache,
+    /// Transactions already fetched for their memos this session.
+    memo_tried: std::collections::HashSet<zcash_protocol::TxId>,
 }
 
 fn progress(cb: &Option<js_sys::Function>, v: Value) {
@@ -333,11 +345,17 @@ impl WebWallet {
             _keep: keep,
             relay,
             cache: MemBlockCache::default(),
+            memo_tried: Default::default(),
         })
     }
 
     /// Open a wallet from the database bytes [`WebWallet::save`] gave.
-    pub fn open(name: String, network: String, birthday: u32, bytes: &[u8]) -> Result<WebWallet, JsError> {
+    pub fn open(
+        name: String,
+        network: String,
+        birthday: u32,
+        bytes: &[u8],
+    ) -> Result<WebWallet, JsError> {
         (|| {
             let network = network_of(&network)?;
             let wallet = Wallet::in_memory(&name, network, birthday);
@@ -352,6 +370,7 @@ impl WebWallet {
                     net: network_name(network),
                 },
                 cache: MemBlockCache::default(),
+                memo_tried: Default::default(),
             })
         })()
         .map_err(js)
@@ -369,7 +388,10 @@ impl WebWallet {
 
     /// Bring the wallet up to date with the chain. `on_progress` gets
     /// `{ scanned, tip }` after each step.
-    pub async fn sync(&mut self, on_progress: Option<js_sys::Function>) -> Result<JsValue, JsError> {
+    pub async fn sync(
+        &mut self,
+        on_progress: Option<js_sys::Function>,
+    ) -> Result<JsValue, JsError> {
         let r = self.sync_inner(&on_progress).await.map_err(js)?;
         Ok(js_sys::JSON::parse(&r.to_string()).unwrap_or(JsValue::NULL))
     }
@@ -378,7 +400,9 @@ impl WebWallet {
         let mut db = self.wallet.db()?;
         // Without an account the wallet would ask for the whole chain from its first block.
         if list_accounts(&db)?.is_empty() {
-            return Err(anyhow!("the wallet has no accounts; restore it from its recovery phrase"));
+            return Err(anyhow!(
+                "the wallet has no accounts; restore it from its recovery phrase"
+            ));
         }
         // The subtree roots let the wallet skip to the parts of the trees its notes are in.
         let sapling = self.relay.roots::<sapling_crypto::Node>("sapling").await?;
@@ -446,7 +470,10 @@ impl WebWallet {
             .chain_height()
             .map_err(|e| anyhow!("{e}"))?
             .map(u32::from);
-        Ok(json!({ "chain_tip": tip, "scanned_to": max_scanned_height(&db)? }))
+        drop(db);
+        // Not worth failing a sync for: names come back on a later one.
+        let _ = self.fill_item_memos().await;
+        Ok(json!({ "chain_tip": tip, "scanned_to": max_scanned_height(&self.wallet.db()?)? }))
     }
 
     /// Download and scan one range. Returns whether the suggested ranges changed, so the
@@ -486,6 +513,45 @@ impl WebWallet {
             }
             Err(e) => Err(anyhow!("scanning blocks {start}..={end}: {e}")),
         }
+    }
+
+    /// Compact blocks carry no memos, so a restored wallet knows its items but not their
+    /// names. For each item note with neither a memo nor a name from its shop, fetch the
+    /// whole transaction and decrypt it with the wallet's own keys. Only item notes are
+    /// looked up; the shop that sold them, on this server, already knows those transactions.
+    async fn fill_item_memos(&mut self) -> Result<()> {
+        let missing: Vec<NoteRef> = {
+            let db = self.wallet.db()?;
+            let item = self.account(&db, ITEM_ACCOUNT.0)?;
+            let meta = self.item_meta()?;
+            mint::unspent_notes(&self.wallet, &db, item)?
+                .into_iter()
+                .filter(|n| n.mined_height.is_some() && n.memo.is_none())
+                .filter(|n| !meta.contains_key(&n.note.to_string()))
+                .filter(|n| !self.memo_tried.contains(&n.note.txid))
+                .map(|n| n.note)
+                .take(10)
+                .collect()
+        };
+        for note in missing {
+            self.memo_tried.insert(note.txid);
+            let (height, bytes) = self.relay.raw_tx(&note.txid).await?;
+            let branch = BranchId::for_height(&self.wallet.network, BlockHeight::from(height));
+            let tx = zcash_primitives::transaction::Transaction::read(&bytes[..], branch)
+                .context("the relay sent a malformed transaction")?;
+            if tx.txid() != note.txid {
+                return Err(anyhow!("the relay sent another transaction"));
+            }
+            let mut db = self.wallet.db()?;
+            zcash_client_backend::data_api::wallet::decrypt_and_store_transaction(
+                &self.wallet.network,
+                &mut db,
+                &tx,
+                Some(BlockHeight::from(height)),
+            )
+            .map_err(|e| anyhow!("{e}"))?;
+        }
+        Ok(())
     }
 
     fn account(&self, db: &zsettle_core::wallet::Db, name: &str) -> Result<WalletAccount> {
@@ -574,7 +640,8 @@ impl WebWallet {
 
     fn item_meta(&self) -> Result<std::collections::HashMap<String, Value>> {
         let conn = self.wallet.connection(false)?;
-        conn.execute(ITEM_META_TABLE, []).map_err(|e| anyhow!("{e}"))?;
+        conn.execute(ITEM_META_TABLE, [])
+            .map_err(|e| anyhow!("{e}"))?;
         let mut stmt = conn
             .prepare("SELECT note, meta FROM zsettle_item_meta")
             .map_err(|e| anyhow!("{e}"))?;
@@ -590,7 +657,8 @@ impl WebWallet {
 
     fn set_item_meta(&self, note: &str, meta: &Value) -> Result<()> {
         let conn = self.wallet.connection(false)?;
-        conn.execute(ITEM_META_TABLE, []).map_err(|e| anyhow!("{e}"))?;
+        conn.execute(ITEM_META_TABLE, [])
+            .map_err(|e| anyhow!("{e}"))?;
         conn.execute(
             "INSERT OR REPLACE INTO zsettle_item_meta (note, meta) VALUES (?1, ?2)",
             rusqlite::params![note, meta.to_string()],
@@ -626,7 +694,9 @@ impl WebWallet {
         let mut db = self.wallet.db()?;
         let from = self.account(&db, PAY_ACCOUNT.0)?;
         let next = max_scanned_height(&db)?.unwrap_or(0) + 1;
-        self.relay.check_consensus(self.wallet.network, next).await?;
+        self.relay
+            .check_consensus(self.wallet.network, next)
+            .await?;
         let (bytes, txid) = mint::pay(
             &self.wallet,
             &mut db,
@@ -661,7 +731,14 @@ impl WebWallet {
         on_progress: Option<js_sys::Function>,
     ) -> Result<JsValue, JsError> {
         let r = self
-            .buy_inner(&mnemonic, &shop, &item_note, price_zat, &payout, &on_progress)
+            .buy_inner(
+                &mnemonic,
+                &shop,
+                &item_note,
+                price_zat,
+                &payout,
+                &on_progress,
+            )
             .await
             .map_err(js)?;
         Ok(js_sys::JSON::parse(&r.to_string()).unwrap_or(JsValue::NULL))
@@ -671,8 +748,10 @@ impl WebWallet {
     /// items and buying does not wait for that scan. Returns the shop's checked listings.
     pub async fn prepare_shop(&mut self, shop: String) -> Result<JsValue, JsError> {
         let (listings, _) = self.shop_key(&shop, &None).await.map_err(js)?;
-        Ok(js_sys::JSON::parse(&serde_json::to_string(&listings).unwrap_or_default())
-            .unwrap_or(JsValue::NULL))
+        Ok(
+            js_sys::JSON::parse(&serde_json::to_string(&listings).unwrap_or_default())
+                .unwrap_or(JsValue::NULL),
+        )
     }
 
     /// The shop's listings, checked, and the wallet account holding its item key (imported
@@ -802,13 +881,16 @@ impl WebWallet {
         }
 
         progress(cb, json!({ "step": "offer" }));
-        let answer: Value = serde_json::from_slice(&fetch_ok(&format!("{shop}/offer"), Some(&envelope)).await?)
-            .context("the shop's answer")?;
+        let answer: Value =
+            serde_json::from_slice(&fetch_ok(&format!("{shop}/offer"), Some(&envelope)).await?)
+                .context("the shop's answer")?;
         let tag = answer["tag"]
             .as_str()
             .ok_or_else(|| anyhow!("the shop's answer names no tag"))?;
         if tag != pczt_ops::envelope_tag(&envelope) {
-            return Err(anyhow!("the shop tagged the offer differently; it did not receive it as sent"));
+            return Err(anyhow!(
+                "the shop tagged the offer differently; it did not receive it as sent"
+            ));
         }
         progress(cb, json!({ "step": "wait" }));
         let started = js_sys::Date::now();
@@ -826,7 +908,9 @@ impl WebWallet {
                 s => return Err(anyhow!("unexpected answer {s} from the shop")),
             }
             if js_sys::Date::now() - started > REPLY_WAIT_SECS * 1000.0 {
-                return Err(anyhow!("the shop did not sign in time; the offer expires by itself"));
+                return Err(anyhow!(
+                    "the shop did not sign in time; the offer expires by itself"
+                ));
             }
             sleep_ms(3000).await;
         };
@@ -891,7 +975,9 @@ impl WebWallet {
                 .find(|n| n.note == note)
                 .ok_or_else(|| anyhow!("this wallet does not hold that item"))?;
             if held.mined_height.is_none() {
-                return Err(anyhow!("the item is not in a block yet; wait for one and try again"));
+                return Err(anyhow!(
+                    "the item is not in a block yet; wait for one and try again"
+                ));
             }
             let seed = seed_of(&mnemonic)?;
             let usk = self.wallet.spending_key(&seed, ITEM_ACCOUNT.1)?;
@@ -899,8 +985,8 @@ impl WebWallet {
             if orchard::keys::FullViewingKey::from(usk.orchard()) != fvk {
                 return Err(anyhow!("the recovery phrase is not this wallet's"));
             }
-            let (height, hash) = scanned_tip(&db)?
-                .ok_or_else(|| anyhow!("sync the wallet first"))?;
+            let (height, hash) =
+                scanned_tip(&db)?.ok_or_else(|| anyhow!("sync the wallet first"))?;
             let mut proof = OwnershipProof::new(
                 self.wallet.network,
                 &fvk,
@@ -923,7 +1009,9 @@ impl WebWallet {
             let db = self.wallet.db()?;
             let account = self.account(&db, PAY_ACCOUNT.0)?;
             let usk = self.wallet.spending_key(&seed, PAY_ACCOUNT.1)?;
-            if orchard::keys::FullViewingKey::from(usk.orchard()) != account_orchard_fvk(&db, account)? {
+            if orchard::keys::FullViewingKey::from(usk.orchard())
+                != account_orchard_fvk(&db, account)?
+            {
                 return Err(anyhow!("the recovery phrase is not this wallet's"));
             }
             Ok(())

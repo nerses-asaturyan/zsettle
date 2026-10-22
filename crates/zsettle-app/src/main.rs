@@ -1120,6 +1120,18 @@ fn public_route(
                     num("max")?,
                 )?,
             ),
+            ("GET", "raw-tx") => {
+                let txid =
+                    zsettle_core::wallet::parse_txid(q.get("txid").copied().unwrap_or_default())?;
+                match relay::raw_tx(&server, &txid)? {
+                    Some((bytes, height)) => {
+                        let mut out = height.to_le_bytes().to_vec();
+                        out.extend_from_slice(&bytes);
+                        (bin, out)
+                    }
+                    None => return Err(anyhow!("the transaction is not in a block")),
+                }
+            }
             ("GET", "tx") => {
                 let txid =
                     zsettle_core::wallet::parse_txid(q.get("txid").copied().unwrap_or_default())?;

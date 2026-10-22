@@ -58,6 +58,8 @@ site that is not on the home screen), so keep the 24 words.
   to a minute or two.
 - On the testnet, **Receive** offers free test coins from the server's faucet, once per
   address.
+- After a restore, item names come back with the next sync: the wallet fetches each item
+  note's transaction and reads its memo with its own key. The activity list starts empty.
 - **Prove** makes an ownership proof of an item you hold, as `zsettle-seller prove` does.
   Anyone can check it with `zsettle check-proof` or the app.
 - **Show recovery phrase** and **Remove from this browser** are under *This wallet*.
