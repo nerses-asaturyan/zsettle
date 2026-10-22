@@ -22,9 +22,9 @@ use zsettle_core::{
     policy::{check, check_public, prepared_ivk, PolicyError, SellerPolicy},
     trade::{build_transfer, Output},
     wallet::{
-        account_birthday, account_orchard_fvk, account_unspent_nullifiers, heights,
-        ironwood_note, largest_spendable_note, max_scanned_height, next_orchard_address,
-        record_transaction, recent_ironwood_anchors, Db, NoteRef,
+        account_birthday, account_orchard_fvk, account_unspent_nullifiers, heights, ironwood_note,
+        largest_spendable_note, max_scanned_height, next_orchard_address, recent_ironwood_anchors,
+        record_transaction, Db, NoteRef,
     },
     DEFAULT_MAX_EXPIRY_DELTA, MIN_PRICE_ZAT, ZIP317_MARGINAL_FEE,
 };
@@ -76,7 +76,9 @@ fn listed_payout(l: &Listings, network: Network) -> Result<orchard::Address> {
         Some(Address::Unified(ua)) => ua.orchard().copied(),
         _ => None,
     }
-    .ok_or_else(|| anyhow!("the listings payout address is not a unified address with an Orchard receiver"))
+    .ok_or_else(|| {
+        anyhow!("the listings payout address is not a unified address with an Orchard receiver")
+    })
 }
 
 #[wasm_bindgen]
@@ -89,17 +91,25 @@ impl WebWallet {
     }
 
     async fn mint_inner(&mut self, mnemonic: &str, names: Vec<String>) -> Result<Value> {
-        let names: Vec<String> = names.into_iter().map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect();
+        let names: Vec<String> = names
+            .into_iter()
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty())
+            .collect();
         if names.is_empty() || names.len() > 20 {
             return Err(anyhow!("give between one and twenty item names"));
         }
         if names.iter().any(|n| n.chars().count() > MAX_NAME_CHARS) {
-            return Err(anyhow!("an item name has at most {MAX_NAME_CHARS} characters"));
+            return Err(anyhow!(
+                "an item name has at most {MAX_NAME_CHARS} characters"
+            ));
         }
         let seed = seed_of(mnemonic)?;
         let mut db = self.wallet.db()?;
         let next = max_scanned_height(&db)?.unwrap_or(0) + 1;
-        self.relay.check_consensus(self.wallet.network, next).await?;
+        self.relay
+            .check_consensus(self.wallet.network, next)
+            .await?;
         let req = MintRequest {
             from_account: self.account(&db, PAY_ACCOUNT.0)?,
             from_account_index: PAY_ACCOUNT.1,
@@ -171,7 +181,12 @@ impl WebWallet {
     }
 
     /// Remove an item from the signed listings; returns them signed again.
-    pub fn delist(&self, mnemonic: String, listings: String, note: String) -> Result<String, JsError> {
+    pub fn delist(
+        &self,
+        mnemonic: String,
+        listings: String,
+        note: String,
+    ) -> Result<String, JsError> {
         (|| {
             let db = self.wallet.db()?;
             let (ask, item_fvk) = self.item_keys(&db, &mnemonic)?;
@@ -220,12 +235,22 @@ impl WebWallet {
         let Some(&(pay_value, pay_note)) = fitting.iter().min_by_key(|(v, _)| *v) else {
             return Err(anyhow!("no note can pay the {fee} zat fee yet"));
         };
-        let mut outputs = vec![Output { account: item_account, value: item_value, internal: false }];
+        let mut outputs = vec![Output {
+            account: item_account,
+            value: item_value,
+            internal: false,
+        }];
         if pay_value > fee {
-            outputs.push(Output { account: pay_account, value: pay_value - fee, internal: true });
+            outputs.push(Output {
+                account: pay_account,
+                value: pay_value - fee,
+                internal: true,
+            });
         }
         let next = max_scanned_height(&db)?.unwrap_or(0) + 1;
-        self.relay.check_consensus(self.wallet.network, next).await?;
+        self.relay
+            .check_consensus(self.wallet.network, next)
+            .await?;
         let built = build_transfer(
             &mut db,
             self.wallet.network,
@@ -235,9 +260,12 @@ impl WebWallet {
             true,
         )?;
         let (pczt, n1) = pczt_ops::sign_matching_actions(built.pczt, &item_ask)?;
-        let (pczt, n2) = pczt_ops::sign_matching_actions(pczt, &SpendAuthorizingKey::from(usk_pay.orchard()))?;
+        let (pczt, n2) =
+            pczt_ops::sign_matching_actions(pczt, &SpendAuthorizingKey::from(usk_pay.orchard()))?;
         if n1 != 1 || n2 != 1 {
-            return Err(anyhow!("expected one signature per account, got {n1} and {n2}"));
+            return Err(anyhow!(
+                "expected one signature per account, got {n1} and {n2}"
+            ));
         }
         let tx = pczt_ops::extract(pczt)?;
         let bytes = pczt_ops::tx_bytes(&tx)?;
@@ -269,7 +297,11 @@ impl WebWallet {
 
     /// Sign a mailbox request with the open shop's item key (hex).
     pub fn shop_auth(&self, message: String) -> Result<String, JsError> {
-        let ask = self.shop.ask.as_ref().ok_or_else(|| JsError::new("the shop is closed"))?;
+        let ask = self
+            .shop
+            .ask
+            .as_ref()
+            .ok_or_else(|| JsError::new("the shop is closed"))?;
         Ok(Listings::sign_mailbox(ask, message.as_bytes()))
     }
 
@@ -305,7 +337,9 @@ impl WebWallet {
     /// name, paid_zat }`, `{ state: "rejected", reason }` or `{ state: "deferred", reason }`.
     pub fn shop_sign(&mut self, envelope: &[u8], listings: String) -> Result<JsValue, JsError> {
         let v = match self.shop_sign_inner(envelope, &listings) {
-            Ok((item, paid, bytes)) => json!({ "state": "signed", "reply": hex::encode(bytes), "name": item.name, "paid_zat": paid }),
+            Ok((item, paid, bytes)) => {
+                json!({ "state": "signed", "reply": hex::encode(bytes), "name": item.name, "paid_zat": paid })
+            }
             Err(Judged::Reject(reason)) => json!({ "state": "rejected", "reason": reason }),
             Err(Judged::Defer(reason)) => json!({ "state": "deferred", "reason": reason }),
         };
@@ -322,46 +356,77 @@ enum Judged {
 }
 
 impl WebWallet {
-    fn shop_sign_inner(&mut self, bytes: &[u8], listings: &str) -> std::result::Result<(ListedItem, u64, Vec<u8>), Judged> {
+    fn shop_sign_inner(
+        &mut self,
+        bytes: &[u8],
+        listings: &str,
+    ) -> std::result::Result<(ListedItem, u64, Vec<u8>), Judged> {
         let internal = |e: anyhow::Error| Judged::Defer(format!("error: {e:#}"));
-        let ask = self.shop.ask.clone().ok_or_else(|| Judged::Defer("the shop is closed".into()))?;
+        let ask = self
+            .shop
+            .ask
+            .clone()
+            .ok_or_else(|| Judged::Defer("the shop is closed".into()))?;
         if bytes.len() as u64 > zsettle_core::MAX_ENVELOPE_BYTES {
             return Err(Judged::Reject(format!("too large: {} bytes", bytes.len())));
         }
         let l = Listings::parse(listings, "your listings").map_err(internal)?;
-        let pczt = pczt_ops::from_bytes(bytes).map_err(|e| Judged::Reject(format!("unreadable: {e:#}")))?;
-        let actions = pczt_ops::action_count(&pczt).map_err(|e| Judged::Reject(format!("unreadable: {e:#}")))?;
+        let pczt = pczt_ops::from_bytes(bytes)
+            .map_err(|e| Judged::Reject(format!("unreadable: {e:#}")))?;
+        let actions = pczt_ops::action_count(&pczt)
+            .map_err(|e| Judged::Reject(format!("unreadable: {e:#}")))?;
         if actions > MAX_TRADE_ACTIONS {
-            return Err(Judged::Reject(format!("refused: {actions} actions; a trade has two or three")));
+            return Err(Judged::Reject(format!(
+                "refused: {actions} actions; a trade has two or three"
+            )));
         }
         let expiry = *pczt.global().expiry_height();
         let mut db = self.wallet.db().map_err(internal)?;
         let anchors = recent_ironwood_anchors(&mut db, ANCHOR_DEPTH).map_err(internal)?;
         // Stage one: public data only.
-        let outcome = self.process(&db, &l, &pczt, &anchors, false).map_err(internal)?;
-        let horizon = zsettle_core::reference_blocks(&self.wallet.network, outcome.tip + 1, DEFAULT_MAX_EXPIRY_DELTA)
-            .saturating_add(1 + LAG_SLACK);
-        if outcome.item.is_none() && outcome.unavailable > 0 && expiry > outcome.tip && expiry <= outcome.tip.saturating_add(horizon) {
-            return Err(Judged::Defer("spends no listed item this wallet can spend yet".into()));
+        let outcome = self
+            .process(&db, &l, &pczt, &anchors, false)
+            .map_err(internal)?;
+        let horizon = zsettle_core::reference_blocks(
+            &self.wallet.network,
+            outcome.tip + 1,
+            DEFAULT_MAX_EXPIRY_DELTA,
+        )
+        .saturating_add(1 + LAG_SLACK);
+        if outcome.item.is_none()
+            && outcome.unavailable > 0
+            && expiry > outcome.tip
+            && expiry <= outcome.tip.saturating_add(horizon)
+        {
+            return Err(Judged::Defer(
+                "spends no listed item this wallet can spend yet".into(),
+            ));
         }
         match outcome.result {
             Ok(_) => {}
             Err(PolicyError::UnknownAnchor) if expiry > outcome.tip => {
                 return Err(Judged::Defer("anchor not known to this wallet yet".into()))
             }
-            Err(PolicyError::ExpiryTooLong { expiry: e, tip, max_delta })
-                if e <= tip.saturating_add(max_delta).saturating_add(1 + LAG_SLACK) =>
-            {
-                return Err(Judged::Defer("expiry past the limit; the buyer may be ahead of this wallet".into()))
+            Err(PolicyError::ExpiryTooLong {
+                expiry: e,
+                tip,
+                max_delta,
+            }) if e <= tip.saturating_add(max_delta).saturating_add(1 + LAG_SLACK) => {
+                return Err(Judged::Defer(
+                    "expiry past the limit; the buyer may be ahead of this wallet".into(),
+                ))
             }
             Err(e) => return Err(Judged::Reject(format!("refused: {e}"))),
         }
-        let item = outcome.item.ok_or_else(|| Judged::Reject("error: approved trade without a listed item".into()))?;
+        let item = outcome
+            .item
+            .ok_or_else(|| Judged::Reject("error: approved trade without a listed item".into()))?;
         // Stage two: the proof, once per envelope.
         let tag = pczt_ops::envelope_tag(bytes);
         if !self.shop.verified.contains(&tag) {
             let vk = zsettle_core::pczt::cached_verifying_key();
-            pczt_ops::verify_proof(&pczt, vk).map_err(|e| Judged::Reject(format!("refused: {e:#}")))?;
+            pczt_ops::verify_proof(&pczt, vk)
+                .map_err(|e| Judged::Reject(format!("refused: {e:#}")))?;
             if self.shop.verified.len() >= MAX_VERIFIED_TAGS {
                 self.shop.verified.clear();
             }
@@ -375,7 +440,8 @@ impl WebWallet {
             .map_err(|e| Judged::Reject(format!("refused: {e}")))?;
         let signed = pczt_ops::sign_ironwood_action(pczt, approved.item_action_index, &ask)
             .map_err(|e| Judged::Reject(format!("signing failed: {e:#}")))?;
-        let out = pczt_ops::to_bytes(&signed).map_err(|e| Judged::Reject(format!("signing failed: {e:#}")))?;
+        let out = pczt_ops::to_bytes(&signed)
+            .map_err(|e| Judged::Reject(format!("signing failed: {e:#}")))?;
         Ok((item, approved.paid_zat, out))
     }
 
@@ -416,7 +482,12 @@ impl WebWallet {
             }
         }
         let Some((item, nf)) = matched else {
-            return Ok(Outcome { item: None, result: Err(PolicyError::ItemNotSpent), unavailable, tip });
+            return Ok(Outcome {
+                item: None,
+                result: Err(PolicyError::ItemNotSpent),
+                unavailable,
+                tip,
+            });
         };
         let payout_fvk = self.payout_fvk(db)?;
         let payout = listed_payout(l, network)?;
@@ -426,7 +497,11 @@ impl WebWallet {
         let ivk = prepared_ivk(&payout_fvk);
         let policy = SellerPolicy {
             price_zat: item.price_zat,
-            max_expiry_delta: zsettle_core::reference_blocks(&network, tip + 1, item.max_expiry_delta),
+            max_expiry_delta: zsettle_core::reference_blocks(
+                &network,
+                tip + 1,
+                item.max_expiry_delta,
+            ),
             tip,
             branch_id: u32::from(BranchId::for_height(&network, BlockHeight::from(tip + 1))),
             payout,
@@ -436,12 +511,22 @@ impl WebWallet {
         } else {
             check_public(pczt, &nf, &policy, anchors)
         };
-        Ok(Outcome { item: Some(item), result, unavailable, tip })
+        Ok(Outcome {
+            item: Some(item),
+            result,
+            unavailable,
+            tip,
+        })
     }
 
     /// The current listings, or new ones for this wallet: the item key and its birthday, and a
     /// payout address derived for the market (not the account's default address).
-    fn listings_or_new(&self, db: &mut Db, listings: &str, item_fvk: &FullViewingKey) -> Result<Listings> {
+    fn listings_or_new(
+        &self,
+        db: &mut Db,
+        listings: &str,
+        item_fvk: &FullViewingKey,
+    ) -> Result<Listings> {
         if !listings.trim().is_empty() {
             let l = Listings::parse(listings, "your listings")?;
             if &l.item_fvk()? != item_fvk {

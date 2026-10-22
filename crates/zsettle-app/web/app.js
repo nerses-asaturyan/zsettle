@@ -1803,8 +1803,8 @@ async function openHistory(base, note, name) {
   });
 }
 function holderText(hop, you) {
-  if (you) return 'held by you';
   const h_ = String(hop.holder || '');
+  if (you || h_ === 'you') return 'held by you';
   if (!h_) return 'held by someone whose key you do not have';
   if (h_.endsWith('listings.json')) return 'held by your shop';
   return 'held by the seller';

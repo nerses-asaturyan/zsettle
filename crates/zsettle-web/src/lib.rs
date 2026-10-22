@@ -50,6 +50,7 @@ use zsettle_core::{
 
 pub use wasm_bindgen_rayon::init_thread_pool;
 
+mod history;
 mod seller;
 
 /// Blocks downloaded and scanned per step: small enough for a phone's memory, large enough
@@ -376,7 +377,7 @@ impl WebWallet {
                 },
                 cache: MemBlockCache::default(),
                 memo_tried: Default::default(),
-            shop: Default::default(),
+                shop: Default::default(),
             })
         })()
         .map_err(js)

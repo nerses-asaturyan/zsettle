@@ -57,10 +57,12 @@ const ops = {
   listingsCode: (listings) => zw.listings_code(listings),
   prove: (mnemonic, note, label, challenge) => need().prove(mnemonic, note, label || undefined, challenge || undefined),
   checkPhrase: (mnemonic) => need().check_phrase(mnemonic),
+  history: (progress, note, listings) => need().history(note, listings, progress),
+  checkProof: (progress, proof, challenge) => need().check_proof(proof, challenge || undefined, progress),
 };
 
 // Calls that report progress get a callback as their first argument.
-const WITH_PROGRESS = new Set(['sync', 'pay', 'buy']);
+const WITH_PROGRESS = new Set(['sync', 'pay', 'buy', 'history', 'checkProof']);
 
 function need() {
   if (!wallet) throw new Error('no wallet is open');

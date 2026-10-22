@@ -19,12 +19,15 @@ use orchard::keys::{FullViewingKey, PreparedIncomingViewingKey, Scope};
 use orchard::note::{ExtractedNoteCommitment, Nullifier};
 use orchard::note_encryption::{CompactAction, IronwoodDomain, COMPACT_NOTE_SIZE};
 use serde::Serialize;
+use zcash_client_backend::proto::compact_formats::CompactBlock;
+#[cfg(feature = "native")]
 use zcash_client_backend::proto::service::{BlockId, BlockRange, TxFilter};
 use zcash_note_encryption::{try_compact_note_decryption, try_note_decryption, EphemeralKeyBytes};
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
 use zcash_protocol::memo::{Memo, MemoBytes};
 
+#[cfg(feature = "native")]
 use crate::broadcast::{connect, install_crypto_provider};
 use crate::wallet::NoteRef;
 
@@ -146,6 +149,7 @@ impl Keyring {
 /// item is traced: scanning starts at the earliest listing birthday (which still shows the
 /// server which consignment is of interest) and the name is left out.
 /// `to_height` defaults to the server's tip.
+#[cfg(feature = "native")]
 pub fn trace_blocking(
     server: &str,
     network: Network,
@@ -210,6 +214,185 @@ fn txid_hex(bytes: &[u8]) -> String {
     hex::encode(b)
 }
 
+/// The scan of a trace, fed one compact block at a time in height order: the same for a
+/// gRPC stream (the tools) and for blocks fetched through a relay (the browser).
+pub struct Tracer {
+    ring: Keyring,
+    genesis: NoteRef,
+    genesis_txid: String,
+    genesis_height: Option<u32>,
+    hops: Vec<Hop>,
+    /// Nullifier of the hop watched for a spend, and the key that owns it.
+    watch: Option<(Nullifier, usize)>,
+    broken: Option<String>,
+    scanned_to: u32,
+    finished: bool,
+}
+
+impl Tracer {
+    /// A trace of `genesis` with the given consignments. `genesis_height`, when known, is the
+    /// block of the genesis transaction: past it without the note, no later block can hold it.
+    pub fn new(
+        consignments: &[Consignment],
+        genesis: NoteRef,
+        genesis_height: Option<u32>,
+    ) -> Result<Self> {
+        if consignments.is_empty() {
+            return Err(anyhow!(
+                "at least one consignment (listings file) is required"
+            ));
+        }
+        Ok(Tracer {
+            ring: Keyring::new(consignments),
+            genesis,
+            genesis_txid: genesis.txid.to_string(),
+            genesis_height,
+            hops: Vec::new(),
+            watch: None,
+            broken: None,
+            scanned_to: 0,
+            finished: false,
+        })
+    }
+
+    /// Where the scan starts: the earliest consignment birthday, or the genesis block when
+    /// it is known and later.
+    pub fn start_height(consignments: &[Consignment], genesis_height: Option<u32>) -> u32 {
+        let from = consignments.iter().map(|c| c.birthday).min().unwrap_or(0);
+        genesis_height.map_or(from, |g| from.max(g))
+    }
+
+    /// Scan one block. Returns `false` when the scan can stop: the genesis block went by
+    /// without the note. After the trace resolved it keeps returning `true`, so the caller
+    /// reads on to the tip and the server does not learn where the item last moved.
+    pub fn feed(&mut self, block: &CompactBlock) -> Result<bool> {
+        let height = u32::try_from(block.height)?;
+        self.scanned_to = height;
+        if self.finished {
+            return Ok(true);
+        }
+        let ring = &self.ring;
+        'txs: for vtx in &block.vtx {
+            let txid = txid_hex(&vtx.txid);
+            for (i, a) in vtx.ironwood_actions.iter().enumerate() {
+                let act = compact_action(a)?;
+                if self.hops.is_empty() {
+                    // Still looking for the genesis note.
+                    if txid == self.genesis_txid && i as u32 == self.genesis.index {
+                        let Some((k, note)) = ring.decrypt(&act) else {
+                            return Err(NoteNotFound(
+                                "the genesis note does not decrypt with any supplied consignment"
+                                    .into(),
+                            )
+                            .into());
+                        };
+                        self.hops.push(Hop {
+                            txid: txid.clone(),
+                            height,
+                            cmx: hex::encode(act.cmx().to_bytes()),
+                            value_zat: Some(note.value().inner()),
+                            holder: Some(ring.0[k].label.clone()),
+                        });
+                        self.watch = Some((note.nullifier(&ring.0[k].fvk), k));
+                    }
+                    continue;
+                }
+                let Some((nf, _)) = self.watch else {
+                    self.finished = true;
+                    break 'txs;
+                };
+                if act.nullifier() != nf {
+                    continue;
+                }
+                // Spent: the successor note is this action's output.
+                match ring.decrypt(&act) {
+                    Some((k, note)) => {
+                        let previous = self.hops.last().and_then(|h| h.value_zat);
+                        self.hops.push(Hop {
+                            txid: txid.clone(),
+                            height,
+                            cmx: hex::encode(act.cmx().to_bytes()),
+                            value_zat: Some(note.value().inner()),
+                            holder: Some(ring.0[k].label.clone()),
+                        });
+                        if previous.is_some_and(|v| v != note.value().inner()) {
+                            self.broken = Some(txid.clone());
+                            self.watch = None;
+                            self.finished = true;
+                            break 'txs;
+                        }
+                        self.watch = Some((note.nullifier(&ring.0[k].fvk), k));
+                    }
+                    None => {
+                        self.hops.push(Hop {
+                            txid: txid.clone(),
+                            height,
+                            cmx: hex::encode(act.cmx().to_bytes()),
+                            value_zat: None,
+                            holder: None,
+                        });
+                        self.watch = None;
+                        self.finished = true;
+                        break 'txs;
+                    }
+                }
+            }
+        }
+        // The genesis transaction sits in a known block: once that block is behind without
+        // the note, no later block can hold it. Stop instead of reading on to the tip, which
+        // a checker handed a bad proof would otherwise do for the whole chain.
+        Ok(!(self.hops.is_empty() && self.genesis_height.is_some_and(|g| height >= g)))
+    }
+
+    /// The report, with the item name read from the genesis transaction's raw bytes when
+    /// given.
+    pub fn finish(
+        self,
+        network: Network,
+        from_height: u32,
+        raw: Option<&[u8]>,
+    ) -> Result<Provenance> {
+        if self.hops.is_empty() {
+            return Err(NoteNotFound(format!(
+                "genesis note {}:{} not found between heights {from_height} and {}",
+                self.genesis.txid, self.genesis.index, self.scanned_to
+            ))
+            .into());
+        }
+        let status = match (self.watch, self.broken) {
+            (_, Some(txid)) => Status::LineageBroken { txid },
+            (Some((_, k)), None) => Status::Held {
+                by: self.ring.0[k].label.clone(),
+            },
+            (None, None) => Status::TransferredToUnknownHolder,
+        };
+        // Item name from the genesis transaction's memo, read with the key that owns it.
+        let genesis_key = self
+            .ring
+            .0
+            .iter()
+            .find(|k| Some(&k.label) == self.hops[0].holder.as_ref())
+            .map(|k| &k.fvk);
+        let name = match (genesis_key, raw) {
+            (Some(fvk), Some(raw)) => {
+                genesis_name(network, fvk, self.genesis, self.hops[0].height, raw)
+                    .ok()
+                    .flatten()
+            }
+            _ => None,
+        };
+        Ok(Provenance {
+            name,
+            genesis: format!("{}:{}", self.genesis.txid, self.genesis.index),
+            keys: self.ring.0.iter().map(|k| k.label.clone()).collect(),
+            hops: self.hops,
+            status,
+            scanned_to: self.scanned_to,
+        })
+    }
+}
+
+#[cfg(feature = "native")]
 async fn trace(
     server: &str,
     network: Network,
@@ -223,9 +406,6 @@ async fn trace(
             "at least one consignment (listings file) is required"
         ));
     }
-    let ring = Keyring::new(consignments);
-    let from_height = consignments.iter().map(|c| c.birthday).min().unwrap_or(0);
-
     let mut client = connect(server).await?;
     let tip = match to_height {
         Some(h) => h,
@@ -240,8 +420,8 @@ async fn trace(
     };
     // Unless privacy from the server matters, ask it where the genesis transaction is: start
     // there instead of at the birthday, and keep the bytes for the name.
-    let (from_height, raw, genesis_height) = if private {
-        (from_height, None, None)
+    let (raw, genesis_height) = if private {
+        (None, None)
     } else {
         let raw = client
             .get_transaction(TxFilter {
@@ -256,14 +436,10 @@ async fn trace(
         if genesis_height == 0 {
             return Err(NoteNotFound("the genesis transaction is not mined yet".into()).into());
         }
-        (
-            from_height.max(genesis_height),
-            Some(raw.data),
-            Some(genesis_height),
-        )
+        (Some(raw.data), Some(genesis_height))
     };
-    let genesis_txid = genesis.txid.to_string();
-
+    let from_height = Tracer::start_height(consignments, genesis_height);
+    let mut tracer = Tracer::new(consignments, genesis, genesis_height)?;
     let mut stream = client
         .get_block_range(BlockRange {
             start: Some(BlockId {
@@ -279,134 +455,16 @@ async fn trace(
         .await
         .map_err(|e| anyhow!("get_block_range: {e}"))?
         .into_inner();
-
-    let mut hops: Vec<Hop> = Vec::new();
-    // Nullifier of the hop we are watching for a spend, and the key that owns it.
-    let mut watch: Option<(Nullifier, usize)> = None;
-    let mut broken: Option<String> = None;
-    let mut scanned_to = from_height;
-
-    // The stream is read to its end even after the trace resolved, so the server does not
-    // learn at which height the item last moved.
-    let mut finished = false;
     while let Some(block) = stream.message().await.map_err(|e| anyhow!("stream: {e}"))? {
-        let height = u32::try_from(block.height)?;
-        scanned_to = height;
-        if finished {
-            continue;
-        }
-        for vtx in &block.vtx {
-            let txid = txid_hex(&vtx.txid);
-            for (i, a) in vtx.ironwood_actions.iter().enumerate() {
-                let act = compact_action(a)?;
-                if hops.is_empty() {
-                    // Still looking for the genesis note.
-                    if txid == genesis_txid && i as u32 == genesis.index {
-                        let Some((k, note)) = ring.decrypt(&act) else {
-                            return Err(NoteNotFound(
-                                "the genesis note does not decrypt with any supplied consignment"
-                                    .into(),
-                            )
-                            .into());
-                        };
-                        hops.push(Hop {
-                            txid: txid.clone(),
-                            height,
-                            cmx: hex::encode(act.cmx().to_bytes()),
-                            value_zat: Some(note.value().inner()),
-                            holder: Some(ring.0[k].label.clone()),
-                        });
-                        watch = Some((note.nullifier(&ring.0[k].fvk), k));
-                    }
-                    continue;
-                }
-                let Some((nf, _)) = watch else {
-                    finished = true;
-                    break;
-                };
-                if act.nullifier() != nf {
-                    continue;
-                }
-                // Spent: the successor note is this action's output.
-                match ring.decrypt(&act) {
-                    Some((k, note)) => {
-                        let previous = hops.last().and_then(|h| h.value_zat);
-                        hops.push(Hop {
-                            txid: txid.clone(),
-                            height,
-                            cmx: hex::encode(act.cmx().to_bytes()),
-                            value_zat: Some(note.value().inner()),
-                            holder: Some(ring.0[k].label.clone()),
-                        });
-                        if previous.is_some_and(|v| v != note.value().inner()) {
-                            broken = Some(txid.clone());
-                            watch = None;
-                            finished = true;
-                            break;
-                        }
-                        watch = Some((note.nullifier(&ring.0[k].fvk), k));
-                    }
-                    None => {
-                        hops.push(Hop {
-                            txid: txid.clone(),
-                            height,
-                            cmx: hex::encode(act.cmx().to_bytes()),
-                            value_zat: None,
-                            holder: None,
-                        });
-                        watch = None;
-                        finished = true;
-                        break;
-                    }
-                }
-            }
-        }
-        // The genesis transaction sits in a known block: once that block is behind without
-        // the note, no later block can hold it. Stop instead of reading on to the tip, which
-        // a checker handed a bad proof would otherwise do for the whole chain.
-        if hops.is_empty() && genesis_height.is_some_and(|g| height >= g) {
+        if !tracer.feed(&block)? {
             break;
         }
     }
-    if hops.is_empty() {
-        return Err(NoteNotFound(format!(
-            "genesis note {}:{} not found between heights {from_height} and {scanned_to}",
-            genesis.txid, genesis.index
-        ))
-        .into());
-    }
-    let status = match (watch, broken) {
-        (_, Some(txid)) => Status::LineageBroken { txid },
-        (Some((_, k)), None) => Status::Held {
-            by: ring.0[k].label.clone(),
-        },
-        (None, None) => Status::TransferredToUnknownHolder,
-    };
-
-    // Item name from the genesis transaction's memo, read with the key that owns the genesis note.
-    let genesis_key = ring
-        .0
-        .iter()
-        .find(|k| Some(&k.label) == hops[0].holder.as_ref())
-        .map(|k| &k.fvk);
-    let name = match (genesis_key, raw.as_deref()) {
-        (Some(fvk), Some(raw)) => genesis_name(network, fvk, genesis, hops[0].height, raw)
-            .ok()
-            .flatten(),
-        _ => None,
-    };
-
-    Ok(Provenance {
-        name,
-        genesis: format!("{}:{}", genesis.txid, genesis.index),
-        keys: ring.0.iter().map(|k| k.label.clone()).collect(),
-        hops,
-        status,
-        scanned_to,
-    })
+    tracer.finish(network, from_height, raw.as_deref())
 }
 
-fn genesis_name(
+/// The item name in the genesis note's memo, read with the key that owns the note.
+pub fn genesis_name(
     network: Network,
     fvk: &FullViewingKey,
     genesis: NoteRef,

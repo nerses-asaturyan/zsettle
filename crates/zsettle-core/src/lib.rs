@@ -20,7 +20,7 @@
 //! - [`listing`]: the public listings file (prices, payout address, item viewing key).
 //! - [`mint`]: minting item notes and listing an account's unspent notes.
 //! - [`item`]: what an item is and its minimum value.
-//! - [`verify`]: provenance verification from chain data with viewing keys only (`native`).
+//! - [`verify`]: provenance verification from chain data with viewing keys only.
 //! - [`ownership`]: signed proofs that the holder of an item account controls a note now.
 
 #![forbid(unsafe_code)]
@@ -35,7 +35,6 @@ pub mod ownership;
 pub mod pczt;
 pub mod policy;
 pub mod trade;
-#[cfg(feature = "native")]
 pub mod verify;
 pub mod wallet;
 

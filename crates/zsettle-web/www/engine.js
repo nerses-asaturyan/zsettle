@@ -589,6 +589,43 @@ export async function api(path, body) {
         await addActivity({ kind: 'prove', text: 'Made an ownership proof for ' + ((name && name.name) || 'an item') });
         return { proof };
       });
+    case 'POST /api/verify':
+      return job('verify', async (step) => {
+        await afterSync(step);
+        // The shops whose keys may have held the item: the one named, else the one it was
+        // bought from, else the shops opened lately, tried in turn. This wallet's own item key
+        // is always added.
+        const mine = (await walletView()).items.find((i) => i.note === body.item);
+        const named = body.url ? [shopPath(body.url)] : mine && mine.shop ? ['/shop/' + mine.shop] : E.cfg.sellers.slice(0, 5).map((s) => new URL(s).pathname);
+        const shops = [];
+        for (const p of named) {
+          const r = await fetch(p + '/listings', { headers: { 'X-Zsettle': '1' } }).catch(() => null);
+          if (r && r.ok) shops.push({ label: 'shop', text: await r.text() });
+        }
+        step('Tracing the item through the chain with viewing keys only, in your browser');
+        const tries = shops.length ? shops.map((s) => [s]) : [[]];
+        let last = null;
+        for (const t of tries) {
+          try {
+            return await call('history', [body.item, JSON.stringify(t)], (p) => {
+              if (p && p.scanned && p.tip) step.update('Tracing the item in your browser: block ' + p.scanned.toLocaleString('en') + ' of ' + p.tip.toLocaleString('en'));
+            });
+          } catch (e) {
+            last = e;
+          }
+        }
+        throw last || new Error('no shop could trace this item');
+      });
+    case 'POST /api/check-proof':
+      return job('check-proof', async (step) => {
+        const proof = String(body.proof || '');
+        if (proof.length > 16 * 1024) throw new Error('that proof is too large');
+        step('Checking the signature and the block the proof names');
+        step('Looking on the chain whether the item is still held, in your browser');
+        return call('checkProof', [proof, body.challenge || ''], (p) => {
+          if (p && p.scanned && p.tip) step.update('Looking on the chain whether the item is still held: block ' + p.scanned.toLocaleString('en') + ' of ' + p.tip.toLocaleString('en'));
+        });
+      });
     case 'GET /api/shop':
       return { running: E.shop.open, listen: null, public: shopUrl(), events: E.shop.events };
     case 'GET /api/listings':
