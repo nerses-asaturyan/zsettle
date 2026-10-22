@@ -29,6 +29,13 @@ use crate::wallet::{
 };
 use crate::{standard_expiry_delta, zip317_fee, ZIP317_MARGINAL_FEE};
 
+/// The Ironwood proving key, built once per process: building it takes seconds natively and
+/// far longer in a browser, and it never changes.
+pub fn proving_key() -> &'static ProvingKey {
+    static KEY: std::sync::OnceLock<ProvingKey> = std::sync::OnceLock::new();
+    KEY.get_or_init(|| ProvingKey::build(OrchardCircuitVersion::PostNu6_3))
+}
+
 /// Everything the buyer needs to assemble a trade.
 #[derive(Clone, Debug)]
 pub struct TradeRequest {
@@ -253,9 +260,9 @@ pub fn build_trade(db: &mut Db, network: Network, req: &TradeRequest) -> Result<
         .map_err(|e| anyhow!("IO finalizer: {e:?}"))?;
 
     // Prove with viewing keys only.
-    let pk = ProvingKey::build(OrchardCircuitVersion::PostNu6_3);
+    let pk = proving_key();
     let pczt = Prover::new(pczt)
-        .create_ironwood_proof(rand::rng(), &pk)
+        .create_ironwood_proof(rand::rng(), pk)
         .map_err(|e| anyhow!("prover: {e:?}"))?
         .finish();
 
@@ -443,9 +450,9 @@ pub fn build_transfer(
     let pczt = IoFinalizer::new(pczt)
         .finalize_io(rand::rng())
         .map_err(|e| anyhow!("IO finalizer: {e:?}"))?;
-    let pk = ProvingKey::build(OrchardCircuitVersion::PostNu6_3);
+    let pk = proving_key();
     let pczt = Prover::new(pczt)
-        .create_ironwood_proof(rand::rng(), &pk)
+        .create_ironwood_proof(rand::rng(), pk)
         .map_err(|e| anyhow!("prover: {e:?}"))?
         .finish();
     Ok(SelfSpend {

@@ -14,34 +14,61 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
+#[cfg(feature = "native")]
 use bip0039::{Count, English, Mnemonic};
 use rand::rngs::ThreadRng;
-use secrecy::{ExposeSecret, SecretVec, Zeroize};
+use secrecy::{ExposeSecret, SecretVec};
+#[cfg(feature = "native")]
+use secrecy::Zeroize;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "native")]
+use zcash_client_backend::data_api::{chain::BlockCache, scanning::ScanRange};
 use zcash_client_backend::data_api::{
-    chain::{error as chain_error, BlockCache, BlockSource},
+    chain::{error as chain_error, BlockSource},
     locking::LockFilter,
-    scanning::ScanRange,
     wallet::TargetHeight,
     Account as _, AccountBirthday, AccountPurpose, AccountSource, InputSource, NullifierQuery,
     WalletCommitmentTrees, WalletRead, WalletWrite,
 };
 use zcash_client_backend::proto::compact_formats::CompactBlock;
 use zcash_client_backend::wallet::Note;
-use zcash_client_sqlite::{util::SystemClock, wallet::init::init_wallet_db, AccountUuid, WalletDb};
+use zcash_client_backend::proto::service::TreeState;
+use zcash_client_backend::util::Clock;
+#[cfg(feature = "native")]
+use zcash_client_sqlite::wallet::init::init_wallet_db;
+use zcash_client_sqlite::{AccountUuid, WalletDb};
 use zcash_keys::keys::{UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedSpendingKey};
 use zcash_protocol::{
     consensus::{BlockHeight, Network},
     ShieldedPool, TxId,
 };
 
+#[cfg(feature = "native")]
 use crate::broadcast::{connect, install_crypto_provider};
 
 /// Account identifier of the wallet database, re-exported for the binaries.
 pub use zcash_client_sqlite::AccountUuid as WalletAccount;
 
 /// The wallet database type used throughout zsettle.
-pub type Db = WalletDb<rusqlite::Connection, Network, SystemClock, ThreadRng>;
+pub type Db = WalletDb<rusqlite::Connection, Network, WalletClock, ThreadRng>;
+
+/// The wall clock the wallet library records times with: the system clock, or the page's
+/// clock in the browser, where the standard library has none.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WalletClock;
+
+impl Clock for WalletClock {
+    fn now(&self) -> std::time::SystemTime {
+        #[cfg(not(target_family = "wasm"))]
+        {
+            std::time::SystemTime::now()
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            std::time::UNIX_EPOCH + std::time::Duration::from_millis(js_sys::Date::now() as u64)
+        }
+    }
+}
 
 /// A reference to a shielded note by the transaction that created it and its output index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,10 +122,13 @@ struct KeysToml {
     birthday: Option<u32>,
 }
 
-/// A devtool-layout wallet directory.
+/// A devtool-layout wallet directory, or a wallet held in memory (the browser).
 pub struct Wallet {
-    /// Directory containing `data.sqlite` and `keys.toml`.
+    /// Directory containing `data.sqlite` and `keys.toml`; for a wallet in memory, its name.
     pub dir: PathBuf,
+    /// Whether the database lives in memory, shared by name between this process's
+    /// connections, instead of in `data.sqlite`.
+    memory: bool,
     /// Network the wallet was created for.
     pub network: Network,
     /// Height the wallet started scanning from.
@@ -121,10 +151,77 @@ impl Wallet {
         };
         Ok(Wallet {
             dir,
+            memory: false,
             network,
             birthday: keys.birthday.unwrap_or(0),
             mnemonic_ciphertext: keys.mnemonic,
         })
+    }
+
+    /// A wallet whose database lives in memory under `name`, shared by every connection of
+    /// this process that opens the same name; the caller loads and saves its bytes
+    /// ([`Wallet::export`], [`Wallet::import`]). The seed is never stored with it.
+    pub fn in_memory(name: &str, network: Network, birthday: u32) -> Self {
+        Wallet {
+            dir: PathBuf::from(name),
+            memory: true,
+            network,
+            birthday,
+            mnemonic_ciphertext: None,
+        }
+    }
+
+    /// Where SQLite finds the database: the file, or the shared in-memory database.
+    fn location(&self) -> PathBuf {
+        if self.memory {
+            PathBuf::from(format!("file:/{}?vfs=memdb", self.dir.display()))
+        } else {
+            self.dir.join("data.sqlite")
+        }
+    }
+
+    /// A plain connection to the wallet database, for queries the wallet library does not
+    /// offer.
+    pub fn connection(&self, read_only: bool) -> Result<rusqlite::Connection> {
+        use rusqlite::OpenFlags;
+        let mode = if read_only {
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+        } else {
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+        };
+        rusqlite::Connection::open_with_flags(
+            self.location(),
+            mode | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_URI,
+        )
+        .map_err(|e| anyhow!("opening wallet database: {e}"))
+    }
+
+    /// The whole database of a wallet in memory, as SQLite file bytes.
+    pub fn export(&self) -> Result<Vec<u8>> {
+        let conn = self.connection(true)?;
+        let data = conn
+            .serialize(rusqlite::MAIN_DB)
+            .map_err(|e| anyhow!("saving the wallet database: {e}"))?;
+        Ok(data.to_vec())
+    }
+
+    /// Replace the database of a wallet in memory with SQLite file bytes saved by
+    /// [`Wallet::export`].
+    pub fn import(&self, bytes: &[u8]) -> Result<()> {
+        if !self.memory {
+            return Err(anyhow!("only a wallet in memory is loaded from bytes"));
+        }
+        let mut src = rusqlite::Connection::open_in_memory()
+            .map_err(|e| anyhow!("loading the wallet database: {e}"))?;
+        src.deserialize_read_exact(rusqlite::MAIN_DB, bytes, bytes.len(), true)
+            .map_err(|e| anyhow!("loading the wallet database: {e}"))?;
+        let mut dst = self.connection(false).or_else(|_| {
+            rusqlite::Connection::open(self.location())
+                .map_err(|e| anyhow!("opening wallet database: {e}"))
+        })?;
+        rusqlite::backup::Backup::new(&src, &mut dst)
+            .and_then(|b| b.run_to_completion(1000, std::time::Duration::ZERO, None))
+            .map_err(|e| anyhow!("loading the wallet database: {e}"))
     }
 
     /// Open the SQLite wallet database and bring its schema up to date with the wallet
@@ -139,16 +236,12 @@ impl Wallet {
     }
 
     fn open_db(&self) -> Result<Db> {
-        WalletDb::for_path(
-            self.dir.join("data.sqlite"),
-            self.network,
-            SystemClock,
-            rand::rng(),
-        )
+        WalletDb::for_path(self.location(), self.network, WalletClock, rand::rng())
         .context("opening wallet database")
     }
 
     /// Run the wallet database migrations with the seed available.
+    #[cfg(feature = "native")]
     pub fn upgrade(&self, identity_file: Option<&Path>) -> Result<()> {
         let seed = self.seed(identity_file)?;
         let mut db = self.open_db()?;
@@ -159,6 +252,7 @@ impl Wallet {
     /// Decrypt the mnemonic and derive the BIP 39 seed. With an age identity file the
     /// mnemonic must be encrypted to one of its identities; without one it must be
     /// passphrase-protected, and the passphrase comes from `ZSETTLE_PASSPHRASE` or a prompt.
+    #[cfg(feature = "native")]
     pub fn seed(&self, identity_file: Option<&Path>) -> Result<SecretVec<u8>> {
         let ciphertext = self
             .mnemonic_ciphertext
@@ -426,6 +520,7 @@ pub fn account_unspent_nullifiers(
 }
 
 /// Import a unified full viewing key as a view-only account, scanning from `birthday`.
+#[cfg(feature = "native")]
 pub fn import_viewing_key(
     db: &mut Db,
     network: Network,
@@ -434,11 +529,22 @@ pub fn import_viewing_key(
     birthday: u32,
     server: &str,
 ) -> Result<AccountUuid> {
-    let ufvk = UnifiedFullViewingKey::decode(&network, ufvk_str)
-        .map_err(|e| anyhow!("decoding viewing key: {e}"))?;
     // The tree state one block before the birthday lets the scanner start exactly there.
     let tree_state =
         crate::broadcast::fetch_tree_state_blocking(server, birthday.saturating_sub(1))?;
+    import_viewing_key_at(db, network, name, ufvk_str, tree_state)
+}
+
+/// [`import_viewing_key`] with the tree state of the block before the birthday supplied.
+pub fn import_viewing_key_at(
+    db: &mut Db,
+    network: Network,
+    name: &str,
+    ufvk_str: &str,
+    tree_state: TreeState,
+) -> Result<AccountUuid> {
+    let ufvk = UnifiedFullViewingKey::decode(&network, ufvk_str)
+        .map_err(|e| anyhow!("decoding viewing key: {e}"))?;
     let account_birthday = AccountBirthday::from_treestate(tree_state, None)
         .map_err(|e| anyhow!("birthday: {e:?}"))?;
     let account = db
@@ -456,6 +562,7 @@ pub fn import_viewing_key(
 /// The wallet passphrase: `ZSETTLE_PASSPHRASE` when set, otherwise asked for on the terminal
 /// (twice when `confirm`), otherwise one line of standard input.
 /// scrypt work factor (log2 N) for a passphrase that is already a random 256-bit secret.
+#[cfg(feature = "native")]
 const PASSKEY_WORK_FACTOR: u8 = 10;
 
 /// Whether a passphrase is a secret a passkey gave (`passkey:` and 64 hex digits), which
@@ -465,6 +572,7 @@ pub fn is_random_secret(p: &str) -> bool {
         .is_some_and(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
+#[cfg(feature = "native")]
 fn passphrase(confirm: bool) -> Result<age::secrecy::SecretString> {
     use std::io::IsTerminal;
     use zeroize::Zeroizing;
@@ -524,6 +632,7 @@ pub struct AccountInfo {
     pub birthday: u32,
 }
 
+#[cfg(feature = "native")]
 #[derive(Serialize)]
 struct KeysOut<'a> {
     mnemonic: &'a str,
@@ -536,6 +645,7 @@ struct KeysOut<'a> {
 /// a passphrase; `keys.toml`; the database; and one derived account per name. The birthday is a little below the server's
 /// tip, so the first sync is seconds. Refuses to touch a directory that already holds a
 /// wallet.
+#[cfg(feature = "native")]
 pub fn init_wallet(
     dir: &Path,
     network: Network,
@@ -717,6 +827,7 @@ pub fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 /// Write a secret file readable by its owner only (on Unix) and never over an existing one.
+#[cfg(feature = "native")]
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -762,6 +873,7 @@ pub fn list_accounts(db: &Db) -> Result<Vec<AccountInfo>> {
 /// Create a new ZIP 32 account of this wallet from its seed, with a birthday at the wallet's
 /// current scanned height. Returns the account id and its ZIP 32 index. One account per item
 /// keeps a consignment to that item alone.
+#[cfg(feature = "native")]
 pub fn create_account(
     wallet: &Wallet,
     db: &mut Db,
@@ -769,10 +881,26 @@ pub fn create_account(
     name: &str,
     server: &str,
 ) -> Result<(AccountUuid, u32)> {
-    let tip = max_scanned_height(db)?.ok_or_else(|| anyhow!("sync the wallet first"))?;
-    // Rounded down like `init_wallet`: the published birthday then names no exact height.
-    let born = (tip / BIRTHDAY_ROUNDING) * BIRTHDAY_ROUNDING;
+    let born = new_account_birthday(db)?;
     let tree_state = crate::broadcast::fetch_tree_state_blocking(server, born.saturating_sub(1))?;
+    let _ = wallet;
+    create_account_at(db, seed, name, tree_state)
+}
+
+/// The birthday a new account of this wallet gets: the scanned height, rounded down like
+/// `init_wallet`, so the published birthday names no exact height.
+pub fn new_account_birthday(db: &Db) -> Result<u32> {
+    let tip = max_scanned_height(db)?.ok_or_else(|| anyhow!("sync the wallet first"))?;
+    Ok((tip / BIRTHDAY_ROUNDING) * BIRTHDAY_ROUNDING)
+}
+
+/// [`create_account`] with the tree state of the block before the birthday supplied.
+pub fn create_account_at(
+    db: &mut Db,
+    seed: &SecretVec<u8>,
+    name: &str,
+    tree_state: TreeState,
+) -> Result<(AccountUuid, u32)> {
     let birthday = AccountBirthday::from_treestate(tree_state, None)
         .map_err(|e| anyhow!("birthday: {e:?}"))?;
     let (id, _usk) = db
@@ -786,7 +914,6 @@ pub fn create_account(
         AccountSource::Derived { derivation, .. } => u32::from(derivation.account_index()),
         AccountSource::Imported { .. } => return Err(anyhow!("created account has no derivation")),
     };
-    let _ = wallet;
     Ok((id, index))
 }
 
@@ -865,7 +992,29 @@ struct Reservation {
     expiry_height: u32,
 }
 
+/// A wallet in memory keeps its reservations in a table of its own database, so they are
+/// saved with it.
+const RESERVED_TABLE: &str = "CREATE TABLE IF NOT EXISTS zsettle_reserved_notes (
+    note TEXT PRIMARY KEY, expiry_height INTEGER NOT NULL)";
+
 fn read_reservations(wallet: &Wallet) -> Result<Reservations> {
+    if wallet.memory {
+        let conn = wallet.connection(false)?;
+        conn.execute(RESERVED_TABLE, []).map_err(|e| anyhow!("{e}"))?;
+        let mut stmt = conn
+            .prepare("SELECT note, expiry_height FROM zsettle_reserved_notes ORDER BY rowid")
+            .map_err(|e| anyhow!("{e}"))?;
+        let notes = stmt
+            .query_map([], |r| {
+                Ok(Reservation {
+                    note: r.get(0)?,
+                    expiry_height: r.get(1)?,
+                })
+            })
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map_err(|e| anyhow!("{e}"))?;
+        return Ok(Reservations { notes });
+    }
     let path = wallet.dir.join(RESERVED_FILE);
     if !path.exists() {
         return Ok(Reservations::default());
@@ -875,6 +1024,21 @@ fn read_reservations(wallet: &Wallet) -> Result<Reservations> {
 }
 
 fn write_reservations(wallet: &Wallet, r: &Reservations) -> Result<()> {
+    if wallet.memory {
+        let mut conn = wallet.connection(false)?;
+        let tx = conn.transaction().map_err(|e| anyhow!("{e}"))?;
+        tx.execute(RESERVED_TABLE, []).map_err(|e| anyhow!("{e}"))?;
+        tx.execute("DELETE FROM zsettle_reserved_notes", [])
+            .map_err(|e| anyhow!("{e}"))?;
+        for x in &r.notes {
+            tx.execute(
+                "INSERT INTO zsettle_reserved_notes (note, expiry_height) VALUES (?1, ?2)",
+                rusqlite::params![x.note, x.expiry_height],
+            )
+            .map_err(|e| anyhow!("{e}"))?;
+        }
+        return tx.commit().map_err(|e| anyhow!("{e}"));
+    }
     let path = wallet.dir.join(RESERVED_FILE);
     write_owner_only(&path, serde_json::to_string_pretty(r)?.as_bytes())
 }
@@ -924,6 +1088,7 @@ pub fn reserved_notes(wallet: &Wallet, _tip: u32) -> Result<Vec<NoteRef>> {
 // ---- Synchronisation ----------------------------------------------------------------
 
 /// Blocks fetched per batch while syncing; each batch is scanned and dropped before the next.
+#[cfg(feature = "native")]
 const SYNC_BATCH_BLOCKS: u32 = 500;
 
 /// Error type of the in-memory block cache. The cache cannot fail; the traits need a type.
@@ -951,6 +1116,20 @@ fn height_of(block: &CompactBlock) -> BlockHeight {
 }
 
 impl MemBlockCache {
+    /// Add downloaded blocks, replacing any already held at the same heights.
+    pub fn put(&self, compact_blocks: Vec<CompactBlock>) {
+        let mut guard = self.lock();
+        for b in compact_blocks {
+            guard.retain(|x| x.height != b.height);
+            guard.push(b);
+        }
+    }
+
+    /// Drop every block held.
+    pub fn clear(&self) {
+        self.lock().clear();
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<CompactBlock>> {
         self.blocks.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -985,6 +1164,7 @@ impl BlockSource for MemBlockCache {
     }
 }
 
+#[cfg(feature = "native")]
 #[async_trait::async_trait]
 impl BlockCache for MemBlockCache {
     fn get_tip_height(
@@ -1014,11 +1194,7 @@ impl BlockCache for MemBlockCache {
     }
 
     async fn insert(&self, compact_blocks: Vec<CompactBlock>) -> Result<(), Self::Error> {
-        let mut guard = self.lock();
-        for b in compact_blocks {
-            guard.retain(|x| x.height != b.height);
-            guard.push(b);
-        }
+        self.put(compact_blocks);
         Ok(())
     }
 
@@ -1041,6 +1217,7 @@ pub struct SyncReport {
 /// Bring the wallet up to date with a lightwalletd server: refresh the commitment-tree
 /// roots and the chain tip, then download and scan every block range the wallet still
 /// needs. Blocks are cached in memory only.
+#[cfg(feature = "native")]
 pub fn sync_blocking(wallet: &Wallet, db: &mut Db, server: &str) -> Result<SyncReport> {
     install_crypto_provider();
     let rt = tokio::runtime::Builder::new_multi_thread()

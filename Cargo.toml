@@ -6,6 +6,8 @@ members = [
     "crates/zsettle-seller",
     "crates/zsettle-app",
 ]
+# The browser wallet builds on its own (nightly, WebAssembly); see crates/zsettle-web.
+exclude = ["crates/zsettle-web"]
 
 [workspace.package]
 version = "0.1.0"
@@ -18,7 +20,7 @@ authors = ["Nerses Asaturyan"]
 # Zcash stack: the released NU7 line (mainnet moves to NU7 at block 3,543,405; testnet since 4,465,026)
 orchard = { version = "0.16", default-features = false, features = ["circuit", "std"] }
 pczt = { version = "0.10", features = ["orchard", "prover", "signer", "io-finalizer", "spend-finalizer", "tx-extractor", "transparent"] }
-zcash_client_backend = { version = "0.25", features = ["orchard", "pczt", "unstable", "lightwalletd-tonic-tls-webpki-roots", "sync"] }
+zcash_client_backend = { version = "0.25", features = ["orchard", "pczt", "unstable"] }
 zcash_client_sqlite = { version = "0.23", features = ["orchard", "unstable", "transparent-inputs"] }
 zcash_primitives = "0.31"
 zcash_protocol = "0.11"
@@ -29,7 +31,7 @@ zcash_proofs = { version = "0.31", features = ["bundled-prover", "local-prover"]
 zip321 = "0.10"
 incrementalmerkletree = "0.9"
 zip32 = "0.3"
-rusqlite = "0.37"
+rusqlite = { version = "0.37", features = ["serialize", "backup"] }
 uuid = "1"
 
 # wallet secrets
@@ -46,6 +48,7 @@ tonic = { version = "0.14", features = ["tls-ring", "tls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 async-trait = "0.1"
+prost = "0.14"
 pasta_curves = "0.6"
 
 # general

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="A Zcash wallet that runs in this page: the keys never leave your device. Buy items for ZEC in one shielded transaction.">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#0b0d12" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f6f7fb" media="(prefers-color-scheme: light)">
+<title>zsettle wallet</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="wallet.css">
+</head>
+<body>
+<main id="app" aria-live="polite"><p class="boot">Starting the wallet…</p></main>
+<div id="layer"></div>
+<div id="toasts" role="status" aria-live="polite"></div>
+<script src="/qr.js"></script>
+<script type="module" src="wallet.js"></script>
+</body>
+</html>

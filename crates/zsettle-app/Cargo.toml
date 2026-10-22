@@ -21,3 +21,5 @@ rand = { workspace = true }
 hex = { workspace = true }
 ureq = { workspace = true }
 zeroize = { workspace = true }
+zcash_protocol = { workspace = true }
+blake2b_simd = { workspace = true }

@@ -380,3 +380,104 @@ mod tests {
         });
     }
 }
+
+/// Public chain data for the browser wallet, which cannot speak gRPC to lightwalletd. Each
+/// call is one lightwalletd request; replies are the server's protobuf messages, several of
+/// them length-delimited one after the other. Nothing here involves a key: these are the
+/// same requests every light wallet makes, and the shielding wrapper still applies.
+pub mod relay {
+    use anyhow::{anyhow, Result};
+    use prost::Message;
+    use zcash_client_backend::proto::service::{
+        BlockId, BlockRange, ChainSpec, GetSubtreeRootsArg, ShieldedProtocol,
+    };
+
+    use super::{connect, runtime};
+
+    /// Most blocks one request may ask for.
+    pub const MAX_BLOCKS: u32 = 1_000;
+
+    /// Most subtree roots one request may ask for.
+    pub const MAX_ROOTS: u32 = 10_000;
+
+    /// The chain tip as an encoded `BlockID`.
+    pub fn latest_block(server: &str) -> Result<Vec<u8>> {
+        runtime()?.block_on(async {
+            let tip = connect(server)
+                .await?
+                .get_latest_block(ChainSpec {})
+                .await
+                .map_err(|e| anyhow!("get_latest_block: {e}"))?
+                .into_inner();
+            Ok(tip.encode_to_vec())
+        })
+    }
+
+    /// Compact blocks `start..=end`, each length-delimited.
+    pub fn blocks(server: &str, start: u32, end: u32) -> Result<Vec<u8>> {
+        if end < start || end - start >= MAX_BLOCKS {
+            return Err(anyhow!("ask for 1 to {MAX_BLOCKS} blocks"));
+        }
+        runtime()?.block_on(async {
+            let id = |h: u32| BlockId {
+                height: u64::from(h),
+                hash: vec![],
+            };
+            let mut stream = connect(server)
+                .await?
+                .get_block_range(BlockRange {
+                    start: Some(id(start)),
+                    end: Some(id(end)),
+                    pool_types: vec![],
+                })
+                .await
+                .map_err(|e| anyhow!("get_block_range: {e}"))?
+                .into_inner();
+            let mut out = Vec::new();
+            while let Some(block) = stream
+                .message()
+                .await
+                .map_err(|e| anyhow!("get_block_range: {e}"))?
+            {
+                block.encode_length_delimited(&mut out)?;
+            }
+            Ok(out)
+        })
+    }
+
+    /// The commitment tree state after block `height`, as an encoded `TreeState`.
+    pub fn tree_state(server: &str, height: u32) -> Result<Vec<u8>> {
+        Ok(super::fetch_tree_state_blocking(server, height)?.encode_to_vec())
+    }
+
+    /// Subtree roots of a shielded pool (`sapling`, `orchard` or `ironwood`), each
+    /// length-delimited.
+    pub fn subtree_roots(server: &str, pool: &str, start: u32, max: u32) -> Result<Vec<u8>> {
+        let protocol = ShieldedProtocol::from_str_name(pool)
+            .ok_or_else(|| anyhow!("pool is sapling, orchard or ironwood"))?;
+        if max == 0 || max > MAX_ROOTS {
+            return Err(anyhow!("ask for 1 to {MAX_ROOTS} roots"));
+        }
+        runtime()?.block_on(async {
+            let mut stream = connect(server)
+                .await?
+                .get_subtree_roots(GetSubtreeRootsArg {
+                    start_index: start,
+                    shielded_protocol: protocol as i32,
+                    max_entries: max,
+                })
+                .await
+                .map_err(|e| anyhow!("get_subtree_roots: {e}"))?
+                .into_inner();
+            let mut out = Vec::new();
+            while let Some(root) = stream
+                .message()
+                .await
+                .map_err(|e| anyhow!("get_subtree_roots: {e}"))?
+            {
+                root.encode_length_delimited(&mut out)?;
+            }
+            Ok(out)
+        })
+    }
+}

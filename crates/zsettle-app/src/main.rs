@@ -67,6 +67,11 @@ const MAX_NEW_PER_NET_HOUR: usize = 12;
 /// (an office, a phone network) do not count against each other.
 const MAX_CALLS_PER_WALLET_MIN: usize = 240;
 const MAX_CALLS_PER_IP_MIN: usize = 120;
+/// Chain relay requests per visitor a minute. A browser wallet's first sync of a few
+/// thousand blocks takes two requests per 500 blocks.
+const MAX_RELAY_CALLS_PER_IP_MIN: usize = 300;
+/// Largest browser wallet file served (the WebAssembly module).
+const MAX_WALLET_FILE: u64 = 64 * 1024 * 1024;
 /// Ownership proofs a wallet checks a minute: each reads the chain from the item's first
 /// block.
 const MAX_PROOF_CHECKS_PER_WALLET_MIN: usize = 3;
@@ -261,6 +266,11 @@ struct Cli {
     /// unless this is given.
     #[arg(long)]
     allow_hosted_mainnet: bool,
+    /// Directory of the browser wallet (crates/zsettle-web: www/ with pkg/ inside), served
+    /// at /wallet/. The browser wallet keeps its keys in the visitor's page; this server
+    /// only relays public chain data to it, on either network.
+    #[arg(long)]
+    web_wallet: Option<PathBuf>,
 }
 
 /// What the app remembers about a profile. Nothing secret: the wallet's mnemonic stays
@@ -502,6 +512,69 @@ struct Hub {
     bins: Bins,
     port: u16,
     mode: Mode,
+    /// The browser wallet's files by path under /wallet/: type, bytes and entity tag.
+    wallet_files: HashMap<String, WalletFile>,
+}
+
+struct WalletFile {
+    ctype: &'static str,
+    body: Vec<u8>,
+    etag: String,
+}
+
+/// Read the browser wallet's files into memory, once: the page, its scripts, the
+/// WebAssembly module. Anything else in the directory is left out.
+fn load_wallet_files(dir: &Path) -> Result<HashMap<String, WalletFile>> {
+    fn walk(root: &Path, dir: &Path, out: &mut HashMap<String, WalletFile>) -> Result<()> {
+        for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+            let entry = entry?;
+            let path = entry.path();
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                walk(root, &path, out)?;
+                continue;
+            }
+            if !kind.is_file() {
+                continue;
+            }
+            let ctype = match path.extension().and_then(|e| e.to_str()) {
+                Some("html") => "text/html; charset=utf-8",
+                Some("js") => "text/javascript; charset=utf-8",
+                Some("css") => "text/css; charset=utf-8",
+                Some("wasm") => "application/wasm",
+                Some("svg") => "image/svg+xml",
+                Some("png") => "image/png",
+                Some("webmanifest") => "application/manifest+json",
+                _ => continue,
+            };
+            if entry.metadata()?.len() > MAX_WALLET_FILE {
+                return Err(anyhow!("{} is too large", path.display()));
+            }
+            let body = fs::read(&path)?;
+            let rel = path
+                .strip_prefix(root)?
+                .to_str()
+                .ok_or_else(|| anyhow!("{} is not a plain name", path.display()))?
+                .replace('\\', "/");
+            let etag = format!(
+                "\"{}\"",
+                hex::encode(blake2b_simd::Params::new().hash_length(16).hash(&body).as_bytes())
+            );
+            out.insert(rel, WalletFile { ctype, body, etag });
+        }
+        Ok(())
+    }
+    let mut out = HashMap::new();
+    walk(dir, dir, &mut out)?;
+    for needed in ["index.html", "pkg/zsettle_web.js", "pkg/zsettle_web_bg.wasm"] {
+        if !out.contains_key(needed) {
+            return Err(anyhow!(
+                "{} has no {needed}: build crates/zsettle-web (build.sh) and pass its www directory",
+                dir.display()
+            ));
+        }
+    }
+    Ok(out)
 }
 
 fn main() -> Result<()> {
@@ -561,6 +634,13 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn wallet_files(cli: &Cli) -> Result<HashMap<String, WalletFile>> {
+    match &cli.web_wallet {
+        Some(dir) => load_wallet_files(dir),
+        None => Ok(HashMap::new()),
+    }
+}
+
 fn local_hub(cli: &Cli, base: PathBuf, bins: Bins) -> Result<Hub> {
     if !valid_name(&cli.profile) {
         return Err(anyhow!("a profile name uses letters, digits, - and _"));
@@ -593,6 +673,7 @@ fn local_hub(cli: &Cli, base: PathBuf, bins: Bins) -> Result<Hub> {
         bins,
         port: cli.port,
         mode: Mode::Local { token, app },
+        wallet_files: wallet_files(cli)?,
     })
 }
 
@@ -664,6 +745,7 @@ fn hosted_hub(cli: &Cli, public: &str, base: PathBuf, bins: Bins) -> Result<Hub>
         bins,
         port: cli.port,
         mode: Mode::Hosted(Box::new(hosted)),
+        wallet_files: wallet_files(cli)?,
     };
     if let Some(file) = &cli.house_passphrase_file {
         let pass = Zeroizing::new(
@@ -767,6 +849,7 @@ fn b64u(bytes: &[u8]) -> String {
 struct Request {
     method: String,
     path: String,
+    query: String,
     headers: HashMap<String, String>,
     body: Vec<u8>,
 }
@@ -800,7 +883,10 @@ fn read_request(stream: &mut TcpStream) -> Result<Request> {
     };
     let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
     let (method, target, headers) = parse_head(&head)?;
-    let path = target.split('?').next().unwrap_or_default().to_string();
+    let (path, query) = match target.split_once('?') {
+        Some((p, q)) => (p.to_string(), q.to_string()),
+        None => (target.clone(), String::new()),
+    };
     let len: usize = headers
         .get("content-length")
         .map(|v| v.parse())
@@ -826,6 +912,7 @@ fn read_request(stream: &mut TcpStream) -> Result<Request> {
     Ok(Request {
         method,
         path,
+        query,
         headers,
         body,
     })
@@ -863,6 +950,8 @@ fn respond_with(stream: &mut TcpStream, status: u16, ctype: &str, body: &[u8], e
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",
+        301 => "Moved Permanently",
+        304 => "Not Modified",
         404 => "Not Found",
         413 => "Payload Too Large",
         421 => "Misdirected Request",
@@ -908,6 +997,113 @@ fn handle(hub: &Arc<Hub>, mut stream: TcpStream) {
     }
 }
 
+/// The browser wallet's page and the chain relay: public, the same for every visitor, and
+/// holding nothing of anyone's. Returns the stream when the request is for something else.
+fn public_route(hub: &Hub, req: &Request, mut stream: TcpStream, limit: impl Fn() -> bool) -> Option<TcpStream> {
+    if req.path == "/wallet" {
+        respond_with(&mut stream, 301, "text/plain", b"", "Location: /wallet/\r\n");
+        return None;
+    }
+    if let Some(rel) = req.path.strip_prefix("/wallet/") {
+        let rel = if rel.is_empty() { "index.html" } else { rel };
+        match hub.wallet_files.get(rel) {
+            Some(f) if req.method == "GET" => {
+                if req.headers.get("if-none-match") == Some(&f.etag) {
+                    wallet_respond(&mut stream, 304, f.ctype, b"", &f.etag);
+                } else {
+                    wallet_respond(&mut stream, 200, f.ctype, &f.body, &f.etag);
+                }
+            }
+            _ => respond(&mut stream, 404, "text/plain", b"not found"),
+        }
+        return None;
+    }
+    let Some(call) = req.path.strip_prefix("/api/chain/") else {
+        return Some(stream);
+    };
+    if hub.wallet_files.is_empty() {
+        respond(&mut stream, 404, "text/plain", b"not found");
+        return None;
+    }
+    if !limit() {
+        respond(
+            &mut stream,
+            429,
+            "application/json",
+            br#"{"error":"too many requests; wait a moment"}"#,
+        );
+        return None;
+    }
+    let q: HashMap<&str, &str> = req
+        .query
+        .split('&')
+        .filter_map(|p| p.split_once('='))
+        .collect();
+    let num = |k: &str| -> Result<u32> {
+        q.get(k)
+            .ok_or_else(|| anyhow!("missing {k}"))?
+            .parse()
+            .map_err(|_| anyhow!("{k} is a number"))
+    };
+    let r = (|| -> Result<(&'static str, Vec<u8>)> {
+        let network = match q.get("net").copied() {
+            Some("main") => zcash_protocol::consensus::Network::MainNetwork,
+            Some("test") => zcash_protocol::consensus::Network::TestNetwork,
+            _ => return Err(anyhow!("net is main or test")),
+        };
+        let server = zsettle_core::broadcast::pick_server(None, network);
+        use zsettle_core::broadcast::relay;
+        let bin = "application/octet-stream";
+        Ok(match (req.method.as_str(), call) {
+            ("GET", "tip") => (bin, relay::latest_block(&server)?),
+            ("GET", "blocks") => (bin, relay::blocks(&server, num("start")?, num("end")?)?),
+            ("GET", "tree-state") => (bin, relay::tree_state(&server, num("height")?)?),
+            ("GET", "subtree-roots") => (
+                bin,
+                relay::subtree_roots(
+                    &server,
+                    q.get("pool").copied().unwrap_or_default(),
+                    num("start")?,
+                    num("max")?,
+                )?,
+            ),
+            ("GET", "info") => (
+                "application/json",
+                serde_json::to_vec(&zsettle_core::broadcast::server_info_blocking(&server)?)?,
+            ),
+            ("POST", "send") => {
+                if req.headers.get("x-zsettle").map(String::as_str) != Some("1") {
+                    return Err(anyhow!("missing header"));
+                }
+                let msg = zsettle_core::broadcast::send_raw_transaction_blocking(
+                    &server,
+                    req.body.clone(),
+                )?;
+                ("text/plain; charset=utf-8", msg.into_bytes())
+            }
+            _ => return Err(anyhow!("no such call")),
+        })
+    })();
+    match r {
+        Ok((ctype, body)) => respond(&mut stream, 200, ctype, &body),
+        Err(e) => json_answer(&mut stream, Err(e), ""),
+    }
+    None
+}
+
+/// An answer for the browser wallet: isolated from other sites (its threads need shared
+/// memory), allowed to run WebAssembly, and revalidated by entity tag.
+fn wallet_respond(stream: &mut TcpStream, status: u16, ctype: &str, body: &[u8], etag: &str) {
+    let reason = if status == 304 { "Not Modified" } else { "OK" };
+    let head = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nETag: {etag}\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Embedder-Policy: require-corp\r\nCross-Origin-Resource-Policy: same-origin\r\nContent-Security-Policy: default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(head.as_bytes());
+    let _ = stream.write_all(body);
+    let _ = stream.flush();
+}
+
 fn json_answer(stream: &mut TcpStream, r: Result<Value>, extra: &str) {
     let (status, body) = match r {
         Ok(v) => (200, v),
@@ -937,6 +1133,9 @@ fn handle_local(hub: &Arc<Hub>, app: &Arc<App>, token: &str, req: Request, mut s
             return respond(&mut stream, 403, "text/plain", b"wrong origin");
         }
     }
+    let Some(mut stream) = public_route(hub, &req, stream, || true) else {
+        return;
+    };
     if req.method == "GET" {
         if let Some((ctype, body)) = static_file(&req.path) {
             return respond(&mut stream, 200, ctype, body);
@@ -1007,6 +1206,12 @@ fn handle_hosted(hub: &Arc<Hub>, h: &Hosted, req: Request, mut stream: TcpStream
         .filter(|v| !v.is_empty())
         .map(|v| visitor(&v))
         .unwrap_or_else(|| "local".into());
+    let relay_key = (format!("r:{ip}"), MAX_RELAY_CALLS_PER_IP_MIN);
+    let Some(mut stream) = public_route(hub, &req, stream, || {
+        h.count_check(std::slice::from_ref(&relay_key)).is_ok()
+    }) else {
+        return;
+    };
     if req.method == "GET" {
         if let Some((ctype, body)) = static_file(&req.path) {
             return respond(&mut stream, 200, ctype, body);

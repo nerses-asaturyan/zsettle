@@ -21,8 +21,9 @@ use zcash_client_backend::fees::{
     standard::MultiOutputChangeStrategy, DustOutputPolicy, SplitPolicy, StandardFeeRule,
 };
 use zcash_client_backend::wallet::OvkPolicy;
-use zcash_client_sqlite::{util::SystemClock, AccountUuid};
+use zcash_client_sqlite::AccountUuid;
 use zcash_keys::address::{Address, UnifiedAddress};
+#[cfg(feature = "native")]
 use zcash_proofs::prover::LocalTxProver;
 use zcash_protocol::{
     consensus::{Network, NetworkUpgrade, Parameters},
@@ -32,7 +33,7 @@ use zcash_protocol::{
 };
 use zip321::{Payment, TransactionRequest};
 
-use crate::wallet::{next_orchard_address, Db, NoteRef, Wallet};
+use crate::wallet::{next_orchard_address, Db, NoteRef, Wallet, WalletClock};
 
 /// An unspent note of the item account.
 #[derive(Clone, Debug)]
@@ -167,11 +168,7 @@ pub enum NoteState {
 }
 
 fn open_read_only(wallet: &Wallet) -> Result<rusqlite::Connection> {
-    rusqlite::Connection::open_with_flags(
-        wallet.dir.join("data.sqlite"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|e| anyhow!("opening wallet database: {e}"))
+    wallet.connection(true)
 }
 
 /// The wallet's knowledge of one Ironwood note, read from its tables. Unlike
@@ -408,7 +405,10 @@ fn pay_request(
     from_account_index: u32,
     request: TransactionRequest,
 ) -> Result<(Vec<u8>, String)> {
+    #[cfg(feature = "native")]
     let prover = LocalTxProver::bundled();
+    #[cfg(not(feature = "native"))]
+    let prover = no_sapling::NoSapling;
     let change_strategy = MultiOutputChangeStrategy::new(
         StandardFeeRule::Zip317,
         None,
@@ -446,7 +446,7 @@ fn pay_request(
     >(
         db,
         &wallet.network,
-        &SystemClock,
+        &WalletClock,
         &mut rand::rng(),
         &prover,
         &prover,
@@ -475,4 +475,69 @@ fn pay_request(
     let mut bytes = Vec::new();
     tx.write(&mut bytes)?;
     Ok((bytes, txid.to_string()))
+}
+
+/// The browser build pays from Ironwood only: the wallet library still wants Sapling provers,
+/// and this one is never called.
+#[cfg(not(feature = "native"))]
+mod no_sapling {
+    use sapling_crypto::{
+        bundle::GrothProofBytes,
+        circuit,
+        keys::EphemeralSecretKey,
+        prover::{OutputProver, SpendProver},
+        value::{NoteValue, ValueCommitTrapdoor},
+        Diversifier, MerklePath, PaymentAddress, ProofGenerationKey, Rseed,
+    };
+
+    pub struct NoSapling;
+
+    const NEVER: &str = "this build makes no Sapling proofs";
+
+    impl SpendProver for NoSapling {
+        type Proof = ();
+
+        fn prepare_circuit(
+            _: ProofGenerationKey,
+            _: Diversifier,
+            _: Rseed,
+            _: NoteValue,
+            _: jubjub::Fr,
+            _: ValueCommitTrapdoor,
+            _: bls12_381::Scalar,
+            _: MerklePath,
+        ) -> Option<circuit::Spend> {
+            None
+        }
+
+        fn create_proof<R: rand_core::Rng>(&self, _: circuit::Spend, _: &mut R) {
+            unreachable!("{NEVER}")
+        }
+
+        fn encode_proof(_: ()) -> GrothProofBytes {
+            unreachable!("{NEVER}")
+        }
+    }
+
+    impl OutputProver for NoSapling {
+        type Proof = ();
+
+        fn prepare_circuit(
+            _: &EphemeralSecretKey,
+            _: PaymentAddress,
+            _: jubjub::Fr,
+            _: NoteValue,
+            _: ValueCommitTrapdoor,
+        ) -> circuit::Output {
+            unreachable!("{NEVER}")
+        }
+
+        fn create_proof<R: rand_core::Rng>(&self, _: circuit::Output, _: &mut R) {
+            unreachable!("{NEVER}")
+        }
+
+        fn encode_proof(_: ()) -> GrothProofBytes {
+            unreachable!("{NEVER}")
+        }
+    }
 }

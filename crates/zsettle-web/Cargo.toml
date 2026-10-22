@@ -1,0 +1,55 @@
+# The browser wallet: zsettle-core compiled to WebAssembly. It is its own workspace because
+# it builds with a nightly toolchain (threads need the standard library rebuilt with
+# atomics) and with a stand-in for libsqlite3-sys; neither touches the native build.
+[package]
+name = "zsettle-web"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/nerses-asaturyan/zsettle"
+authors = ["Nerses Asaturyan"]
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+zsettle-core = { path = "../zsettle-core", default-features = false, features = ["web"] }
+orchard = { version = "0.16", default-features = false, features = ["circuit", "std", "multicore"] }
+pczt = { version = "0.10", features = ["orchard", "prover", "signer", "io-finalizer", "spend-finalizer", "tx-extractor", "transparent"] }
+zcash_client_backend = { version = "0.25", features = ["orchard", "pczt", "unstable"] }
+zcash_client_sqlite = { version = "0.23", features = ["orchard", "unstable", "transparent-inputs"] }
+zcash_primitives = "0.31"
+zcash_protocol = "0.11"
+zcash_keys = { version = "0.17", features = ["orchard"] }
+rusqlite = { version = "0.37", features = ["serialize", "backup"] }
+prost = "0.14"
+sapling-crypto = "0.9"
+bip0039 = { version = "0.14", features = ["std"] }
+secrecy = "0.8"
+zeroize = "1"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+rand = "0.10"
+
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+wasm-bindgen-rayon = "1.3"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Request", "RequestInit", "Response", "Headers", "WorkerGlobalScope"] }
+console_error_panic_hook = "0.1"
+# Every generation of getrandom in the tree takes its randomness from the browser.
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+getrandom04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+uuid = { version = "1", features = ["js"] }
+
+[patch.crates-io]
+libsqlite3-sys = { path = "shim/libsqlite3-sys" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

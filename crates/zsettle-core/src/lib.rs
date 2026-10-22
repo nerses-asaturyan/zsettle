@@ -13,19 +13,20 @@
 //!
 //! Modules:
 //! - [`wallet`]: light-wallet database access, note lookup, encrypted seed handling.
-//! - [`broadcast`]: sending a finished transaction through lightwalletd.
+//! - [`broadcast`]: sending a finished transaction through lightwalletd (`native`).
 //! - [`trade`]: two-party bundle construction and proving.
 //! - [`pczt`]: PCZT role helpers (redact, sign, combine, extract).
 //! - [`policy`]: the seller-side checks that run before a signature is produced.
 //! - [`listing`]: the public listings file (prices, payout address, item viewing key).
 //! - [`mint`]: minting item notes and listing an account's unspent notes.
 //! - [`item`]: what an item is and its minimum value.
-//! - [`verify`]: provenance verification from chain data with viewing keys only.
+//! - [`verify`]: provenance verification from chain data with viewing keys only (`native`).
 //! - [`ownership`]: signed proofs that the holder of an item account controls a note now.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+#[cfg(feature = "native")]
 pub mod broadcast;
 pub mod item;
 pub mod listing;
@@ -34,6 +35,7 @@ pub mod ownership;
 pub mod pczt;
 pub mod policy;
 pub mod trade;
+#[cfg(feature = "native")]
 pub mod verify;
 pub mod wallet;
 
