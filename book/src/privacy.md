@@ -13,7 +13,7 @@ This page says what each party can see, and where the limits are. The threat mod
 | The seller | The price paid, the trade's expiry, the nullifier of the buyer's paying note. With an exact-value two-action offer: that note's value (price plus fee). Over HTTP: the buyer's IP, unless the buyer uses Tor. | The buyer's viewing key, addresses, other notes, balance, the change amount. |
 | The buyer | The listings file and what it shows (above). | The seller's other notes and accounts. |
 | The light server | IP addresses, block ranges scanned, imported listing birthdays, transactions broadcast. | The wallet's transparent addresses (zsettle is Orchard-only and queries none). |
-| A hosted demo server | Everything about the wallets it holds. | Nothing is hidden from it: it holds the keys. |
+| A hosted server | What a light server sees, for the wallets in its visitors' pages; a browser shop's listings, the offers its buyers leave and its replies. | The recovery phrase, the passphrase, the wallet database. It holds no visitor's keys (but it sends the page's code). |
 
 ## The buyer
 
@@ -109,26 +109,33 @@ transaction you look at.
 
 ## The browser wallet
 
-The wallet at `/wallet/` keeps its phrase and database in the browser, encrypted. The server
-relays chain data for it and sees what a light server sees: the IP address, the block ranges
-the page asks for, the tree state it asks for when a wallet or a shop key starts (rounded down
-to 1,000 blocks), the listed items whose blocks it looks up when you open a shop (which shows
-which shop you opened; the list is public), the transactions of your item notes whose names
-it fetches after a restore (compact blocks carry no memos; the shop that sold you the item
-already knows that transaction), and each transaction it sends. The server passes these requests on to its light
-server (zec.rocks by default), which sees them coming from the server, not from you.
+On a hosted server the app at `/` is a wallet that keeps its phrase and database in the
+browser, encrypted. The server relays chain data for it and sees what a light server sees: the
+IP address, the block ranges the page asks for, the tree state it asks for when a wallet or a
+shop key starts (rounded down to 1,000 blocks), the listed items whose blocks it looks up when
+you open a shop (which shows which shop you opened; the list is public), the transactions of
+your item notes whose names it fetches after a restore (compact blocks carry no memos; the
+shop that sold you the item already knows that transaction), and each transaction it sends.
+The server passes these requests on to its light server (zec.rocks by default), which sees
+them coming from the server, not from you.
+
+Item histories and ownership-proof checks also run in the page, over blocks fetched through
+the relay. The trace reads on to the chain tip, so the block ranges do not show the server
+where the trace ended.
+
+When you sell from the browser, the server keeps your shop's mailbox: your signed listings,
+the offers buyers leave, and your signed replies. It sees when your page is open (the page
+asks for offers every few seconds), and your IP address. Buyers' offers carry what they carry
+for any shop; see "Network and proxies" above.
 
 The server also sends the page's code: a hostile server could send a page that leaks the
-phrase. See [Use the wallet in your browser](start/browser-wallet.md#what-the-server-can-and-cannot-do).
+phrase. See [The app in your browser](start/browser-wallet.md#what-the-server-can-and-cannot-do).
 
-## The hosted demo
+## The hosted server
 
-The demo's main app holds every visitor's wallet and sees the passphrase while a wallet is
-unlocked. It is meant for free test coins only. For real ZEC, use the browser wallet or run
-zsettle yourself.
-
-For its limits (new wallets an hour, test coins a day) the server keeps each visitor's IP
-address in memory for at most a day, and nothing else about the visitor. It writes no access
-log, and the web proxy in front of it writes none either; the proxy's error log (a request it
-could not pass on, for example during a restart) and the firewall's log of blocked packets
-can record an address in the system journal.
+For its limits (relay calls a minute, test coins a day) the server keeps each visitor's IP
+address in memory for at most a day, and nothing else about the visitor. The addresses that
+got test coins are kept in `hub.json`. It writes no access log, and the web proxy in front of
+it writes none either; the proxy's error log (a request it could not pass on, for example
+during a restart) and the firewall's log of blocked packets can record an address in the
+system journal.

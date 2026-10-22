@@ -42,8 +42,9 @@ zsettle-app --profile bob --port 7071
 | `--bin-dir <dir>` | next to `zsettle-app` | Where `zsettle` and `zsettle-seller` are. |
 | `--new-token` | off | Replace this profile's page key. |
 
-The hosted-mode flags (`--public`, `--network`, `--house-passphrase-file`,
-`--allow-hosted-mainnet`) are described in [Hosting the demo](../hosting.md).
+The hosted-mode flags (`--public`, `--web-wallet`, `--network`, `--house-passphrase-file`)
+are described in [Hosting the demo](../hosting.md). On a hosted server the same page runs the
+wallet in the browser instead; see [The app in your browser](browser-wallet.md).
 
 ## What happens on this machine
 

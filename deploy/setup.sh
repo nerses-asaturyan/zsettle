@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
 # Set up the hosted zsettle demo on a fresh Ubuntu 24.04 server, in one command.
 #
-#   sudo ./setup.sh <domain> <directory with zsettle, zsettle-seller and zsettle-app>
+#   sudo ./setup.sh <domain> <directory with zsettle, zsettle-seller and zsettle-app> <www>
+#
+# <www> is the built wallet engine (crates/zsettle-web/www after build.sh): the wallet runs
+# in the visitor's page, and the server keeps no visitor wallets.
 #
 # It installs Caddy (HTTPS with an automatic certificate), creates a service user, installs
-# the three binaries, writes a house passphrase, and runs zsettle-app in hosted mode as a
-# service that restarts by itself. Run it again to upgrade the binaries; data is kept.
+# the three binaries and the wallet engine, writes a house passphrase, and runs zsettle-app in
+# hosted mode as a service that restarts by itself. Run it again to upgrade; data is kept.
 set -euo pipefail
 
-DOMAIN=${1:?usage: setup.sh <domain> <binary directory>}
-BIN=${2:?usage: setup.sh <domain> <binary directory> [browser wallet www directory]}
-WEB=${3:-}
+USAGE="usage: setup.sh <domain> <binary directory> <wallet engine www directory>"
+DOMAIN=${1:?$USAGE}
+BIN=${2:?$USAGE}
+WEB=${3:?$USAGE}
 DATA=/var/lib/zsettle
 PORT=8080
 
@@ -34,16 +38,13 @@ chown zsettle:zsettle "$DATA/house.pass"; chmod 600 "$DATA/house.pass"
 echo "== binaries"
 systemctl stop zsettle-demo 2>/dev/null || true
 install -m 755 "$BIN/zsettle" "$BIN/zsettle-seller" "$BIN/zsettle-app" /usr/local/bin/
-WEB_FLAG=""
-if [ -n "$WEB" ]; then
-  [ -f "$WEB/index.html" ] && [ -f "$WEB/pkg/zsettle_web_bg.wasm" ] || { echo "$WEB is not a built browser wallet (run crates/zsettle-web/build.sh)"; exit 1; }
-  mkdir -p /usr/local/share/zsettle-web
-  rm -rf /usr/local/share/zsettle-web/www
-  cp -r "$WEB" /usr/local/share/zsettle-web/www
-  chown -R root:root /usr/local/share/zsettle-web
-  chmod -R a+rX,go-w /usr/local/share/zsettle-web
-  WEB_FLAG=" --web-wallet /usr/local/share/zsettle-web/www"
-fi
+[ -f "$WEB/engine.js" ] && [ -f "$WEB/worker.js" ] && [ -f "$WEB/pkg/zsettle_web_bg.wasm" ] || { echo "$WEB is not a built wallet engine (run crates/zsettle-web/build.sh)"; exit 1; }
+mkdir -p /usr/local/share/zsettle-web
+rm -rf /usr/local/share/zsettle-web/www
+cp -r "$WEB" /usr/local/share/zsettle-web/www
+chown -R root:root /usr/local/share/zsettle-web
+chmod -R a+rX,go-w /usr/local/share/zsettle-web
+WEB_FLAG=" --web-wallet /usr/local/share/zsettle-web/www"
 
 echo "== service"
 cat > /etc/systemd/system/zsettle-demo.service <<UNIT
@@ -80,7 +81,7 @@ SystemCallArchitectures=native
 CapabilityBoundingSet=
 UMask=0077
 # No cloud metadata, link-local or private addresses from this service (loopback stays open
-# for its own shops).
+# for its house shop).
 IPAddressDeny=169.254.0.0/16 fe80::/10 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 fc00::/7
 ProtectProc=invisible
 LimitNOFILE=4096

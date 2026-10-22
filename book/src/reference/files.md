@@ -64,19 +64,30 @@ passkey entry is only its id and salt.
 The data directory (`/var/lib/zsettle/data` with the setup script):
 
 ```
-hub.json          passkey credential id -> wallet code; wallet code -> shop port; wallets that got test coins
-prf.salt          the site's passkey PRF salt; keep it, or every passkey stops working
-<code>/           one profile per visitor wallet, laid out as in local mode (no page.token)
-house/            the house shop's profile
+hub.json          the house shop's port; addresses that got test coins; faucet payments under way
+house/            the house shop's profile, laid out as in local mode
 ```
 
-`hub.json` and each `app.json` are written owner-only to a new file and then renamed into
-place. If either cannot be read (damaged JSON), `zsettle-app` refuses to start: restore it
+A hosted server keeps no visitor wallets. Browser shops' mailboxes are kept in memory only.
+Folders and files left by an older hosted mode (one folder per visitor wallet, `prf.salt`) are
+not loaded.
+
+`hub.json` and the house's `app.json` are written owner-only to a new file and then renamed
+into place. If either cannot be read (damaged JSON), `zsettle-app` refuses to start: restore it
 from a backup, or move it away to start empty. A missing file just starts empty. The same
 holds for a profile's `app.json` in local mode.
 
 The setup script keeps the house passphrase in `/var/lib/zsettle/house.pass` (owner-only),
-outside the data directory.
+outside the data directory, and the wallet engine in `/usr/local/share/zsettle-web/www`.
+
+## The wallet in the browser
+
+On a hosted server the wallet lives in the visitor's browser, in the IndexedDB database
+`zsettle-wallet`, store `wallets`, one record per network (`wallet-test`, `wallet-main`). A
+record holds the network, the birthday, how the wallet is locked (a passkey's credential id
+and PRF salt, or a passphrase's PBKDF2 salt), and three AES-GCM boxes: the 24 words, the
+wallet database, and the app's own data (activity, item details, shops opened, the shop's
+listings, last sync).
 
 ## Listings file
 

@@ -15,12 +15,22 @@ use serde_json::{json, Value};
 use zsettle_core::listing::Listings;
 use zsettle_core::pczt::envelope_tag;
 
-/// Mailboxes kept at once.
+/// Mailboxes kept at once; when full, the longest-closed one makes room.
 const MAX_SHOPS: usize = 200;
-/// Offers waiting for one shop.
-const MAX_PENDING: usize = 50;
-/// Replies kept for one shop.
-const MAX_REPLIES: usize = 500;
+/// Mailboxes made from one visitor (an IPv4 address or an IPv6 /64) and kept at once.
+const MAX_SHOPS_PER_VISITOR: usize = 3;
+/// Offers waiting for one shop, and their bytes.
+const MAX_PENDING: usize = 20;
+const MAX_PENDING_BYTES: usize = 8 * 1024 * 1024;
+/// Offers handed to the owner's page in one poll.
+const MAX_POLL_OFFERS: usize = 5;
+/// An offer the owner did not answer in this long is dropped (a closed shop's at once).
+const OFFER_SECS: u64 = 15 * 60;
+/// Replies kept for one shop, and the size of one signed reply.
+const MAX_REPLIES: usize = 200;
+const MAX_REPLY_BYTES: usize = 256 * 1024;
+/// Offers and replies held by all mailboxes together.
+const MAX_TOTAL_BYTES: usize = 256 * 1024 * 1024;
 /// A shop counts as open this long after its page last asked for offers.
 pub const OPEN_SECS: u64 = 45;
 /// A mailbox, and a reply, is dropped this long after it was last used.
@@ -40,6 +50,9 @@ enum Reply {
 struct Shop {
     raw: String,
     listings: Listings,
+    /// The visitor that made the mailbox, and the time of its newest listings.
+    owner: String,
+    listings_at: u64,
     /// Waiting offers: tag, bytes, when.
     offers: Vec<(String, Vec<u8>, u64)>,
     replies: HashMap<String, (Reply, u64)>,
@@ -54,6 +67,35 @@ pub struct Mailboxes {
     shops: Mutex<HashMap<String, Shop>>,
 }
 
+impl Shop {
+    fn bytes(&self) -> usize {
+        self.offers.iter().map(|o| o.1.len()).sum::<usize>()
+            + self
+                .replies
+                .values()
+                .map(|(r, _)| match r {
+                    Reply::Signed(b) => b.len(),
+                    Reply::Refused(r) => r.len(),
+                })
+                .sum::<usize>()
+    }
+
+    fn open(&self, now: u64) -> bool {
+        self.seen + OPEN_SECS > now
+    }
+
+    /// Drop old replies, and offers nobody will answer: old ones, and all of a closed shop's.
+    fn prune(&mut self, now: u64) {
+        let open = self.open(now);
+        self.offers.retain(|o| open && o.2 + OFFER_SECS > now);
+        self.replies.retain(|_, (_, at)| *at + KEEP_SECS > now);
+    }
+}
+
+fn total_bytes(shops: &HashMap<String, Shop>) -> usize {
+    shops.values().map(Shop::bytes).sum()
+}
+
 fn signed_by(l: &Listings, body: &Value, msg: &str, now: u64) -> Result<()> {
     let at = body["at"].as_u64().ok_or_else(|| anyhow!("missing at"))?;
     if at.abs_diff(now) > MAX_SKEW_SECS {
@@ -66,8 +108,9 @@ fn signed_by(l: &Listings, body: &Value, msg: &str, now: u64) -> Result<()> {
 }
 
 impl Mailboxes {
-    /// Owner: upload signed listings (a new mailbox, or new listings for one).
-    pub fn publish(&self, code: &str, body: &Value, now: u64) -> Result<Value> {
+    /// Owner: upload signed listings (a new mailbox, or new listings for one). `visitor`
+    /// is who asks, for the limit of mailboxes per visitor.
+    pub fn publish(&self, code: &str, body: &Value, visitor: &str, now: u64) -> Result<Value> {
         let raw = body["listings"]
             .as_str()
             .ok_or_else(|| anyhow!("missing listings"))?;
@@ -76,20 +119,57 @@ impl Mailboxes {
         }
         let l = Listings::parse(raw, "the listings")?;
         l.verify_signature()?;
+        // Only the plain Orchard key, written the one way: no other spelling of the same key
+        // (extra items in the unified key) can be searched for a code that matches another's.
+        if Listings::encode_item_key(&l.item_fvk()?, l.network()?)? != l.item_ufvk {
+            return Err(anyhow!("the listings' item key is not in its plain form"));
+        }
         if l.key_fingerprint() != code {
             return Err(anyhow!("these listings belong to another shop"));
         }
         signed_by(&l, body, &format!("listings\n{code}\n{raw}"), now)?;
+        let at = body["at"].as_u64().unwrap_or(0);
         let mut shops = self.shops.lock().unwrap();
         shops.retain(|_, s| s.used + KEEP_SECS > now);
-        if !shops.contains_key(code) && shops.len() >= MAX_SHOPS {
-            return Err(anyhow!(
-                "this server holds many shops right now; try again later"
-            ));
+        if let Some(shop) = shops.get(code) {
+            // The code stays with the key that made the mailbox, and listings never go back
+            // to an older signed request.
+            if shop.listings.item_ufvk != l.item_ufvk {
+                return Err(anyhow!("these listings belong to another shop"));
+            }
+            if at < shop.listings_at {
+                return Err(anyhow!("newer listings are already here"));
+            }
+        } else {
+            if shops.values().filter(|s| s.owner == visitor).count() >= MAX_SHOPS_PER_VISITOR {
+                return Err(anyhow!(
+                    "you opened several shops lately; try again tomorrow"
+                ));
+            }
+            if shops.len() >= MAX_SHOPS {
+                // Make room: the shop closed longest ago goes.
+                let oldest = shops
+                    .iter()
+                    .filter(|(_, s)| !s.open(now))
+                    .min_by_key(|(_, s)| s.used)
+                    .map(|(k, _)| k.clone());
+                match oldest {
+                    Some(k) => {
+                        shops.remove(&k);
+                    }
+                    None => {
+                        return Err(anyhow!(
+                            "this server holds many shops right now; try again later"
+                        ))
+                    }
+                }
+            }
         }
         let shop = shops.entry(code.to_string()).or_insert_with(|| Shop {
             raw: String::new(),
             listings: l.clone(),
+            owner: visitor.to_string(),
+            listings_at: 0,
             offers: Vec::new(),
             replies: HashMap::new(),
             seen: 0,
@@ -97,6 +177,7 @@ impl Mailboxes {
         });
         shop.raw = raw.to_string();
         shop.listings = l;
+        shop.listings_at = at;
         shop.used = now;
         Ok(json!({ "code": code, "items": shop.listings.items.len() }))
     }
@@ -110,10 +191,11 @@ impl Mailboxes {
         signed_by(&shop.listings, body, &format!("poll\n{code}"), now)?;
         shop.seen = now;
         shop.used = now;
-        shop.replies.retain(|_, (_, at)| *at + KEEP_SECS > now);
+        shop.prune(now);
         let offers: Vec<Value> = shop
             .offers
             .iter()
+            .take(MAX_POLL_OFFERS)
             .map(|(tag, bytes, _)| json!({ "tag": tag, "envelope": hex::encode(bytes) }))
             .collect();
         Ok(json!({ "offers": offers }))
@@ -125,7 +207,10 @@ impl Mailboxes {
         let mut shops = self.shops.lock().unwrap();
         let shop = shops.get_mut(code).ok_or_else(|| anyhow!("no such shop"))?;
         let (payload, reply) = match (body["signed"].as_str(), body["refused"].as_str()) {
-            (Some(h), None) => (format!("signed:{h}"), Reply::Signed(hex::decode(h)?)),
+            (Some(h), None) if h.len() <= 2 * MAX_REPLY_BYTES => {
+                (format!("signed:{h}"), Reply::Signed(hex::decode(h)?))
+            }
+            (Some(_), None) => return Err(anyhow!("the reply is too large")),
             (None, Some(r)) => (
                 format!("refused:{r}"),
                 Reply::Refused(r.chars().take(500).collect()),
@@ -162,6 +247,7 @@ impl Mailboxes {
         let shop = shops.get_mut(code).ok_or_else(|| anyhow!("no such shop"))?;
         signed_by(&shop.listings, body, &format!("close\n{code}"), now)?;
         shop.seen = 0;
+        shop.prune(now);
         Ok(json!({ "closed": true }))
     }
 
@@ -183,10 +269,12 @@ impl Mailboxes {
         now: u64,
     ) -> std::result::Result<Value, (u16, String)> {
         let mut shops = self.shops.lock().unwrap();
+        let total = total_bytes(&shops);
         let shop = shops
             .get_mut(code)
             .ok_or((404, "no such shop".to_string()))?;
-        if shop.seen + OPEN_SECS <= now {
+        shop.prune(now);
+        if !shop.open(now) {
             return Err((
                 503,
                 "this shop is closed: its owner's page is not open".into(),
@@ -201,7 +289,11 @@ impl Mailboxes {
             shop.replies.remove(&tag);
         }
         if !shop.replies.contains_key(&tag) && !shop.offers.iter().any(|(t, _, _)| *t == tag) {
-            if shop.offers.len() >= MAX_PENDING {
+            let pending: usize = shop.offers.iter().map(|o| o.1.len()).sum();
+            if shop.offers.len() >= MAX_PENDING
+                || pending + bytes.len() > MAX_PENDING_BYTES
+                || total + bytes.len() > MAX_TOTAL_BYTES
+            {
                 return Err((503, "too many offers waiting; try again later".into()));
             }
             shop.offers.push((tag.clone(), bytes.to_vec(), now));
@@ -231,7 +323,7 @@ impl Mailboxes {
             .lock()
             .unwrap()
             .iter()
-            .filter(|(_, s)| s.seen + OPEN_SECS > now)
+            .filter(|(_, s)| s.open(now))
             .map(|(code, s)| {
                 json!({
                     "base": format!("{origin}/shop/{code}"), "code": code,

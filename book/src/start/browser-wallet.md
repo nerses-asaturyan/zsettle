@@ -1,10 +1,11 @@
-# Use the wallet in your browser
+# The app in your browser
 
-A server that runs `zsettle-app --web-wallet` also serves a wallet that runs inside the page,
-at `/wallet/`. It is the same wallet code as the command-line tools, compiled to WebAssembly.
-The keys stay on your device; the server never holds them.
+On a hosted server (`zsettle-app --public ... --web-wallet ...`) the app at `/` is the
+wallet, and it runs inside the page. It is the same wallet code as the command-line tools,
+compiled to WebAssembly. The keys stay on your device; the server keeps no wallets.
 
-On the hosted demo it is at `https://<demo domain>/wallet/`, and the start page links to it.
+On the hosted demo it is the start page, `https://<demo domain>/`. The old `/wallet/` address
+leads there too.
 
 ## What stays where
 
@@ -15,27 +16,28 @@ On the hosted demo it is at `https://<demo domain>/wallet/`, and the start page 
 | Proving and signing | In the page, in a background worker with a thread pool. |
 | Chain data | Fetched through the server's relay at `/api/chain/`: blocks, tree states, the chain tip, and finished transactions to send. These are the requests any light wallet makes. |
 | Offers to a shop | Posted to the shop on the same server (`/shop/<code>/offer`), as the command-line `buy` posts them. |
+| Your shop's item key | In the wallet's worker, while your shop is open. |
 
 The key that encrypts the phrase and the database comes from a passkey (its PRF output) or
 from a passphrase (PBKDF2, 600,000 rounds). A passkey wallet asks for the passkey again
-before every payment, purchase, proof and backup; a passphrase wallet asks for the passphrase
-again before showing the recovery phrase. An open wallet locks itself after 15 minutes
-without a touch or a key.
+before every action that signs (a payment, a purchase, minting, listing, delisting,
+cancelling, opening the shop, a proof) and before showing the backup words; a passphrase
+wallet asks for the passphrase again before showing the backup words.
 
 ## Create or restore
 
-1. Open `/wallet/` and choose **Create a wallet**. Pick the network: testnet (free test coins)
+1. Open the app and choose **Create a wallet**. Pick the network: testnet (free test coins)
    or mainnet (real ZEC).
 2. Write the 24 words down. They are the only way back if the browser loses its data.
 3. Lock it with a passkey, or with a passphrase of 12 characters or more.
 
-**Restore from a recovery phrase** takes the 24 words and, for a wallet older than a day, the
-block height it was made at (shown under **Show recovery phrase**). Without the height the
-wallet starts scanning at a recent block and misses older payments.
+**Restore from 24 words** takes the words and, for a wallet made more than a day ago, the
+block height it was made at. Without the height the wallet starts scanning at a recent block
+and misses older payments.
 
-The browser keeps one wallet per network. The lock screen offers the other one, and a way
-back for a forgotten passphrase or a lost passkey: restore from the recovery phrase. A wallet
-opens in one tab at a time.
+The browser keeps one wallet per network. The welcome screen offers the other one ("Open the
+mainnet wallet instead", or the testnet one), and a way back for a forgotten passphrase or a
+lost passkey: restore from the recovery phrase. A wallet opens in one tab at a time.
 
 Add the page to the home screen to use it like an app; the page also asks the browser to keep
 its storage. Browsers can still clear site data (Safari does after weeks without a visit to a
@@ -46,7 +48,10 @@ site that is not on the home screen), so keep the 24 words.
 - **Receive** shows a fresh address each time. Money from another wallet can be spent after
   10 blocks, change after 3.
 - **Send** pays a unified address with an Orchard receiver.
-- **Shops** lists the open shops of this server. Opening a shop adds its item key to the
+- On the testnet, a new wallet asks the server's faucet for free test coins at once, if the
+  server runs a house shop. Each address gets them once. If it fails, a **Get coins** button
+  stays for later.
+- **Market** lists the open shops of this server. Opening a shop adds its item key to the
   wallet and scans for its items in the background, so a purchase does not wait for that scan.
   The scan starts at the block of the oldest listed item (rounded down to 1,000 blocks), not at
   the shop's own start. A purchase made before the scan ends says it is waiting for it.
@@ -56,20 +61,45 @@ site that is not on the home screen), so keep the 24 words.
   shop's signed list says another price or address by then, the purchase stops. The paying
   note is saved as held for this offer before the offer leaves. On a phone, proving takes up
   to a minute or two.
-- On the testnet, **Receive** offers free test coins from the server's faucet, once per
-  address.
+- **History** traces an item through the chain in the page, with the shop's signed listings
+  key and the wallet's own item key, as `zsettle verify` does.
+- **Prove** makes an ownership proof of an item you hold, as `zsettle-seller prove` does.
+  Anyone can check it with `zsettle check-proof` or the app; the app checks it in the page.
 - After a restore, item names come back with the next sync: the wallet fetches each item
   note's transaction and reads its memo with its own key. The activity list starts empty.
-- **Prove** makes an ownership proof of an item you hold, as `zsettle-seller prove` does.
-  Anyone can check it with `zsettle check-proof` or the app.
-- **Show recovery phrase** and **Remove from this browser** are under *This wallet*.
+- **Backup words** shows the 24 words again, after the passkey or the passphrase.
+
+## Sell from the browser
+
+Minting, listing, delisting and cancelling all run in the page, on the **Sell** tab.
+
+1. **Create items.** Each one is a new note in the wallet's item account (minting).
+2. **List** an item with a price, and if you like a short description and an icon. The page
+   signs the listings with the item key.
+3. **Open the shop.** The page uploads the signed listings to the server and asks for offers
+   every few seconds. Buyers reach the shop at `https://<domain>/shop/<code>`; the code is the
+   fingerprint of your listings key (12 hex characters).
+
+The shop is open while its page is open. The page checks each offer with the same checks as
+the seller service (`zsettle-seller serve`), signs its half of a trade it accepts, and posts
+the reply. Close the page, or lock the wallet, and the shop closes; the server counts it as
+closed 45 seconds after the page last asked for offers. A server restart closes it too; open it
+again from the page.
+
+The server keeps a mailbox for your shop: the signed listings, the offers buyers leave, and
+your replies. Every request the page makes to it is signed with your item key, so nobody else
+can change your listings or answer for your shop.
+
+**Cancel** spends the item to a fresh note of the same account, so no offer the shop signed
+earlier can settle. Delisting alone does not do that.
 
 ## What the server can and cannot do
 
 The server cannot spend, and it cannot read the phrase or the database. It sees what a light
 server sees: your IP address, which block ranges the page asks for (from the wallet's
 birthday, and from a shop key's birthday when you open that shop), and the transactions you
-send. See [Privacy](../privacy.md#the-browser-wallet).
+send. When you sell, it also sees your shop's listings, the offers and your replies, and when
+your page is open. See [Privacy](../privacy.md#the-browser-wallet).
 
 The server does send the page's code. A server that is hostile, or taken over, could send a
 page that copies the phrase. That is the trust any web wallet asks for. For the strongest
@@ -83,7 +113,8 @@ first visit downloads about 4.5 MB.
 
 ## Limits
 
-- The first purchase of a session builds the proving key (seconds on a computer, longer on a
+- The first purchase of a visit builds the proving key (seconds on a computer, longer on a
   phone); the page starts it in the background after the first sync.
 - A payment (Send) builds its own proving key each time, so it takes longer than a purchase.
 - The page buys from shops on its own server only.
+- A shop sells only while its page is open.

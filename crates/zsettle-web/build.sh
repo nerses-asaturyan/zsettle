@@ -1,6 +1,6 @@
 #!/bin/sh
 # Build the browser wallet into www/pkg: the WebAssembly module and its JavaScript glue.
-# zsettle-app serves www/ at /wallet/ (--web-wallet crates/zsettle-web/www).
+# zsettle-app serves www/ with its page (--web-wallet crates/zsettle-web/www).
 set -e
 cd "$(dirname "$0")"
 wasm-pack build --release --target web --out-dir www/pkg --no-typescript --no-pack

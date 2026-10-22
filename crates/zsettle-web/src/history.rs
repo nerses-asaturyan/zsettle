@@ -47,8 +47,20 @@ impl WebWallet {
         let mut start = from;
         'scan: while start <= tip {
             let end = (start + TRACE_BATCH - 1).min(tip);
-            for block in self.relay.blocks(start, end).await? {
-                if !tracer.feed(&block)? {
+            let blocks = self.relay.blocks(start, end).await?;
+            // A short or gapped answer would skip a spend: every block, in order, or none.
+            if blocks.len() as u64 != u64::from(end - start + 1)
+                || blocks
+                    .iter()
+                    .zip(start..=end)
+                    .any(|(b, h)| b.height != u64::from(h))
+            {
+                return Err(anyhow!(
+                    "the server sent blocks {start} to {end} incomplete; try again"
+                ));
+            }
+            for block in &blocks {
+                if !tracer.feed(block)? {
                     break 'scan;
                 }
             }

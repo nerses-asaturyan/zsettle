@@ -1,20 +1,29 @@
 # Try the hosted testnet demo
 
-The public demo is a server that runs `zsettle-app` in hosted mode on the Zcash testnet. The
-link to it is on the project page: <https://nerses-asaturyan.github.io/zsettle/>.
+The public demo is a server that runs `zsettle-app` in hosted mode, with its house shop on the
+Zcash testnet. The link to it is on the project page: <https://nerses-asaturyan.github.io/zsettle/>.
+
+The wallet runs in your browser. The 24 words and the wallet stay on your device, and proofs
+and signatures are made in the page. The server keeps no wallets. See
+[The app in your browser](browser-wallet.md) for the details.
 
 What you can do there:
 
-- **Create a wallet.** Use a passkey, or a wallet code and a passphrase of at least 12
-  characters. The server shows you the wallet code; keep it if you use a passphrase.
-- **Get free test coins.** If the server runs a house shop, a new wallet is sent test coins
-  right away, one time (300,000 zatoshis, that is 0.003 TAZ). The wallet page shows them on
-  the way. If the faucet cannot pay at that moment, a "Get coins" button stays for later.
-- **Buy from an open shop.** The market lists the shops that are open now. The house shop
-  keeps a few items listed and makes new ones when they sell.
-- **Open your own shop.** Mint items, set prices, and open the shop. Other visitors reach it at
-  `https://<demo domain>/shop/<your wallet code>`.
-- **See an item's history**, traced from the chain with viewing keys.
+- **Create or restore a wallet.** Pick testnet, write down the 24 words, and lock the wallet
+  in this browser with a passkey or a passphrase of at least 12 characters. To bring back a
+  wallet you made before, choose **Restore from 24 words**.
+- **Get free test coins.** If the server runs a house shop, a new testnet wallet is sent test
+  coins right away, once per address (300,000 zatoshis, that is 0.003 TAZ). The wallet page
+  shows them on the way. If the faucet cannot pay at that moment, a **Get coins** button stays
+  for later.
+- **Buy from an open shop.** The Market lists the shops that are open now. The house shop
+  keeps a few items listed and makes new ones when they sell. The page checks the shop's
+  signed price list, builds and proves the trade, and sends it.
+- **Sell from your browser.** On the Sell tab, create items, set prices, and open your shop.
+  Other visitors reach it at `https://<demo domain>/shop/<code>`. The shop is open while your
+  page is open: the page signs offers with the key in your browser. Close the page and the
+  shop closes.
+- **See an item's history**, traced from the chain with viewing keys, in your browser.
 - **Prove you own an item**, or check that someone else does: the holder makes a proof in the
   wallet and shares it (text, QR code or the Share button), and anyone pastes or scans it in the
   market's Ownership card. No code needs to go back and forth; a live check with a code is
@@ -28,18 +37,14 @@ What you can do there:
 Links tapped inside apps (Instagram, Facebook, Telegram, Slack, X) often open in that app's
 own small browser. Passkeys usually do not work there, and some of these browsers change the
 page's colours. The page notices this and says so: use the app's menu (⋮ or ···) and choose
-"Open in browser", or use a wallet code and a passphrase instead.
+"Open in browser", or use a passphrase instead.
 
 ## Know the limits
 
-- The demo is for test coins only. The server holds every demo wallet, so whoever runs it
-  could take what is in them. For real ZEC, run zsettle on your own computer.
-- A session lasts 12 hours. A wallet nobody used for two hours is locked again.
-- An open shop keeps signing offers while you are away. The page warns you about this when you
-  sign out with the shop open; stop the shop on the Sell tab first to close it.
-- If the demo server restarts, your shop is closed until you sign in again; then it opens
-  again by itself.
-- A wallet that was never synced, got no test coins and listed nothing is removed after three
-  days.
-- The server limits how many wallets and shops it serves. See
+- The demo is for test coins. The wallet can be made on mainnet too, but the server sends the
+  page's code, so for real ZEC the strongest setting is running zsettle on your own computer.
+- Your wallet lives in this browser only. Keep the 24 words: they are the only way back if the
+  browser loses its data, or on another device.
+- Your shop sells only while its page is open. If the server restarts, open the shop again.
+- The server limits how many requests, shops and test coins it serves. See
   [Security model and limits](../security.md#hosted-mode).

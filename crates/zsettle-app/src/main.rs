@@ -1,12 +1,12 @@
-//! zsettle-app: a web page for zsettle. It drives the `zsettle` and `zsettle-seller`
-//! binaries for every action, so the page adds no cryptography of its own.
+//! zsettle-app: a web page for zsettle.
 //!
 //! Two modes. Local (the default): one profile, on this machine only, behind a page key in
-//! the link. Hosted (`--public https://…`): one server for many people behind a TLS proxy;
-//! each visitor creates a wallet of their own, signs in with a passkey (or a wallet code and a
-//! passphrase), and can open a shop that others reach at `<public>/shop/<code>`. An optional
-//! house shop restocks itself and hands out test coins. Hosted mode is meant for the testnet:
-//! the server holds every wallet.
+//! the link; the page drives the `zsettle` and `zsettle-seller` binaries for every action.
+//! Hosted (`--public https://…`): one server for many people behind a TLS proxy. The wallet
+//! runs in each visitor's page (the WebAssembly engine given with `--web-wallet`); the server
+//! keeps no visitor wallet. It relays public chain data, keeps a mailbox for each shop run
+//! from a browser, and runs an optional house shop that restocks itself and hands out test
+//! coins.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -60,6 +60,9 @@ const MAX_CALLS_PER_IP_MIN: usize = 120;
 /// thousand blocks takes two requests per 500 blocks.
 const MAX_RELAY_CALLS_PER_IP_MIN: usize = 300;
 /// Browser shop mailbox requests per visitor a minute (an open shop asks every few seconds).
+/// Offers posted to shops a minute, per visitor and from everyone.
+const MAX_OFFERS_PER_IP_MIN: usize = 10;
+const MAX_OFFERS_MIN: usize = 200;
 const MAX_MAILBOX_CALLS_PER_IP_MIN: usize = 120;
 /// Chain relay requests a minute from all visitors together.
 const MAX_RELAY_CALLS_MIN: usize = 3_000;
@@ -1152,9 +1155,6 @@ fn handle_hosted(hub: &Arc<Hub>, h: &Hosted, req: Request, mut stream: TcpStream
             return respond(&mut stream, 403, "text/plain", b"wrong origin");
         }
     }
-    if let Some(rest) = req.path.strip_prefix("/shop/") {
-        return relay_shop(h, rest, &req, stream);
-    }
     // The proxy in front sets X-Forwarded-For; the app listens on 127.0.0.1 only, so nobody
     // else can.
     let ip = req
@@ -1165,6 +1165,24 @@ fn handle_hosted(hub: &Arc<Hub>, h: &Hosted, req: Request, mut stream: TcpStream
         .filter(|v| !v.is_empty())
         .map(|v| visitor(&v))
         .unwrap_or_else(|| "local".into());
+    if let Some(rest) = req.path.strip_prefix("/shop/") {
+        // Offers are counted: each is held in memory until its shop answers.
+        if req.method == "POST"
+            && h.count_check(&[
+                (format!("o:{ip}"), MAX_OFFERS_PER_IP_MIN),
+                ("o:all".to_string(), MAX_OFFERS_MIN),
+            ])
+            .is_err()
+        {
+            return respond(
+                &mut stream,
+                429,
+                "text/plain",
+                b"too many offers; wait a moment",
+            );
+        }
+        return relay_shop(h, rest, &req, stream);
+    }
     let mut relay_keys = vec![
         (format!("r:{ip}"), MAX_RELAY_CALLS_PER_IP_MIN),
         (format!("r:{}", wider_net(&ip)), MAX_RELAY_CALLS_PER_NET_MIN),
@@ -1223,7 +1241,7 @@ fn handle_hosted(hub: &Arc<Hub>, h: &Hosted, req: Request, mut stream: TcpStream
                 }
                 let t = now();
                 match action {
-                    "listings" => h.mailboxes.publish(code, &b, t),
+                    "listings" => h.mailboxes.publish(code, &b, &ip, t),
                     "poll" => h.mailboxes.poll(code, &b, t),
                     "reply" => h.mailboxes.reply(code, &b, t),
                     "close" => h.mailboxes.close(code, &b, t),
@@ -1583,20 +1601,19 @@ impl Hub {
         }
     }
 
-    /// After a restart: an address whose faucet payment was cut short gets its chance back
-    /// (its wallet is in someone's browser and cannot be looked at from here).
+    /// After a restart: a faucet payment cut short may have been sent, and the wallet it
+    /// went to is in someone's browser, out of sight. Its address stays counted as paid, so
+    /// nobody is paid twice; at worst one visitor asks again from a new wallet.
     fn reconcile_faucet(&self, h: &Hosted) {
-        let pending: Vec<String> = h.index.lock().unwrap().faucet_pending.drain().collect();
-        if pending.is_empty() {
-            return;
-        }
-        {
+        let had = {
             let mut idx = h.index.lock().unwrap();
-            for key in &pending {
-                idx.funded.remove(key);
-            }
+            let had = !idx.faucet_pending.is_empty();
+            idx.faucet_pending.clear();
+            had
+        };
+        if had {
+            let _ = self.save_index(h);
         }
-        let _ = self.save_index(h);
     }
 
     /// Give back a faucet chance: the wallet's, the visitor's and the hour's.

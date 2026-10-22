@@ -53,8 +53,10 @@ prints with one the seller gives you some other way.
 
 ## Can I use the hosted demo with real ZEC?
 
-No. The demo runs on the testnet and the server holds every wallet. For real ZEC, run zsettle
-on your own computer.
+The wallet runs in your browser and the server holds no keys, so the page can make a mainnet
+wallet too. But the server sends the page's code, and a hostile server could send a bad page.
+The demo's house shop and test coins are on the testnet. For real ZEC, the strongest setting is
+to run zsettle on your own computer. See [The app in your browser](start/browser-wallet.md).
 
 ## Why does my buy say there is no spendable note?
 

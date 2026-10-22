@@ -2,7 +2,8 @@
 
 There are three ways to try zsettle:
 
-1. [Use the hosted testnet demo](demo.md). Nothing to install. Test coins are free.
+1. [Use the hosted testnet demo](demo.md). Nothing to install: the wallet runs in your
+   browser and keeps the keys there. Test coins are free.
 2. [Run the app on your own computer](app.md). You keep your own wallet. First
    [install or build](install.md) the programs.
 3. [Do a trade on the command line](first-trade.md), with two wallets in two terminals.

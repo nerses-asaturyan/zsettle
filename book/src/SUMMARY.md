@@ -5,7 +5,7 @@
 - [What zsettle is](what-is-zsettle.md)
 - [Quick start](start/index.md)
   - [Try the hosted testnet demo](start/demo.md)
-  - [Use the wallet in your browser](start/browser-wallet.md)
+  - [The app in your browser](start/browser-wallet.md)
   - [Install or build](start/install.md)
   - [Run the app on your computer](start/app.md)
   - [A first trade on the command line](start/first-trade.md)

@@ -9,7 +9,13 @@ The workspace (`Cargo.toml`) has four crates:
 | `zsettle-core` | `crates/zsettle-core` | Library: items, signed listings, the two-party bundle, PCZT roles, seller policy, proof check, wallet sync, provenance tracing, lightwalletd client. |
 | `zsettle` | `crates/zsettle` | Buyer and verifier CLI. |
 | `zsettle-seller` | `crates/zsettle-seller` | Seller CLI and the seller service (`serve`), with its own small HTTP server. |
-| `zsettle-app` | `crates/zsettle-app` | Web page and HTTP server. The page (`web/`) is built into the binary. It runs the two CLIs as subprocesses. |
+| `zsettle-app` | `crates/zsettle-app` | Web page and HTTP server. The page (`web/`) is built into the binary. In local mode it runs the two CLIs as subprocesses. |
+
+A fifth crate, `zsettle-web` (`crates/zsettle-web`), builds on its own (nightly, WebAssembly)
+and is left out of the workspace. It is `zsettle-core` compiled for the browser: the wallet,
+its sync, the buyer's side of a trade (`lib.rs`), selling and the shop's checks (`seller.rs`),
+and item histories and proof checks (`history.rs`). `www/engine.js` and `www/worker.js` run it
+in the page. A hosted `zsettle-app` serves it with the page.
 
 Modules of `zsettle-core` (`crates/zsettle-core/src/`):
 
@@ -79,39 +85,58 @@ and a JSON API under `/api/`. Every API call must carry the profile's page key. 
 
 ## Hosted mode
 
-`zsettle-app --public https://<domain>` serves many visitors from one server, behind a TLS
-proxy (the setup script uses Caddy).
+`zsettle-app --public https://<domain> --web-wallet <dir>` serves many visitors from one
+server, behind a TLS proxy (the setup script uses Caddy). It keeps no visitor wallets: the
+wallet runs in each visitor's page.
 
 ```
-visitor --HTTPS--> Caddy --> zsettle-app (127.0.0.1:8080)
-                                |-- /api/...           one profile per signed-in visitor
-                                |-- /shop/<code>/...   relay --> that profile's shop on 127.0.0.1:<port>
-                                '-- house profile      restocks itself, pays test coins
+visitor's page (app.js + engine.js + WebAssembly wallet)
+    |
+    | HTTPS
+    v
+Caddy --> zsettle-app (127.0.0.1:8080)
+             |-- /, /engine.js, /pkg/...   the page and the wallet engine
+             |-- /api/chain/...            relay --> lightwalletd
+             |-- /api/mailbox/<code>/...   a browser shop's owner (signed with its item key)
+             |-- /shop/<code>/...          buyers --> a browser shop's mailbox,
+             |                                        or the house shop on 127.0.0.1:<port>
+             '-- house profile             restocks itself, pays test coins
 ```
 
-- **Profiles.** Each visitor's wallet is a profile in the data directory, named by a random
-  eight-character wallet code. `hub.json` maps passkey credential ids to profiles, keeps each
-  profile's shop port, and records who got test coins.
-- **Sign-in.** A visitor signs in with a passkey (the WebAuthn PRF output is the wallet
-  passphrase, with one PRF salt for the whole site, kept in `prf.salt`) or with the wallet code
-  and its passphrase. Sign-in sets a session cookie. The server keeps the passphrase in memory
-  while the wallet is unlocked, because it runs the commands.
-- **Shops behind a relay.** Each profile's shop listens on its own fixed port from 19100 up,
-  on 127.0.0.1. The public address of a shop is `https://<domain>/shop/<code>`. The relay
-  passes only three requests: `GET listings`, `POST offer` and `GET reply/<tag>`. While a
-  wallet action pauses a shop, the relay still serves the shop's signed listings file, and
-  holds an offer or a reply request for up to 25 seconds while it waits for the shop to open
-  again.
-- **Unused wallets.** A wallet that was never synced, got no test coins and listed nothing is
-  removed after three days.
-- **State files.** `hub.json` and each `app.json` are written to a new file and renamed into
-  place. If one cannot be read, the server stops at start instead of starting empty.
-- **Own shops only.** In hosted mode the market and the history only open shops of this
-  server, so a visitor cannot make the server fetch or post to any other address.
+- **The wallet in the page.** On a hosted server the page asks `/api/hello`, loads
+  `/engine.js`, and from then on the engine answers the page's wallet calls inside the
+  browser, in place of the local app's API. The engine keeps the 24 words and the
+  wallet database in IndexedDB, encrypted under a key from a passkey (PRF) or a passphrase
+  (PBKDF2), one wallet per network. The WebAssembly wallet runs in a worker; proofs use a
+  thread pool.
+- **Chain relay.** The page fetches compact blocks, tree states and transactions through
+  `/api/chain/...` and sends its transactions there. The server passes each call to its light
+  server, for either network.
+- **Browser shops.** Minting, listing, delisting and cancelling run in the page. When the
+  owner opens the shop, the page keeps the item key in the worker, uploads the signed listings
+  to a mailbox on the server, and asks for offers every few seconds. It checks each offer with
+  the seller service's checks, signs its half, and posts the reply. The shop's code is the
+  fingerprint of its listings key. Every mailbox request is signed with the item key. The shop
+  counts as open while its page asked for offers in the last 45 seconds.
+- **Shops for buyers.** The public address of a shop is `https://<domain>/shop/<code>`. Only
+  three requests pass: `GET listings`, `POST offer` and `GET reply/<tag>`. A browser shop is
+  answered from its mailbox. The house shop listens on its own fixed port from 19100 up, on
+  127.0.0.1. While a wallet action pauses it, the relay still serves its signed listings file,
+  and holds an offer or a reply request for up to 25 seconds while it waits for the shop to
+  open again.
+- **History and proofs.** Item histories and ownership-proof checks run in the page, with the
+  same tracer as `zsettle verify` and `zsettle check-proof`.
+- **State files.** `hub.json` (the house shop's port, the addresses that got test coins) and
+  the house's `app.json` are written to a new file and renamed into place. If one cannot be
+  read, the server stops at start instead of starting empty.
+- **Own shops only.** The page buys from shops of this server only, and the server passes
+  requests to its own house shop only, so a visitor cannot make the server fetch or post to
+  any other address.
 - **House shop.** With `--house-passphrase-file`, a profile named `house` is created if
-  missing, unlocked at start, and checked every 45 seconds: it keeps six items listed at
-  0.0005 ZEC and mints a new batch when two or fewer are left. It also pays each new wallet
-  300,000 zatoshis of test coins once. Nobody can sign in to the house profile.
+  missing, unlocked at start, and checked every 45 seconds: it keeps up to eight items listed
+  from a small catalogue (0.0002 to 0.0015 ZEC) and mints a new batch when four or fewer are
+  left. On the testnet it also pays 300,000 zatoshis of test coins once to each address that
+  asks (`/api/wallet-faucet`). It is the only wallet the server holds.
 
 Limits and protections of hosted mode are in
 [Security model and limits](../security.md#hosted-mode).

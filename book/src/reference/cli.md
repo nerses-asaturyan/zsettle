@@ -334,6 +334,6 @@ held. It does not need `--payout-account`.
 | `--bin-dir <dir>` | next to `zsettle-app` | Where `zsettle` and `zsettle-seller` are. |
 | `--new-token` | off | Local mode: new page key. |
 | `--public <origin>` | | Hosted mode. |
-| `--network <main\|test>` | `test` | Hosted mode: network of new wallets. A `main` build refuses `test`. |
+| `--network <main\|test>` | `test` | Hosted mode: network of the house shop and its faucet. Visitors' wallets run in their browsers, on either network. |
 | `--house-passphrase-file <file>` | | Hosted mode: run the house shop. |
-| `--allow-hosted-mainnet` | off | Hosted mode on mainnet. |
+| `--web-wallet <dir>` | | The wallet engine (`crates/zsettle-web/www`, with `pkg/` inside), served with the page. Required in hosted mode. |

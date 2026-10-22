@@ -52,7 +52,7 @@ of the listings file can learn.
 |---|---|
 | `zsettle` | buyer and verifier command line |
 | `zsettle-seller` | seller command line, and the seller service (`serve`) that signs offers |
-| `zsettle-app` | a web page over the two programs: wallet, market, buying and selling; local mode or hosted mode |
+| `zsettle-app` | a web page: wallet, market, buying and selling; in local mode over the two programs, in hosted mode with the wallet running in the browser (`zsettle-web`) |
 | `zsettle-core` | the library under all three |
 
 See [Architecture](how/architecture.md) for how they fit together.

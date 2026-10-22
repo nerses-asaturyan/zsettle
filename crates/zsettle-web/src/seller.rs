@@ -47,7 +47,15 @@ const MAX_VERIFIED_TAGS: usize = 10_000;
 pub(crate) struct ShopState {
     ask: Option<SpendAuthorizingKey>,
     verified: HashSet<String>,
+    /// Deferred offers by tag: the scanned height when first deferred.
+    deferred_since: std::collections::HashMap<String, u32>,
 }
+
+/// An offer deferred for longer than this many blocks is refused, as the seller service does:
+/// every honest reason to wait resolves well within it, and a refusal frees the buyer's slot.
+const DEFER_MAX_BLOCKS: u32 = 10;
+/// Deferred offers remembered at once.
+const MAX_DEFERRED_TAGS: usize = 1_000;
 
 fn obj(v: Value) -> JsValue {
     js_sys::JSON::parse(&v.to_string()).unwrap_or(JsValue::NULL)
@@ -336,7 +344,29 @@ impl WebWallet {
     /// Judge one offer against the shop's listings: `{ state: "signed", reply: <hex>,
     /// name, paid_zat }`, `{ state: "rejected", reason }` or `{ state: "deferred", reason }`.
     pub fn shop_sign(&mut self, envelope: &[u8], listings: String) -> Result<JsValue, JsError> {
-        let v = match self.shop_sign_inner(envelope, &listings) {
+        let tag = pczt_ops::envelope_tag(envelope);
+        let mut judged = self.shop_sign_inner(envelope, &listings);
+        if let Err(Judged::Defer(_)) = &judged {
+            let tip = self
+                .wallet
+                .db()
+                .ok()
+                .and_then(|db| max_scanned_height(&db).ok().flatten())
+                .unwrap_or(0);
+            if tip != 0 {
+                if self.shop.deferred_since.len() >= MAX_DEFERRED_TAGS {
+                    self.shop.deferred_since.clear();
+                }
+                let since = *self.shop.deferred_since.entry(tag.clone()).or_insert(tip);
+                if tip > since.saturating_add(DEFER_MAX_BLOCKS) {
+                    judged = Err(Judged::Reject(format!("refused: waited {DEFER_MAX_BLOCKS} blocks for the chain view to catch up with this offer, and it did not; build the offer again")));
+                }
+            }
+        }
+        if !matches!(judged, Err(Judged::Defer(_))) {
+            self.shop.deferred_since.remove(&tag);
+        }
+        let v = match judged {
             Ok((item, paid, bytes)) => {
                 json!({ "state": "signed", "reply": hex::encode(bytes), "name": item.name, "paid_zat": paid })
             }

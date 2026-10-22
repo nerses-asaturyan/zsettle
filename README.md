@@ -19,8 +19,9 @@ moves.
 ## The app
 
 `zsettle-app` puts the same tools in a browser, on a phone or a desktop: a wallet unlocked
-by a passkey, a market of signed shops, a buy with a review step, and each item's history
-read from the chain.
+by a passkey, a market of signed shops, a buy with a review step, a shop of your own, and each
+item's history read from the chain. On your own computer it runs the command-line tools. On a
+hosted server the wallet runs inside the page, compiled to WebAssembly.
 
 | A shop | Review before buying | An item's history | On a phone |
 |---|---|---|---|
@@ -31,10 +32,10 @@ read from the chain.
 - Documentation: <https://nerses-asaturyan.github.io/zsettle/book/>
 - Project page: <https://nerses-asaturyan.github.io/zsettle/>
 - Hosted testnet demo: the link is on the [project page](https://nerses-asaturyan.github.io/zsettle/).
-  Its main app holds its visitors' wallets, which is fine for free test coins only. Its
-  `/wallet/` page is a wallet that runs in the browser and keeps the keys on your device, on
-  the testnet or mainnet; see [Use the wallet in your browser](book/src/start/browser-wallet.md).
-  For the strongest setting, run the tools or the app on your own computer.
+  The wallet runs in your browser and keeps the keys on your device, on the testnet or
+  mainnet; the server keeps no wallets. See [The app in your browser](book/src/start/browser-wallet.md).
+  The server still sends the page's code, so for the strongest setting run the tools or the
+  app on your own computer.
 - Releases: <https://github.com/nerses-asaturyan/zsettle/releases>
 
 The book's source is in [`book/`](book/src/SUMMARY.md). The protocol notes are in
