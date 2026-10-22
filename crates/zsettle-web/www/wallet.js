@@ -622,8 +622,27 @@ async function receive() {
     h('p', { class: 'mono' }, addr),
     h('button', { class: 'btn primary block', onclick: () => copy(addr, 'Address copied') }, 'Copy address'),
     h('p', { class: 'muted small' }, 'A fresh address each time, so payers cannot link your payments. Money can be spent after 10 blocks.'),
-    S.record.network === 'test' ? h('p', { class: 'muted small' }, 'Test coins: ask in the Zcash community faucet, or send some from another testnet wallet.') : null,
+    S.record.network === 'test' ? faucetButton(addr) : null,
   ]);
+}
+
+// Free test coins from this server's faucet, once per address.
+function faucetButton(addr) {
+  const note = h('p', { class: 'muted small' }, 'Test coins have no value. This server gives some once to each new wallet.');
+  const b = h('button', { class: 'btn block' }, 'Get free test coins');
+  b.onclick = async () => {
+    b.disabled = true;
+    try {
+      const r = await fetch('/api/wallet-faucet', { method: 'POST', headers: { 'X-Zsettle': '1', 'Content-Type': 'application/json' }, body: JSON.stringify({ address: addr }) });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || 'the faucet did not answer');
+      note.textContent = zec(j.amount_zat) + ' is on its way. It shows after the next sync and can be spent after 10 blocks.';
+    } catch (e) {
+      note.textContent = human(e.message);
+      b.disabled = false;
+    }
+  };
+  return h('div', { class: 'stack' }, b, note);
 }
 
 function send() {

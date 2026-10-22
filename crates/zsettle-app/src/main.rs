@@ -1321,6 +1321,10 @@ fn handle_hosted(hub: &Arc<Hub>, h: &Hosted, req: Request, mut stream: TcpStream
             let r = parse_body(&req).and_then(|b| hub.hosted_unlock(h, &b, &ip));
             return answer_with_session(hub, &mut stream, r);
         }
+        ("POST", "/api/wallet-faucet") => {
+            let r = parse_body(&req).and_then(|b| hub.web_faucet(h, &b, &ip));
+            return json_answer(&mut stream, r, "");
+        }
         _ => {}
     }
     let Some(app) = app else {
@@ -1922,6 +1926,90 @@ impl Hub {
             hub.faucet_settled(&profile);
             r
         })
+    }
+
+    /// Test coins for a browser wallet, which has no session: paid to the address it gives,
+    /// once per address, under the same limits per visitor and per hour as a hosted wallet.
+    /// The payment goes out in the background; the wallet sees it when it syncs.
+    fn web_faucet(self: &Arc<Self>, h: &Hosted, body: &Value, ip: &str) -> Result<Value> {
+        if h.network != "test" {
+            return Err(anyhow!("test coins exist on the testnet only"));
+        }
+        if self.wallet_files.is_empty() {
+            return Err(anyhow!("this server serves no browser wallet"));
+        }
+        let house = h
+            .apps
+            .lock()
+            .unwrap()
+            .get(HOUSE)
+            .cloned()
+            .ok_or_else(|| anyhow!("this server gives no test coins"))?;
+        let addr = field(body, "address")?;
+        if !addr.starts_with("utest1")
+            || addr.len() > 400
+            || !addr.bytes().all(|b| b.is_ascii_alphanumeric())
+        {
+            return Err(anyhow!("give a testnet unified address (utest1...)"));
+        }
+        let key = format!("web:{addr}");
+        let slot = Slot::try_take(&FAUCET_WAITING, MAX_FAUCET_WAITING).ok_or_else(|| {
+            anyhow!("many people are getting test coins right now; try again in a minute")
+        })?;
+        let stamp = now();
+        {
+            let mut all = h.faucet_all.lock().unwrap();
+            all.retain(|t| *t + 3600 > stamp);
+            if all.len() >= MAX_FAUCET_PER_HOUR {
+                return Err(anyhow!(
+                    "the faucet gave out many coins this hour; try again later"
+                ));
+            }
+            let mut by_ip = h.faucet_by_ip.lock().unwrap();
+            let times = by_ip.entry(ip.to_string()).or_default();
+            times.retain(|t| *t + 86_400 > stamp);
+            if times.len() >= MAX_FAUCET_PER_IP_DAY {
+                return Err(anyhow!(
+                    "you got test coins for several wallets today; try again tomorrow"
+                ));
+            }
+            if !h.index.lock().unwrap().funded.insert(key.clone()) {
+                return Err(anyhow!("this address already got its test coins"));
+            }
+            times.push(stamp);
+            all.push(stamp);
+        }
+        if let Err(e) = self.save_index(h) {
+            self.unfund(&key, ip, stamp);
+            return Err(e);
+        }
+        let hub = self.clone();
+        let ip = ip.to_string();
+        thread::spawn(move || {
+            let _slot = slot;
+            // As for a hosted wallet: wait a while for the house's coins, never pay twice.
+            let started = now();
+            let paid = loop {
+                match house.faucet_pay(&addr, FAUCET_ZAT) {
+                    Ok(r) => break Ok(r),
+                    Err(e) if now() < started + 600 && !maybe_sent(&e) => {
+                        thread::sleep(Duration::from_secs(30));
+                    }
+                    Err(e) => break Err(e),
+                }
+            };
+            match paid {
+                Ok(r) => house.push_event(json!({ "event": "log", "text": format!("faucet paid a browser wallet: {}", r["txid"]) })),
+                Err(e) if maybe_sent(&e) => {
+                    house.push_event(json!({ "event": "log", "text": format!("faucet, maybe sent to a browser wallet: {e:#}") }));
+                }
+                Err(e) => {
+                    hub.unfund(&key, &ip, stamp);
+                    house.push_event(json!({ "event": "log", "text": format!("faucet for a browser wallet: {e:#}") }));
+                }
+            }
+        });
+        Ok(json!({ "state": "sending", "amount_zat": FAUCET_ZAT }))
     }
 
     /// The faucet payment of a wallet ended, one way or the other.
