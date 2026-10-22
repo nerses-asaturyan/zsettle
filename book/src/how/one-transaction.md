@@ -32,8 +32,8 @@ action: the one that spends the listed item.
 - If the seller spends the item note somewhere else first, the trade's item nullifier is
   already on chain. Consensus rejects the whole trade, and the buyer's ZEC never moves.
 - If the buyer never broadcasts, the seller's signature stops being useful at the expiry
-  height. The default and maximum expiry is 40 blocks, the same as other librustzcash wallet
-  transactions.
+  height. The default and maximum expiry is the same as other librustzcash wallet
+  transactions: 40 blocks before NU7, 120 from NU7, about 50 minutes either way.
 
 ## What the transaction looks like
 

@@ -25,9 +25,8 @@ Modules of `zsettle-core` (`crates/zsettle-core/src/`):
 | `wallet.rs` | Wallet directory, keys, accounts, sync, note reservations. |
 | `broadcast.rs` | lightwalletd connection, consensus-branch check, broadcast. |
 
-The Zcash stack is the published librustzcash crates (`zcash_client_backend`,
-`zcash_client_sqlite`, `pczt`, `orchard` and others) on `main`, and their NU7 pre-release
-versions on the `nu7-testnet` branch.
+The Zcash stack is the published librustzcash crates of the NU7 release line
+(`zcash_client_backend`, `zcash_client_sqlite`, `pczt`, `orchard` and others).
 
 ## How they call each other
 

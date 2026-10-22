@@ -19,9 +19,8 @@ tar xzf zsettle-linux-x86_64.tar.gz    # Windows: unzip zsettle-windows-x86_64.z
 ./zsettle --version
 ```
 
-Release builds come from the `main` branch, so they are for **mainnet**. For the testnet you
-need a build of the `nu7-testnet` branch. See
-[Networks and the NU7 testnet branch](../reference/networks.md).
+Release builds come from the `main` branch and work on **mainnet and the testnet** alike.
+See [Networks and NU7](../reference/networks.md).
 
 ## Build from source
 
@@ -38,7 +37,6 @@ The binaries land in `target/release/`: `zsettle`, `zsettle-seller` and `zsettle
 The first build downloads the Sapling parameters for the bundled prover. The Orchard circuit
 keys are built when a command first needs them, which takes a few seconds.
 
-For a testnet build, build the `nu7-testnet` branch the same way.
 
 ## Check the install
 

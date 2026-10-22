@@ -111,7 +111,7 @@ zsettle-seller publish --wallet S --item-account I --payout-account P --identity
 zsettle-seller cancel  --wallet S --item-account I --payout-account P --identity ~/seller.key --listings listings.json --item-note <txid>:<idx>
 ```
 
-`publish --remove` only delists: an offer the service already signed stays valid until its expiry (at most 40 blocks). `cancel` ends it for good by spending the item note to a fresh address of the item account; an item note alone is below the fee, so one payout-account note is spent with it (exactly the fee, or with change above dust). The listings file loses the entry and is signed again; once the transaction is mined, `items` shows the item's new note, which `publish --item-note` can list again. The service defers an offer whose anchor or expiry it cannot judge yet because the buyer is a few blocks ahead, instead of refusing it for good.
+`publish --remove` only delists: an offer the service already signed stays valid until its expiry (at most about 50 minutes). `cancel` ends it for good by spending the item note to a fresh address of the item account; an item note alone is below the fee, so one payout-account note is spent with it (exactly the fee, or with change above dust). The listings file loses the entry and is signed again; once the transaction is mined, `items` shows the item's new note, which `publish --item-note` can list again. The service defers an offer whose anchor or expiry it cannot judge yet because the buyer is a few blocks ahead, instead of refusing it for good.
 
 ## Paying with several small notes
 
@@ -168,7 +168,7 @@ The four earlier trades predate the privacy review: their item outputs were encr
 
 ## Notes
 
-- Expiry defaults to 40 blocks, the same as every librustzcash wallet transaction, so a trade carries no distinguishing expiry; `buy` never uses more, and `publish` warns about a smaller limit.
+- Expiry is the same as every librustzcash wallet transaction: 40 blocks before NU7, 120 from NU7, about 50 minutes, so a trade carries no distinguishing expiry; `buy` never uses more, and `publish` refuses a longer limit and warns about a shorter one.
 - Stop `serve` before running `publish` on the same listings file; both rewrite it and the wallet database.
 - The seller learns the nullifier of the paying note from the envelope. If an offer does not settle, spend that note to yourself before reusing it, or the seller can recognise its later spend. After expiry the seller's signature is worthless; the seller can cancel earlier by spending the item note.
 - Anyone holding the item viewing key learns when the item sells. That is inherent to consignment-style items.

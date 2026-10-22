@@ -61,9 +61,9 @@ The JSON it prints includes `item_action_index` (where the item lands, needed fo
 folder) and `reply_url`.
 
 Price, payout address and expiry come from the listing. `--seller`, `--price`,
-`--expiry-delta`, `--buyer-note` and `--item-account` override them. The expiry is never more
-than 40 blocks; a smaller value prints a warning because it makes the trade stand out on
-chain. `--receive-account` sends the item to a chosen account of your wallet (see
+`--expiry-delta`, `--buyer-note` and `--item-account` override them. The expiry is the wallet
+library's standard (40 blocks before NU7, 120 from NU7) and never more; a smaller value prints
+a warning because it makes the trade stand out on chain. `--receive-account` sends the item to a chosen account of your wallet (see
 [Resale](resale.md)). By default the item goes to the wallet's `item` account (the one
 `init` makes), or to the paying account if the wallet has none.
 

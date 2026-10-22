@@ -37,11 +37,78 @@ pub mod trade;
 pub mod verify;
 pub mod wallet;
 
-/// Default maximum number of blocks a seller signature stays valid. Equal to the librustzcash
-/// default transaction expiry, so a trade carries the same expiry as any wallet transaction
-/// and cannot be picked out on chain by it. The seller can end the option early by spending
-/// the item itself.
+/// Default maximum time a seller signature stays valid, in 75-second reference blocks: 40,
+/// about 50 minutes. That is 40 blocks before NU7 and 120 from NU7, whose blocks come every 25
+/// seconds ([`reference_blocks`]): the wallet library's default transaction expiry on either
+/// side ([`standard_expiry_delta`]), so a trade carries the expiry of any wallet transaction
+/// and cannot be picked out on chain by it. The seller can end the option early by spending the
+/// item itself.
 pub const DEFAULT_MAX_EXPIRY_DELTA: u32 = 40;
+
+/// Blocks per 75-second reference block at `height`: 1 before NU7, 3 from NU7, whose target
+/// block spacing is 25 seconds.
+pub fn spacing_ratio<P: zcash_protocol::consensus::Parameters>(params: &P, height: u32) -> u32 {
+    use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, NU7_POW_TARGET_SPACING_RATIO};
+    if params.is_nu_active(NetworkUpgrade::Nu7, BlockHeight::from(height)) {
+        NU7_POW_TARGET_SPACING_RATIO
+    } else {
+        1
+    }
+}
+
+/// A span of `reference` 75-second reference blocks, in blocks at `height`: the same duration
+/// on either side of NU7.
+pub fn reference_blocks<P: zcash_protocol::consensus::Parameters>(
+    params: &P,
+    height: u32,
+    reference: u32,
+) -> u32 {
+    reference.saturating_mul(spacing_ratio(params, height))
+}
+
+/// The expiry delta the wallet library gives an ordinary transaction targeting `height`
+/// (ZIP 203, ZIP 218): 40 blocks before NU7 and 120 from NU7, both about 50 minutes. A trade
+/// and every other transaction zsettle builds uses the same.
+pub fn standard_expiry_delta<P: zcash_protocol::consensus::Parameters>(
+    params: &P,
+    height: u32,
+) -> u32 {
+    use zcash_protocol::consensus::{BlockHeight, BranchId};
+    zcash_primitives::transaction::builder::default_tx_expiry_delta(BranchId::for_height(
+        params,
+        BlockHeight::from(height),
+    ))
+}
+
+#[cfg(test)]
+mod spacing_tests {
+    use super::*;
+    use zcash_protocol::consensus::Network;
+
+    #[test]
+    fn expiry_follows_the_block_spacing() {
+        // Testnet NU7 activated at 4,465,026; mainnet's is set at 3,543,405.
+        for (net, nu7) in [
+            (Network::TestNetwork, 4_465_026u32),
+            (Network::MainNetwork, 3_543_405u32),
+        ] {
+            assert_eq!(standard_expiry_delta(&net, nu7 - 1), 40);
+            assert_eq!(standard_expiry_delta(&net, nu7), 120);
+            assert_eq!(
+                reference_blocks(&net, nu7 - 1, DEFAULT_MAX_EXPIRY_DELTA),
+                40
+            );
+            assert_eq!(reference_blocks(&net, nu7, DEFAULT_MAX_EXPIRY_DELTA), 120);
+            // The default limit is exactly the standard expiry, on both sides of NU7.
+            for h in [nu7 - 1, nu7, nu7 + 1_000] {
+                assert_eq!(
+                    reference_blocks(&net, h, DEFAULT_MAX_EXPIRY_DELTA),
+                    standard_expiry_delta(&net, h)
+                );
+            }
+        }
+    }
+}
 
 /// ZIP 317 marginal fee per logical action, in zatoshis.
 pub const ZIP317_MARGINAL_FEE: u64 = 5_000;

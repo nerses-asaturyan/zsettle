@@ -48,10 +48,8 @@ cargo build --release --locked    # Rust 1.93.1, pinned in rust-toolchain.toml
 ```
 
 This builds `zsettle` (buyer), `zsettle-seller` (seller and its service) and `zsettle-app`
-(web page). The `main` branch targets mainnet (NU6.3); the `nu7-testnet` branch targets the
-testnet.
-
-This branch targets the Zcash testnet (NU7) with the pre-release crates; see
+(web page). The same build works on mainnet and on the testnet, on the released NU7 crates;
+mainnet moves to NU7 at block 3,543,405 and the build follows by itself. For the testnet see
 [docs/TESTNET.md](docs/TESTNET.md).
 
 Try it without a wallet:

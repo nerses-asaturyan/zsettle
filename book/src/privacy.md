@@ -55,7 +55,7 @@ This page says what each party can see, and where the limits are. The threat mod
 
 ## On chain
 
-A trade uses the standard expiry delta (40 blocks), standard ZIP 317 fees and the standard
+A trade uses the standard expiry delta (40 blocks before NU7, 120 from NU7), standard ZIP 317 fees and the standard
 anchor depth, and has two or three actions like any wallet transaction. Without the listings
 file it is not marked. **Limit:** whoever holds the listings file can derive the listed items'
 nullifiers, and so spot every trade of that account. **Limit:** a non-default confirmation count

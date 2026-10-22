@@ -1,6 +1,6 @@
 # Setup
 
-Mainnet, Ironwood pool, published crates. Testnet has been on NU7 since 2026-10-04 and needs pre-release crates, so everything here runs on mainnet with dust amounts.
+Mainnet, Ironwood pool, published crates, with dust amounts. The same build runs on the testnet; see [TESTNET.md](TESTNET.md).
 
 ## Build
 
@@ -66,4 +66,4 @@ Every sync, broadcast and `verify` talks to a lightwalletd server over TLS. The 
 
 ## Network upgrade
 
-NU7 is scheduled for mainnet in early November 2026. This build signs for NU6.3; before building, minting or broadcasting, the tools compare the server's consensus branch with their own and stop with a message if they differ. Update the dependencies to the NU7 release line once it is published.
+NU7 activates on mainnet at block 3,543,405 (about 5 November 2026). This build is on the released NU7 crates and signs for whichever branch is live at the next block: NU6.3 before the activation, NU7 from it. Before building, minting or broadcasting, the tools still compare the server's consensus branch with their own and stop with a message if they differ.

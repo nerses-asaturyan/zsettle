@@ -51,9 +51,9 @@ pub const MAX_LABEL_CHARS: usize = 80;
 /// Largest proof file a checker reads.
 pub const MAX_PROOF_BYTES: u64 = 16 * 1024;
 
-/// How many blocks after the block it names a proof is accepted by default: about 40 minutes
-/// on the testnet (25-second blocks), about two hours on mainnet (75-second blocks).
-pub const DEFAULT_MAX_AGE_BLOCKS: u32 = 100;
+/// How long after the block it names a proof is accepted by default, in 75-second reference
+/// blocks: 40, about 50 minutes. That is 40 blocks before NU7 and 120 from NU7.
+pub const DEFAULT_MAX_AGE_REFERENCE_BLOCKS: u32 = 40;
 
 /// A signed statement that the holder of an item account controls one of its notes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

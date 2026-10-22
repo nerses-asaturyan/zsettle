@@ -54,8 +54,10 @@ A file written before these fields existed signs the same bytes as before.
 - The payout address is a new address derived for the market, not the wallet's default
   address. It must belong to `--payout-account`.
 - `--price` must be above 5,000 zatoshis.
-- `--max-expiry-delta` (default 40) is the most blocks a signed offer may stay valid. Any
-  other value prints a warning: it makes every trade of the item recognisable on chain.
+- `--max-expiry-delta` (default 40) is the longest a signed offer may stay valid, in 75-second
+  reference blocks: 40 is about 50 minutes (40 blocks before NU7, 120 from NU7). A value above
+  40 is refused; any other value prints a warning, since it makes every trade of the item
+  recognisable on chain.
 - The file is signed with the item account's spend key. Buyers check it against the viewing
   key inside the file.
 
@@ -142,7 +144,7 @@ zsettle-seller cancel  --wallet S --item-account I --payout-account P --identity
 ```
 
 - `publish --remove` only delists. An offer the service already signed stays valid until its
-  expiry (at most 40 blocks with the default limit).
+  expiry (at most about 50 minutes with the default limit).
 - `cancel` ends it for good. It spends the item note to a fresh address of the item account.
   An item note alone cannot pay the fee, so one payout-account note is spent with it: one
   worth exactly the fee, or one that leaves change above dust. The entry leaves the listings

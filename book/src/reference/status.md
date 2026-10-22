@@ -65,6 +65,6 @@ wallets are throwaway demo wallets. Trades built since do none of this.
 
 ## Testnet run
 
-The `nu7-testnet` branch's `docs/TESTNET.md` records a testnet run on 11 October 2026: a
+`docs/TESTNET.md` records a testnet run on 11 October 2026: a
 payment, two mints, a trade signed by the seller service, and a resale, all from one faucet
 claim.

@@ -28,6 +28,6 @@
   - [CLI commands](reference/cli.md)
   - [HTTP API](reference/http-api.md)
   - [Files and data directories](reference/files.md)
-  - [Networks and the NU7 testnet branch](reference/networks.md)
+  - [Networks and NU7](reference/networks.md)
   - [Project status and mainnet runs](reference/status.md)
 - [FAQ](faq.md)

@@ -15,18 +15,18 @@ repository = "https://github.com/nerses-asaturyan/zsettle"
 authors = ["Nerses Asaturyan"]
 
 [workspace.dependencies]
-# Zcash stack (mainnet = NU6.3 Ironwood; published crates only)
+# Zcash stack: the released NU7 line (mainnet moves to NU7 at block 3,543,405; testnet since 4,465,026)
 orchard = { version = "0.16", default-features = false, features = ["circuit", "std"] }
-pczt = { version = "=0.10.0-pre.1", features = ["orchard", "prover", "signer", "io-finalizer", "spend-finalizer", "tx-extractor", "transparent"] }
-zcash_client_backend = { version = "=0.25.0-pre.1", features = ["orchard", "pczt", "unstable", "lightwalletd-tonic-tls-webpki-roots", "sync"] }
-zcash_client_sqlite = { version = "=0.23.0-pre.1", features = ["orchard", "unstable", "transparent-inputs"] }
-zcash_primitives = "=0.31.0-pre.1"
-zcash_protocol = "=0.11.0-pre.0"
-zcash_keys = { version = "=0.17.0-pre.1", features = ["orchard"] }
-zcash_address = "=0.14.0-pre.1"
+pczt = { version = "0.10", features = ["orchard", "prover", "signer", "io-finalizer", "spend-finalizer", "tx-extractor", "transparent"] }
+zcash_client_backend = { version = "0.25", features = ["orchard", "pczt", "unstable", "lightwalletd-tonic-tls-webpki-roots", "sync"] }
+zcash_client_sqlite = { version = "0.23", features = ["orchard", "unstable", "transparent-inputs"] }
+zcash_primitives = "0.31"
+zcash_protocol = "0.11"
+zcash_keys = { version = "0.17", features = ["orchard"] }
+zcash_address = "0.14"
 zcash_note_encryption = "0.5"
-zcash_proofs = { version = "=0.31.0-pre.1", features = ["bundled-prover", "local-prover"] }
-zip321 = "=0.10.0-pre.1"
+zcash_proofs = { version = "0.31", features = ["bundled-prover", "local-prover"] }
+zip321 = "0.10"
 incrementalmerkletree = "0.9"
 zip32 = "0.3"
 rusqlite = "0.37"

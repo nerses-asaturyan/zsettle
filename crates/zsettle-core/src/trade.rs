@@ -27,7 +27,7 @@ use zcash_protocol::value::Zatoshis;
 use crate::wallet::{
     account_orchard_fvk, account_ufvk, heights, ironwood_note, next_orchard_address, Db, NoteRef,
 };
-use crate::{zip317_fee, DEFAULT_MAX_EXPIRY_DELTA, ZIP317_MARGINAL_FEE};
+use crate::{standard_expiry_delta, zip317_fee, ZIP317_MARGINAL_FEE};
 
 /// Everything the buyer needs to assemble a trade.
 #[derive(Clone, Debug)]
@@ -385,7 +385,7 @@ pub fn build_transfer(
         })?
         .ok_or_else(|| anyhow!("wallet has no Ironwood commitment tree"))?;
     let target: BlockHeight = target_height.into();
-    let expiry = target + DEFAULT_MAX_EXPIRY_DELTA;
+    let expiry = target + standard_expiry_delta(&network, u32::from(target));
     let mut attempts = 0;
     let result = loop {
         attempts += 1;

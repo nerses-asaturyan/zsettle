@@ -14,9 +14,8 @@ coins and wrong for real money: for real ZEC, people run zsettle on their own co
 - A small Linux server that stays on. The setup script is written for Ubuntu 24.04. 2 CPUs and
   4 GB of memory are enough (for example a Hetzner CX22, about 4 euros a month).
 - A domain name pointing at the server. A free DuckDNS name works.
-- The three binaries built for the testnet line (the `nu7-testnet` branch): `zsettle`,
-  `zsettle-seller`, `zsettle-app`. A `main` build refuses `--network test` in hosted mode
-  ("this build syncs mainnet only"); see [Networks](reference/networks.md).
+- The three binaries: `zsettle`, `zsettle-seller`, `zsettle-app`. The same build serves the
+  testnet and mainnet; see [Networks](reference/networks.md).
 
 ## Setup
 

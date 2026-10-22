@@ -1,57 +1,46 @@
-# Networks and the NU7 testnet branch
+# Networks and NU7
 
-## Two branches
+zsettle is one code line on the released librustzcash crates of the NU7 line
+(`zcash_client_backend` 0.25, `zcash_client_sqlite` 0.23, `pczt` 0.10, `orchard` 0.16, ...,
+published on 21 October 2026). The same build works on both networks:
 
-| Branch | Network | Crates | Default light server |
-|---|---|---|---|
-| `main` | mainnet, NU6.3 (Ironwood pool) | published librustzcash releases (`zcash_client_backend` 0.24, `pczt` 0.9, `orchard` 0.15, ...) | `https://zec.rocks:443` for every command |
-| `nu7-testnet` | testnet, NU7 | pre-release crates (`zcash_client_backend` 0.25.0-pre.1 and its exact companions) | follows the wallet's network: `https://testnet.zec.rocks:443` on testnet, `https://zec.rocks:443` on mainnet |
+| Network | Network upgrade | Default light server |
+|---|---|---|
+| mainnet | NU6.3 until block 3,543,405, NU7 from that block (about 5 November 2026) | `https://zec.rocks:443` |
+| testnet | NU7 since block 4,465,026 (4 October 2026) | `https://testnet.zec.rocks:443` |
 
-The testnet moved to NU7 on 4 October 2026 and needs the pre-release crates. That is why
-everything on `main` runs on mainnet with small amounts, and the hosted demo runs a
-`nu7-testnet` build.
+The light server follows the wallet's network; `--server` overrides it. The build signs for
+whichever consensus branch is live at the next block, so a mainnet wallet keeps working across
+the NU7 activation without a new build.
 
-Release archives are built from `main`. Build the `nu7-testnet` branch from source for the
-testnet:
+The `nu7-testnet` branch is kept identical to `main`. Before the release, it carried the NU7
+pre-release crates for the testnet while `main` stayed on the NU6.3 line.
 
-```
-git clone -b nu7-testnet https://github.com/nerses-asaturyan/zsettle
-cd zsettle
-cargo build --release --locked
-```
+## Block spacing and expiry
 
-## What differs on nu7-testnet
+NU7 shortens the target block spacing from 75 to 25 seconds. Durations meant to stay the same
+in time are counted in 75-second *reference blocks* and converted at the current height:
 
-From that branch's `docs/TESTNET.md`:
+- A trade's expiry is the wallet library's standard expiry: 40 blocks before NU7 and 120 from
+  NU7 (ZIP 203, ZIP 218), about 50 minutes either way. A listing's `max_expiry_delta` (default
+  40) is in reference blocks, so the default limit is exactly that standard expiry on both
+  sides of the activation, and a trade carries no distinguishing expiry.
+- An ownership proof is accepted for about 50 minutes by default: 40 blocks before NU7, 120
+  from NU7.
+- Confirmations are counted in blocks and do not scale: 10 for a note from another wallet, 3
+  for the wallet's own change. On a 25-second chain that is about four minutes and 75 seconds.
 
-- the dependencies (the 0.25 pre-release line, `rand` 0.10, `pasta_curves` 0.6) and the RNG
-  plumbing they need;
-- the wallet database schema is migrated when a wallet is opened; an `upgrade` command on both
-  binaries applies migrations that need the seed (`upgrade --wallet <dir> --identity <key>`);
-- `--server` has no fixed default: it follows the wallet's network;
-- a `tx` command on the buyer CLI asks the light server whether a transaction is mined, in the
-  mempool, or unknown (`zsettle tx --network test --txid <id>`).
+## Wallet databases
 
-**Do not open a mainnet wallet with a `nu7-testnet` build.** It migrates the database to the
-newer schema, which the `main` build cannot read. Keep testnet wallets in their own
-directories.
-
-On testnet, blocks come about every 25 seconds since NU7, so a 40-block expiry is about 17
-minutes. Testnet coins (TAZ) are free and worthless.
+Opening a wallet migrates its database to the schema of the crates in use; an `upgrade`
+command on both binaries applies the migrations that need the seed
+(`upgrade --wallet <dir> --identity <key>`). A wallet opened by this build cannot be read by an
+older build of the NU6.3 line. Keep testnet and mainnet wallets in separate directories.
 
 ## The consensus-branch guard
 
 The consensus branch id is part of the signature hash. Before building, minting or
 broadcasting, the tools ask the light server which branch is live and compare it with the
-branch this build signs for. When they differ, the tools stop with a message instead of making
-a transaction the network would reject. A `main` build pointed at the testnet stops here.
-
-`zsettle-app` checks earlier in hosted mode: a `main` build (where
-`zsettle_core::broadcast::TESTNET_BUILD` is `false`) refuses to start with `--network test`,
-which is the hosted default, and says to build the hosted testnet demo from `nu7-testnet`.
-
-## Mainnet and NU7
-
-NU7 is expected on mainnet in early November 2026. The `main` build signs for NU6.3. Once a
-librustzcash release carries the NU7 mainnet activation height, the plan in the testnet notes
-is that `nu7-testnet` becomes `main` by changing the pre-release versions to the release.
+branch this build signs for at the next block. When they differ, for example after a network
+upgrade this build does not know, the tools stop with a message instead of making a transaction
+the network would reject.

@@ -4,7 +4,7 @@ zsettle trades an item for ZEC in one shielded Zcash transaction. Two parties ta
 seller who owns the item and a buyer who pays. No one holds the money or the item in the
 middle. Either the whole trade lands on chain, or nothing moves.
 
-The item is an ordinary shielded note in the Ironwood pool (NU6.3). The trade is a PCZT
+The item is an ordinary shielded note in the Ironwood pool. The trade is a PCZT
 (partially created Zcash transaction) that the buyer builds and proves, the seller checks
 and signs for its own half, and the buyer finishes, signs and broadcasts.
 

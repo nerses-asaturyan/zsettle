@@ -17,8 +17,9 @@ const ITEM_ZAT = 1000; // the value of an item note
 // undoing the transaction that paid you.
 const CONFS = { other: 10, change: 3 };
 const BLOCK_SECS = { main: 75, test: 25 };
-// An ownership proof is accepted for this many blocks after the block it names.
-const PROOF_MAX_AGE = 100;
+// An ownership proof is accepted for about this many minutes after the block it names
+// (40 blocks before NU7, 120 from NU7).
+const PROOF_LIFE_MIN = 50;
 const SYNC_EVERY_MS = 60000;
 
 const S = {
@@ -1145,7 +1146,7 @@ function openProve(it) {
   const label = h('input', { class: 'input', id: 'plabel', maxlength: '80', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', placeholder: '@yourname' });
   const ch = h('input', { class: 'input', id: 'challenge', maxlength: '200', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', placeholder: 'zs-abcd-efgh' });
   const err = h('p', { class: 'small err', role: 'alert' });
-  const life = minutesFor(PROOF_MAX_AGE);
+  const life = PROOF_LIFE_MIN;
   const sh = sheet({
     title: 'Prove you own ' + (it.name || 'this item'),
     body: [
@@ -1215,7 +1216,7 @@ function openCheckProof() {
   const sh = sheet({
     title: 'Check that someone owns an item',
     body: [
-      h('p', { class: 'small muted' }, 'Paste or scan the proof they shared. It counts if it was made in the last ' + PROOF_MAX_AGE + ' blocks (about ' + minutesFor(PROOF_MAX_AGE) + ' minutes) and the item is still theirs.'),
+      h('p', { class: 'small muted' }, 'Paste or scan the proof they shared. It counts if it was made in about the last ' + PROOF_LIFE_MIN + ' minutes and the item is still theirs.'),
       h('div', { class: 'field' }, h('label', { for: 'proof' }, 'Their proof'), proof, 'BarcodeDetector' in window ? h('div', { class: 'row', style: null }, h('button', { class: 'btn sm', type: 'button', onclick: () => scanProof(proof) }, icon('camera'), 'Scan their QR code')) : null),
       h(
         'details',

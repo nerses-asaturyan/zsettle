@@ -34,9 +34,6 @@ pub fn pick_server(server: Option<String>, network: Network) -> String {
     server.unwrap_or_else(|| default_server(network).to_string())
 }
 
-/// Whether this build syncs the testnet: this line picks a server per network.
-pub const TESTNET_BUILD: bool = true;
-
 /// The one lightwalletd method that would carry the wallet's transparent addresses.
 const ADDRESS_UTXOS: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetAddressUtxosStream";
 

@@ -8,7 +8,7 @@ The demo is for the testnet. The server holds every demo wallet, which is fine f
 
 - A small Linux server that stays on: 2 CPUs and 4 GB of memory are enough (for example Hetzner CX22, about €4 a month).
 - A domain name pointing at the server. A free DuckDNS name works.
-- The three binaries built for the testnet line (`nu7-testnet` branch): `zsettle`, `zsettle-seller`, `zsettle-app`.
+- The three binaries: `zsettle`, `zsettle-seller`, `zsettle-app` (the same build serves the testnet and mainnet).
 
 ## Setup
 
@@ -42,4 +42,4 @@ Data lives in `/var/lib/zsettle/data`: one directory per wallet, `hub.json` (whi
 - Requests must come from the site itself: the Host and Origin are checked, POSTs need a custom header, and the session cookie is `__Host-` prefixed, HttpOnly, Secure and SameSite=Strict.
 - Only three requests pass to a shop: its listings, an offer, and a reply; every answer carries the server's own security headers.
 - The service runs under systemd with a read-only system, no new privileges, no link-local or private addresses (so no cloud metadata), a hidden process list, and caps on memory, processes and CPU. Caddy refuses bodies above 2 MB and slow requests. The script keeps a copy of any Caddyfile it replaces.
-- `--network main` is refused unless `--allow-hosted-mainnet` is given: a hosted server holds its visitors' wallets. A build from `main` refuses `--network test`, since it syncs mainnet only.
+- `--network main` is refused unless `--allow-hosted-mainnet` is given: a hosted server holds its visitors' wallets.

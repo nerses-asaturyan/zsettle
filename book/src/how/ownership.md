@@ -30,8 +30,9 @@ zsettle check-proof --proof proof.json
 
 A block's hash cannot be known before the block is mined. A proof that signs a block's hash
 was therefore made **after** that block. The checker accepts a proof only while that block is
-recent: by default, at most 100 blocks old (about 40 minutes on the testnet, about two hours
-on mainnet; `check-proof --max-age` changes it). An old proof expires by itself.
+recent: by default, made within about 50 minutes (40 blocks before NU7, 120 from NU7, whose
+blocks come every 25 seconds; `check-proof --max-age` sets a number of blocks). An old proof
+expires by itself.
 
 This is the Fiat-Shamir idea applied to freshness: instead of the checker sending a random
 challenge, the chain supplies a public value nobody could have chosen in advance. Hashing the
@@ -99,7 +100,7 @@ It prints:
   "block_height": 3520000,
   "block_hash": "<64 hex digits>",
   "age_blocks": 12,
-  "max_age_blocks": 100,
+  "max_age_blocks": 120,
   "scanned_to": 3520012
 }
 ```

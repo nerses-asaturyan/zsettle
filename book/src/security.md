@@ -10,7 +10,7 @@ Report problems privately as described in `SECURITY.md`. The full threat table i
 |---|---|
 | Seller sells the item elsewhere after signing | The trade's item nullifier is already used; consensus rejects the whole trade; the buyer's ZEC does not move. |
 | Buyer alters the payment after the seller signed | Not possible: the ZIP 244 sighash covers every action's value commitment, nullifier, randomized key, note commitment and ciphertext. The combiner also refuses differing fields. |
-| Buyer never broadcasts | The seller's signature is a free option until expiry, at most `max_expiry_delta` (default 40) blocks. The seller can end it sooner with `cancel`. |
+| Buyer never broadcasts | The seller's signature is a free option until expiry, at most `max_expiry_delta` (default 40 reference blocks, about 50 minutes). The seller can end it sooner with `cancel`. |
 | Offer with no expiry, or already expired | Refused. |
 | Envelope with a proof over a made-up tree | Refused: the anchor must be one of the seller wallet's own tree roots from the last 100 blocks, and the proof is checked against it. |
 | Seller asked to sign an extra spend | The service signs exactly one action, the listed item's. The policy also refuses a trade that spends another note of the listed item account. |
@@ -99,8 +99,7 @@ itself is still locked by its passphrase or passkey.
 `zsettle-app --public https://<domain>` is meant for the testnet. **The server holds every
 visitor's wallet.** It sees the passphrase (or the passkey's PRF output, which is the
 passphrase) whenever a wallet is unlocked. `--network main` is refused unless
-`--allow-hosted-mainnet` is given, and a build of `main` refuses `--network test` (it syncs
-mainnet only), so the testnet demo needs a `nu7-testnet` build.
+`--allow-hosted-mainnet` is given.
 
 Requests must come from the site itself:
 

@@ -58,9 +58,8 @@ The hosted-mode flags (`--public`, `--network`, `--house-passphrase-file`,
   `127.0.0.1:8900` by default. Other people can reach it only if you listen on another
   address (for example `0.0.0.0:8900`) and they can connect to your machine.
 
-The release binaries of `main` target mainnet. A testnet wallet needs a build of the
-`nu7-testnet` branch; the `main` build stops with a message when the light server is on a
-consensus branch it does not sign for.
+The same binaries work on mainnet and on the testnet; the light server follows the wallet's
+network.
 
 See [Security model and limits](../security.md#local-mode) for how the page key, the Host and
 Origin checks and the content security policy keep other web pages away from the app.

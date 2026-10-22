@@ -179,7 +179,9 @@ enum Cmd {
         /// Price to pay, in zatoshis or ZEC (`0.001`, `0.001 ZEC`); defaults to the listed price.
         #[arg(long, value_parser = zsettle_core::parse_zat)]
         price: Option<u64>,
-        /// Blocks until the transaction expires (taken from the listings when omitted).
+        /// Blocks until the transaction expires. By default the wallet library's standard
+        /// expiry (40 blocks before NU7, 120 from NU7, about 50 minutes), or the listing's
+        /// shorter limit; any other value marks the trade on chain.
         #[arg(long)]
         expiry_delta: Option<u32>,
         /// Confirmations required on the inputs.
@@ -302,9 +304,10 @@ enum Cmd {
         /// it any proof recent enough is accepted, the way a shared proof is meant to be.
         #[arg(long)]
         challenge: Option<String>,
-        /// Oldest proof accepted, in blocks after the block it names.
-        #[arg(long, default_value_t = zsettle_core::ownership::DEFAULT_MAX_AGE_BLOCKS)]
-        max_age: u32,
+        /// Oldest proof accepted, in blocks after the block it names. Default: about 50
+        /// minutes (40 blocks before NU7, 120 from NU7).
+        #[arg(long)]
+        max_age: Option<u32>,
         /// Network the proof must be for (`main` or `test`).
         #[arg(long, default_value = "main")]
         network: String,
@@ -620,11 +623,11 @@ fn main() -> Result<()> {
             );
             for i in &l.items {
                 println!(
-                    "{}  {:>10} zat ({}) expiry<= {:>3} blocks  {}",
+                    "{}  {:>10} zat ({}) expiry<= {:>3} min  {}",
                     i.note,
                     i.price_zat,
                     zec(i.price_zat),
-                    i.max_expiry_delta,
+                    u64::from(i.max_expiry_delta) * 75 / 60,
                     i.name
                 );
             }
@@ -819,27 +822,25 @@ fn main() -> Result<()> {
             let price_zat = price
                 .or_else(|| listed.as_ref().map(|i| i.price_zat))
                 .ok_or_else(|| anyhow!("--price is required (item not found in listings)"))?;
-            // Never longer than the ecosystem default: a shorter limit from the listing is
-            // honoured, a longer one would mark the trade on chain.
-            let expiry = expiry_delta.unwrap_or(
-                listed
-                    .as_ref()
-                    .map(|i| {
-                        i.max_expiry_delta
-                            .min(zsettle_core::DEFAULT_MAX_EXPIRY_DELTA)
-                    })
-                    .unwrap_or(zsettle_core::DEFAULT_MAX_EXPIRY_DELTA),
-            );
-            if expiry != 0 && expiry < zsettle_core::DEFAULT_MAX_EXPIRY_DELTA {
+            // The wallet library's standard expiry for the next block: 40 blocks before NU7,
+            // 120 from NU7, both about 50 minutes. A shorter limit from the listing (stated in
+            // 75-second reference blocks) is honoured; a longer expiry would mark the trade on
+            // chain, and the seller refuses it anyway.
+            let next_block = zsettle_core::wallet::max_scanned_height(&db)?.unwrap_or(0) + 1;
+            let standard = zsettle_core::standard_expiry_delta(&w.network, next_block);
+            let limit = listed
+                .as_ref()
+                .map(|i| zsettle_core::reference_blocks(&w.network, next_block, i.max_expiry_delta))
+                .unwrap_or(standard);
+            let expiry = expiry_delta.unwrap_or(standard.min(limit));
+            if expiry != 0 && expiry < standard {
                 eprintln!(
-                    "warning: an expiry of {expiry} blocks instead of {} marks this trade on chain",
-                    zsettle_core::DEFAULT_MAX_EXPIRY_DELTA
+                    "warning: an expiry of {expiry} blocks instead of {standard} marks this trade on chain"
                 );
             }
-            if expiry == 0 || expiry > zsettle_core::DEFAULT_MAX_EXPIRY_DELTA {
+            if expiry == 0 || expiry > standard {
                 return Err(anyhow!(
-                    "--expiry-delta must be between 1 and {} blocks: a longer expiry would mark the trade on chain, and the seller refuses it anyway",
-                    zsettle_core::DEFAULT_MAX_EXPIRY_DELTA
+                    "--expiry-delta must be between 1 and {standard} blocks: a longer expiry would mark the trade on chain, and the seller refuses it anyway"
                 ));
             }
             let item_memo = match listed.as_ref().map(|i| i.name.as_str()) {
@@ -1428,7 +1429,7 @@ fn check_proof(
     network: Network,
     server: &str,
     private: bool,
-    max_age: u32,
+    max_age: Option<u32>,
 ) -> Result<ProofReport> {
     // The checker's code is bounded like the holder's: it goes onto a command line.
     if let Some(c) = challenge {
@@ -1445,7 +1446,7 @@ fn check_proof(
         block_height: p.height,
         block_hash: p.block_hash.clone(),
         age_blocks: None,
-        max_age_blocks: max_age,
+        max_age_blocks: 0,
         scanned_to: None,
         reason: None,
     };
@@ -1492,6 +1493,14 @@ fn check_proof(
         }
         Some(_) => {}
     }
+    let max_age = max_age.unwrap_or_else(|| {
+        zsettle_core::reference_blocks(
+            &network,
+            tip,
+            zsettle_core::ownership::DEFAULT_MAX_AGE_REFERENCE_BLOCKS,
+        )
+    });
+    report.max_age_blocks = max_age;
     let age = tip.saturating_sub(p.height);
     report.age_blocks = Some(age);
     if age > max_age {

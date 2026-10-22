@@ -622,11 +622,6 @@ fn hosted_hub(cli: &Cli, public: &str, base: PathBuf, bins: Bins) -> Result<Hub>
             "a hosted server holds its visitors' wallets: on mainnet that is real money in your custody; pass --allow-hosted-mainnet if you mean it"
         ));
     }
-    if cli.network == "test" && !zsettle_core::broadcast::TESTNET_BUILD {
-        return Err(anyhow!(
-            "this build syncs mainnet only: build the hosted testnet server from the nu7-testnet branch"
-        ));
-    }
     let index: Index = read_state(&base.join("hub.json"))?;
     // One PRF salt for the whole site, kept with the data: a passkey of this site always
     // gives the same passphrase.

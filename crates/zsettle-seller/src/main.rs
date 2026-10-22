@@ -282,7 +282,8 @@ enum Cmd {
         /// smaller payment is dust no wallet spends.
         #[arg(long, value_parser = zsettle_core::parse_zat)]
         price: Option<u64>,
-        /// Maximum blocks between the chain tip and the transaction expiry.
+        /// Longest time a signed offer stays valid, in 75-second reference blocks: 40 is
+        /// about 50 minutes, 40 blocks before NU7 and 120 from NU7.
         #[arg(long, default_value_t = zsettle_core::DEFAULT_MAX_EXPIRY_DELTA)]
         max_expiry_delta: u32,
     },
@@ -766,13 +767,13 @@ fn main() -> Result<()> {
                 }
                 if item.max_expiry_delta > DEFAULT_MAX_EXPIRY_DELTA {
                     return Err(anyhow!(
-                        "{}: an expiry limit above {DEFAULT_MAX_EXPIRY_DELTA} blocks would let a buyer hold a signed offer as a long free option; keep it at {DEFAULT_MAX_EXPIRY_DELTA} or lower",
+                        "{}: an expiry limit above {DEFAULT_MAX_EXPIRY_DELTA} reference blocks (about 50 minutes) would let a buyer hold a signed offer as a long free option; keep it at {DEFAULT_MAX_EXPIRY_DELTA} or lower",
                         item.note
                     ));
                 }
                 if item.max_expiry_delta != DEFAULT_MAX_EXPIRY_DELTA {
                     eprintln!(
-                        "warning: {}: an expiry limit other than {DEFAULT_MAX_EXPIRY_DELTA} blocks makes every trade of this item recognisable on chain",
+                        "warning: {}: an expiry limit other than {DEFAULT_MAX_EXPIRY_DELTA} reference blocks makes every trade of this item recognisable on chain",
                         item.note
                     );
                 }
@@ -1427,14 +1428,17 @@ impl Service<'_> {
         // refusal here tells the sender nothing the listings file does not already give.
         // No envelope waits longer than the longest listed expiry allows: an envelope that
         // can never settle must not sit in the inbox forever.
-        let horizon = l
-            .items
-            .iter()
-            .map(|i| i.max_expiry_delta)
-            .max()
-            .unwrap_or(DEFAULT_MAX_EXPIRY_DELTA)
-            .saturating_add(1 + LAG_SLACK);
         let tip_now = last_tip(db);
+        let horizon = zsettle_core::reference_blocks(
+            &self.network,
+            tip_now + 1,
+            l.items
+                .iter()
+                .map(|i| i.max_expiry_delta)
+                .max()
+                .unwrap_or(DEFAULT_MAX_EXPIRY_DELTA),
+        )
+        .saturating_add(1 + LAG_SLACK);
         let outcome = match process(db, self.w, self.network, l, &pczt, anchors, false) {
             Ok(outcome) => outcome,
             // A failure of this pass rather than of the envelope: keep it while its
@@ -1639,7 +1643,8 @@ fn process(
     let ivk = prepared_ivk(&payout_key(db, w)?);
     let policy = SellerPolicy {
         price_zat: item.price_zat,
-        max_expiry_delta: item.max_expiry_delta,
+        // The listing counts in 75-second reference blocks; the policy in blocks at the tip.
+        max_expiry_delta: zsettle_core::reference_blocks(&network, tip + 1, item.max_expiry_delta),
         tip,
         branch_id: u32::from(BranchId::for_height(&network, BlockHeight::from(tip + 1))),
         payout: listed_payout(l, network)?,

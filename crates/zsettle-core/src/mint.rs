@@ -25,7 +25,7 @@ use zcash_client_sqlite::{util::SystemClock, AccountUuid};
 use zcash_keys::address::{Address, UnifiedAddress};
 use zcash_proofs::prover::LocalTxProver;
 use zcash_protocol::{
-    consensus::Network,
+    consensus::{Network, NetworkUpgrade, Parameters},
     memo::{Memo, MemoBytes},
     value::Zatoshis,
     ShieldedPool, TxId,
@@ -56,14 +56,26 @@ pub struct ItemNote {
 /// the wallet does not know, as happens for one seen only in a compact block, counts for the
 /// default expiry delta after it was first observed, the way the wallet library itself bounds
 /// it. Without that bound a spend undone by a reorg would hide the note for good.
-fn live_spend(tx: &str, target: &str) -> String {
+fn live_spend(network: &Network, tx: &str, target: &str) -> String {
+    // The default delta changes at NU7 (40 blocks before, 120 from), and the library bounds an
+    // unknown expiry by the delta in force where the spend was first observed.
+    let delta = match network.activation_height(NetworkUpgrade::Nu7) {
+        Some(nu7) => {
+            let nu7 = u32::from(nu7);
+            format!(
+                "(CASE WHEN {tx}.min_observed_height >= {nu7} THEN {} ELSE {} END)",
+                crate::standard_expiry_delta(network, nu7),
+                crate::standard_expiry_delta(network, nu7.saturating_sub(1)),
+            )
+        }
+        None => crate::DEFAULT_MAX_EXPIRY_DELTA.to_string(),
+    };
     format!(
         "({tx}.mined_height IS NOT NULL
           OR {tx}.expiry_height = 0
           OR {tx}.expiry_height >= {target}
           OR ({tx}.expiry_height IS NULL
-              AND {tx}.min_observed_height + {delta} >= {target}))",
-        delta = crate::DEFAULT_MAX_EXPIRY_DELTA
+              AND {tx}.min_observed_height + {delta} >= {target}))"
     )
 }
 
@@ -91,8 +103,8 @@ pub fn unspent_notes(wallet: &Wallet, db: &Db, account: AccountUuid) -> Result<V
              ORDER BY t.mined_height IS NULL, t.mined_height, n.action_index",
             // A note of an unmined transaction counts only while that transaction can still
             // be mined: the change of a payment that expired or was rejected is not money.
-            live_tx = live_spend("t", "?2"),
-            live = live_spend("st", "?2")
+            live_tx = live_spend(&wallet.network, "t", "?2"),
+            live = live_spend(&wallet.network, "st", "?2")
         ))
         .map_err(|e| anyhow!("{e}"))?;
     let rows = stmt
@@ -182,7 +194,7 @@ pub fn note_state(wallet: &Wallet, db: &Db, note: NoteRef) -> Result<NoteState> 
              FROM ironwood_received_notes n
              JOIN transactions t ON t.id_tx = n.transaction_id
              WHERE t.txid = ?1 AND n.action_index = ?2",
-                live = live_spend("st", "?3")
+                live = live_spend(&wallet.network, "st", "?3")
             ),
             rusqlite::params![note.txid.as_ref().to_vec(), note.index, target],
             |row| {

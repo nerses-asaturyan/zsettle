@@ -1,8 +1,8 @@
-# Testnet (NU7) build
+# Testnet (NU7)
 
-This branch builds against the NU7 pre-release crate line (`zcash_client_backend` 0.25.0-pre.1 and its exact companions), so zsettle runs on the Zcash testnet, which activated NU7 at height 4,465,026 on 4 October 2026. `main` serves mainnet (NU6.3) with the released crates. The two branches differ only in dependencies, the RNG plumbing those crates require, a schema migration when a wallet is opened, the default light server, which follows the wallet's network (`https://testnet.zec.rocks:443` for testnet, `https://zec.rocks:443` for mainnet), and two helper commands (`pay`, `tx`).
+zsettle runs on the Zcash testnet, which activated NU7 at height 4,465,026 on 4 October 2026, with the same build as mainnet: the released NU7 crate line (`zcash_client_backend` 0.25 and its companions). The default light server follows the wallet's network (`https://testnet.zec.rocks:443` for testnet, `https://zec.rocks:443` for mainnet).
 
-Do not open a mainnet wallet with this build: it migrates the wallet database to the newer schema, which the `main` build cannot read. Keep testnet wallets in their own directory.
+Keep testnet and mainnet wallets in separate directories.
 
 ## Wallets
 
@@ -32,17 +32,17 @@ Take the buyer account's default address from `$D wallet -w ~/.zsettle-testnet/b
 
 ## Flow
 
-The same as [TRADE.md](TRADE.md) with the testnet wallet directories. Every command picks `testnet.zec.rocks` from the wallet's network; `--server` still overrides it. Blocks arrive every 25 seconds on testnet since NU7, so a 40-block expiry is about 17 minutes and three confirmations about 75 seconds.
+The same as [TRADE.md](TRADE.md) with the testnet wallet directories. Every command picks `testnet.zec.rocks` from the wallet's network; `--server` still overrides it. Blocks arrive every 25 seconds on testnet since NU7, so a trade's 120-block expiry is about 50 minutes and three confirmations about 75 seconds.
 
-## What changed against `main`
+## What the NU7 line changed
 
-- Dependencies: the 0.25-pre line, `rand` 0.10 (`rand::rng()` wherever a role needs randomness), `pasta_curves` 0.6.
+- Dependencies: the 0.25 line, `rand` 0.10 (`rand::rng()` wherever a role needs randomness), `pasta_curves` 0.6.
 - `Wallet::db` runs the wallet schema migrations; new `upgrade` command on both binaries.
 - `pick_server`: the default light server follows the wallet's network.
 - `pay` (plain shielded payment, shares the mint path) and `tx` (transaction status) on the buyer CLI.
 - `COMPACT_NOTE_SIZE` moved to `orchard::note_encryption`; `UnifiedAddress::from_receivers` and the unified key encoder took new parameters; the signer, prover, IO finalizer and transaction extractor take an RNG.
 
-When a librustzcash release carries the NU7 mainnet activation height, this branch becomes `main` by changing the `-pre` versions to the release.
+The release of 21 October 2026 (`zcash_protocol` 0.11) set the mainnet NU7 activation height to 3,543,405. Since then `main` builds on the released crates, and the `nu7-testnet` branch is the same.
 
 ## Testnet run (11 October 2026)
 

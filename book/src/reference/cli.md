@@ -126,7 +126,7 @@ Checks a proof made by `zsettle-seller prove`. See [Ownership proofs](../how/own
 |---|---|---|
 | `--proof <path or url>` | required | The proof file, or an `http://` or `https://` URL. At most 16 KiB. |
 | `--challenge <text>` | | For a live check: the code you gave the holder. Without it, a shared proof is checked. |
-| `--max-age <blocks>` | `100` | Oldest proof accepted, in blocks after the block it names. |
+| `--max-age <blocks>` | about 50 min | Oldest proof accepted, in blocks after the block it names (default 40 before NU7, 120 from NU7). |
 | `--network <main\|test>` | `main` | Network the proof must be for. |
 | `--server <url>` | default server | |
 | `--private` | off | Do not ask the server for the note's transaction; scan from the item account's birthday. |
@@ -259,7 +259,7 @@ Same flags as `zsettle init`: `--wallet`, `--identity` [`ZSETTLE_IDENTITY`], `--
 | `--description <text>` | | One line for buyers, at most 280 characters. Signed with the file. |
 | `--icon <emoji>` | | One emoji shown as the item's picture. Signed with the file. |
 | `--price <amount>` | required with `--item-note` | More than 5,000 zatoshis. |
-| `--max-expiry-delta <blocks>` | `40` | Most blocks between the tip and an offer's expiry. |
+| `--max-expiry-delta <n>` | `40` | Longest an offer stays valid, in 75-second reference blocks (40 is about 50 minutes); above 40 is refused. |
 | `--remove <note>` | | Delist this item (no spend). |
 | `--resign-unverified` | off | Sign a file whose signature does not verify. |
 

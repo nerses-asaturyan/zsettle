@@ -19,8 +19,8 @@ later so the seller cannot recognise the note you offered (see
 
 ## What if the buyer gets the seller's signature and waits?
 
-The signature works only until the trade's expiry height, at most 40 blocks with the default
-limit. The seller can end it sooner with `zsettle-seller cancel`, which moves the item to a new
+The signature works only until the trade's expiry height, at most about 50 minutes with the default
+limit (40 blocks before NU7, 120 from NU7). The seller can end it sooner with `zsettle-seller cancel`, which moves the item to a new
 note.
 
 ## Can several people make offers for the same item?
@@ -67,8 +67,8 @@ is paid from one note: use `consolidate` to merge small ones.
 
 ## Why does a command stop with a consensus branch message?
 
-The light server is on a network upgrade this build does not sign for. For the testnet, use a
-build of the `nu7-testnet` branch. See [Networks](reference/networks.md).
+The light server is on a network upgrade this build does not sign for, for example a later
+upgrade than this build knows. Update to a newer build. See [Networks](reference/networks.md).
 
 ## Can I use zcash-devtool or another wallet with these wallets?
 
