@@ -233,6 +233,30 @@ impl Listings {
         hex::encode(&hash.as_bytes()[..6])
     }
 
+    /// Sign a request to a shop mailbox with the item key (hex). The message is prefixed with
+    /// a domain of its own, so such a signature never passes for a listings signature or an
+    /// ownership proof made with the same key.
+    pub fn sign_mailbox(ask: &SpendAuthorizingKey, msg: &[u8]) -> String {
+        sign_message(ask, &[MAILBOX_DOMAIN, msg].concat())
+    }
+
+    /// Check a mailbox request signature against this listing's item key.
+    pub fn verify_mailbox(&self, sig_hex: &str, msg: &[u8]) -> Result<()> {
+        let fvk = self.item_fvk()?;
+        match verify_message(
+            &fvk,
+            sig_hex,
+            &[MAILBOX_DOMAIN, msg].concat(),
+            "mailbox request",
+        ) {
+            Ok(()) => Ok(()),
+            Err(SignatureError::Malformed(e)) => Err(e),
+            Err(SignatureError::Mismatch) => {
+                Err(anyhow!("the request is not signed by this shop's key"))
+            }
+        }
+    }
+
     /// Find an item by note reference string.
     pub fn find(&self, note: &str) -> Option<&ListedItem> {
         self.items.iter().find(|i| i.note == note)
@@ -259,6 +283,10 @@ impl Listings {
         changed
     }
 }
+
+/// Domain of a signed shop mailbox request.
+const MAILBOX_DOMAIN: &[u8] = b"zsettle-mailbox-v1
+";
 
 /// Parse a network name as written in the files (`main` or `test`).
 pub(crate) fn network_from_name(name: &str) -> Result<Network> {

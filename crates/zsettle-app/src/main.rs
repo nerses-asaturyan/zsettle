@@ -27,6 +27,8 @@ use zeroize::Zeroizing;
 use zsettle_core::listing::Listings;
 use zsettle_core::wallet::Wallet;
 
+mod mailbox;
+
 const INDEX_HTML: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
 const STYLE_CSS: &str = include_str!("../web/style.css");
@@ -70,6 +72,8 @@ const MAX_CALLS_PER_IP_MIN: usize = 120;
 /// Chain relay requests per visitor a minute. A browser wallet's first sync of a few
 /// thousand blocks takes two requests per 500 blocks.
 const MAX_RELAY_CALLS_PER_IP_MIN: usize = 300;
+/// Browser shop mailbox requests per visitor a minute (an open shop asks every few seconds).
+const MAX_MAILBOX_CALLS_PER_IP_MIN: usize = 120;
 /// Chain relay requests a minute from all visitors together.
 const MAX_RELAY_CALLS_MIN: usize = 3_000;
 /// Chain relay requests a minute from one wider network (an IPv6 /48 or an IPv4 /24).
@@ -403,6 +407,8 @@ struct Hosted {
     fails: Mutex<HashMap<String, (u32, u64, u64)>>,
     /// Passphrase checks per visitor and per wallet, when.
     checks: Mutex<HashMap<String, Vec<u64>>>,
+    /// Shops run by visitors' browsers.
+    mailboxes: mailbox::Mailboxes,
 }
 
 impl Hosted {
@@ -759,6 +765,7 @@ fn hosted_hub(cli: &Cli, public: &str, base: PathBuf, bins: Bins) -> Result<Hub>
         faucet_all: Mutex::new(Vec::new()),
         fails: Mutex::new(HashMap::new()),
         checks: Mutex::new(HashMap::new()),
+        mailboxes: Default::default(),
     };
     let hub = Hub {
         base,
@@ -912,7 +919,10 @@ fn read_request(stream: &mut TcpStream) -> Result<Request> {
         .map(|v| v.parse())
         .transpose()?
         .unwrap_or(0);
-    let limit = if path.starts_with("/shop/") || path == "/api/chain/send" {
+    let limit = if path.starts_with("/shop/")
+        || path == "/api/chain/send"
+        || path.starts_with("/api/mailbox/")
+    {
         MAX_RELAY_BODY
     } else {
         MAX_BODY
@@ -1373,6 +1383,28 @@ fn handle_hosted(hub: &Arc<Hub>, h: &Hosted, req: Request, mut stream: TcpStream
             let r = parse_body(&req).and_then(|b| hub.hosted_unlock(h, &b, &ip));
             return answer_with_session(hub, &mut stream, r);
         }
+        // A browser shop's owner: listings, offers and replies, each signed with its item key.
+        ("POST", p) if p.starts_with("/api/mailbox/") => {
+            let r = h
+                .count_check(&[(format!("m:{ip}"), MAX_MAILBOX_CALLS_PER_IP_MIN)])
+                .and_then(|_| parse_body(&req))
+                .and_then(|b| {
+                    let rest = &p["/api/mailbox/".len()..];
+                    let (code, action) = rest.split_once('/').unwrap_or((rest, ""));
+                    if !valid_name(code) {
+                        return Err(anyhow!("no such shop"));
+                    }
+                    let t = now();
+                    match action {
+                        "listings" => h.mailboxes.publish(code, &b, t),
+                        "poll" => h.mailboxes.poll(code, &b, t),
+                        "reply" => h.mailboxes.reply(code, &b, t),
+                        "close" => h.mailboxes.close(code, &b, t),
+                        _ => Err(anyhow!("unknown request")),
+                    }
+                });
+            return json_answer(&mut stream, r, "");
+        }
         ("POST", "/api/wallet-faucet") => {
             let r = parse_body(&req).and_then(|b| hub.web_faucet(h, &b, &ip));
             return json_answer(&mut stream, r, "");
@@ -1483,6 +1515,29 @@ fn relay_shop(h: &Hosted, rest: &str, req: &Request, mut stream: TcpStream) {
     ) || (req.method == "GET" && tail.starts_with("reply/") && tail.len() <= 6 + 64);
     if !valid_name(code) || !allowed {
         return respond(&mut stream, 404, "text/plain", b"not found");
+    }
+    // A shop run by its owner's browser answers from its mailbox here.
+    if h.mailboxes.has(code) {
+        if tail == "listings" {
+            return match h.mailboxes.listings(code) {
+                Some(raw) => respond(&mut stream, 200, "application/json", raw.as_bytes()),
+                None => respond(&mut stream, 404, "text/plain", b"no such shop"),
+            };
+        }
+        if tail == "offer" {
+            return match h.mailboxes.offer(code, &req.body, now()) {
+                Ok(v) => respond(
+                    &mut stream,
+                    200,
+                    "application/json",
+                    v.to_string().as_bytes(),
+                ),
+                Err((status, why)) => respond(&mut stream, status, "text/plain", why.as_bytes()),
+            };
+        }
+        let tag = tail.trim_start_matches("reply/");
+        let (status, ctype, body) = h.mailboxes.reply_for(code, tag);
+        return respond(&mut stream, status, ctype, &body);
     }
     let app = h.apps.lock().unwrap().get(code).cloned();
     let Some(app) = app else {
@@ -1869,6 +1924,7 @@ impl Hub {
                 })
             })
             .collect();
+        shops.extend(h.mailboxes.open(&h.origin, now()));
         shops.sort_by_key(|s| {
             (
                 !s["house"].as_bool().unwrap_or(false),
@@ -3911,6 +3967,7 @@ mod tests {
             faucet_all: Mutex::new(Vec::new()),
             fails: Mutex::new(HashMap::new()),
             checks: Mutex::new(HashMap::new()),
+            mailboxes: Default::default(),
         }
     }
 

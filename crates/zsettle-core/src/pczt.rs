@@ -162,6 +162,12 @@ fn verify_bundle_proof(bundle: &orchard::pczt::Bundle, vk: &VerifyingKey) -> Res
         .map_err(|e| anyhow!("the proof does not verify: {e:?}"))
 }
 
+/// [`verifying_key`], built once per process.
+pub fn cached_verifying_key() -> &'static VerifyingKey {
+    static KEY: std::sync::OnceLock<VerifyingKey> = std::sync::OnceLock::new();
+    KEY.get_or_init(verifying_key)
+}
+
 /// The verifying key of the circuit this build targets. Building it takes a few seconds;
 /// long-running callers keep one.
 pub fn verifying_key() -> VerifyingKey {

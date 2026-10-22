@@ -1842,7 +1842,11 @@ function viewSell() {
         shop.running
           ? h('div', { class: 'stack' }, h('div', { class: 'addr mono' }, shopUrl), h('div', { class: 'row' }, h('button', { class: 'btn sm', onclick: () => copy(shopUrl, 'Shop address copied') }, icon('copy'), 'Copy address'), navigator.share ? h('button', { class: 'btn sm', onclick: () => navigator.share({ text: shopUrl }).catch(() => {}) }, icon('share'), 'Share') : null))
           : h('p', { class: 'small muted' }, listed ? 'Open the shop so buyers can reach it.' : 'List an item below, then open the shop.'),
-        shop.running && S.hosted ? h('p', { class: 'small muted' }, 'Your shop stays open and keeps signing offers after you sign out.') : null,
+        shop.running && S.status.browser
+          ? h('p', { class: 'small muted' }, 'Your shop is open while this page is open: it signs offers here, with the key in this browser. Close the page and the shop closes.')
+          : shop.running && S.hosted
+            ? h('p', { class: 'small muted' }, 'Your shop stays open and keeps signing offers after you sign out.')
+            : null,
         S.hosted ? null : h('details', null, h('summary', { class: 'small muted' }, 'Advanced'), h('div', { class: 'field', style: null }, h('label', { for: 'listen' }, 'Listen on'), h('input', { class: 'input', id: 'listen', value: listen, onchange: (e) => (S.listen = e.target.value) }), h('div', { class: 'hint' }, 'Use 0.0.0.0:8900 to let other machines in. For the internet, put a TLS proxy or a Tor hidden service in front.'))),
       ),
       h(
@@ -1913,6 +1917,7 @@ function listSheet(it) {
         onclick: async () => {
           const p = price.value.trim().replace(',', '.');
           if (!/^\d*\.?\d{0,8}$/.test(p) || !(Number(p) > 0.00005)) return (err.textContent = 'Enter a price above 0.00005 ZEC.');
+          if (S.engine && !(await askConfirm(err))) return;
           sh.setTitle('Listing ' + (it.name || 'item'));
           await runInSheet(sh, '/api/publish', { note: it.note, name: it.name, price: p + ' zec', description: desc.value.trim(), icon: chosen }, { total: 2, doneTitle: 'Listing', success: () => ({ title: 'Listed', text: (it.name || 'The item') + ' is for sale at ' + p + ' ZEC.' + (S.shop && S.shop.running ? '' : ' Open your shop so buyers can reach it.') }), failTitle: 'Not listed' });
           loadView(true);
@@ -1931,7 +1936,7 @@ function listedOptions(it) {
     ],
     foot: [
       h('button', { class: 'btn danger', onclick: () => confirmCancel(sh, it) }, 'Cancel offers'),
-      h('button', { class: 'btn', onclick: async () => { sh.setTitle('Delisting'); await runInSheet(sh, '/api/delist', { note: it.note }, { total: 1, doneTitle: 'Listing', success: () => ({ title: 'Delisted', text: 'The item is no longer for sale.' }), failTitle: 'Not delisted' }); loadView(true); } }, 'Delist'),
+      h('button', { class: 'btn', onclick: async () => { if (S.engine && !(await askConfirm())) return; sh.setTitle('Delisting'); await runInSheet(sh, '/api/delist', { note: it.note }, { total: 1, doneTitle: 'Listing', success: () => ({ title: 'Delisted', text: 'The item is no longer for sale.' }), failTitle: 'Not delisted' }); loadView(true); } }, 'Delist'),
     ],
   });
 }
@@ -1984,6 +1989,11 @@ function mint(text) {
 
 async function toggleShop(open, sw) {
   sw.disabled = true;
+  // The shop signs with the item key held in this page: confirm before it opens.
+  if (S.engine && open && !(await askConfirm())) {
+    sw.disabled = false;
+    return;
+  }
   try {
     const listen = (document.getElementById('listen') || {}).value || '127.0.0.1:8900';
     S.shop = await api(open ? '/api/shop/start' : '/api/shop/stop', open ? { listen } : {});

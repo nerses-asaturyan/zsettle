@@ -18,6 +18,7 @@ const E = {
   nextJob: 1,
   dead: null,
   warm: false,
+  shop: { open: false, code: null, timer: null, events: [], busy: false, lastSync: 0 },
 };
 
 // ------------------------------------------------------------ the wasm worker
@@ -317,6 +318,7 @@ export async function unlock(network, passphrase) {
   } catch {
     E.cfg = freshCfg();
   }
+  E.shop.code = E.cfg.listings ? await call('listingsCode', [E.cfg.listings]).catch(() => null) : null;
 }
 
 export async function lock() {
@@ -430,9 +432,12 @@ async function syncNow() {
 async function walletView() {
   const v = await call('view');
   const notes = v.notes.map((n) => ({ note: n.note, value_zat: n.value_zat, mined: n.mined, change: n.change }));
+  const listed = {};
+  for (const it of listedItems()) listed[it.note] = it;
   const items = v.items.map((i) => {
     const d = E.cfg.details[i.note] || {};
-    return { note: i.note, value_zat: i.value_zat, mined: i.mined, name: i.name || d.name || null, listed_zat: null, icon: i.icon || d.icon || null, description: i.description || d.description || null };
+    const l = listed[i.note] || {};
+    return { note: i.note, value_zat: i.value_zat, mined: i.mined, name: i.name || l.name || d.name || null, listed_zat: l.price_zat || null, icon: i.icon || l.icon || d.icon || null, description: i.description || l.description || d.description || null };
   });
   return { balance_zat: notes.reduce((a, n) => a + n.value_zat, 0), notes, items };
 }
@@ -447,10 +452,10 @@ function status() {
     network: E.record.network,
     passkey: E.record.lock.kind === 'passkey' ? { kind: 'passkey' } : null,
     sellers: E.cfg.sellers,
-    shop: { running: false, listen: null, public: null },
-    public_shop: null,
+    shop: { running: E.shop.open, listen: null, public: shopUrl() },
+    public_shop: shopUrl(),
     last_sync: E.cfg.last_sync,
-    has_listings: false,
+    has_listings: !!E.cfg.listings,
     faucet: E.record.network === 'test' && !E.cfg.faucetAt,
   };
   return st;
@@ -585,9 +590,67 @@ export async function api(path, body) {
         return { proof };
       });
     case 'GET /api/shop':
-      return { running: false, listen: null, public: null, events: [] };
+      return { running: E.shop.open, listen: null, public: shopUrl(), events: E.shop.events };
     case 'GET /api/listings':
-      return { items: [] };
+      return E.cfg.listings ? JSON.parse(E.cfg.listings) : { items: [] };
+    case 'POST /api/mint':
+      return job('mint', async (step) => {
+        const phrase = await takePhrase();
+        await afterSync(step);
+        step('Syncing with the network');
+        await syncNow();
+        step('Minting the items in one shielded transaction, in your browser');
+        const names = (body.names || []).map((n) => String(n).trim()).filter(Boolean);
+        const r = await call('mint', [phrase, names]);
+        await saveDb();
+        await addActivity({ kind: 'mint', txid: r.txid, text: 'Minted ' + names.join(', ') });
+        return r;
+      });
+    case 'POST /api/publish':
+      return job('publish', async (step) => {
+        const phrase = await takePhrase();
+        await afterSync(step);
+        step('Signing the listings with your item key, in your browser');
+        const listings = await call('publish', [phrase, E.cfg.listings || '', body.note, body.name || '', zat(body.price), body.description || '', body.icon || '']);
+        await saveDb();
+        await setListings(listings);
+        await addActivity({ kind: 'list', text: 'Listed ' + (body.name || 'an item') + ' for ' + String(body.price).replace(/\s*zec$/i, '') + ' ZEC' });
+        return { items: JSON.parse(listings).items.length };
+      });
+    case 'POST /api/delist':
+      return job('delist', async (step) => {
+        const phrase = await takePhrase();
+        step('Removing the item from your listings');
+        const listings = await call('delist', [phrase, E.cfg.listings || '', body.note]);
+        await setListings(listings);
+        await addActivity({ kind: 'delist', text: 'Delisted an item' });
+        return { ok: true };
+      });
+    case 'POST /api/cancel':
+      return job('cancel', async (step) => {
+        const phrase = await takePhrase();
+        await afterSync(step);
+        step('Syncing with the network');
+        await syncNow();
+        step('Moving the item to a fresh note, so no signed offer can settle');
+        const r = await call('cancel', [phrase, body.note]);
+        await saveDb();
+        if (listedItems().some((i) => i.note === body.note)) {
+          try {
+            await setListings(await call('delist', [phrase, E.cfg.listings, body.note]));
+          } catch {
+            /* delisted when the shop next sees the note spent */
+          }
+        }
+        await addActivity({ kind: 'cancel', txid: r.txid, text: 'Cancelled the offers on an item' });
+        return r;
+      });
+    case 'POST /api/shop/start':
+      await shopStart();
+      return api('/api/shop');
+    case 'POST /api/shop/stop':
+      await shopStop();
+      return api('/api/shop');
     case 'POST /api/lock':
       await lock();
       return { locked: true };
@@ -596,6 +659,115 @@ export async function api(path, body) {
   }
 }
 
+// ------------------------------------------------------------ the shop in this page
+//
+// The shop signs buyers' offers with the item key, so it is open only while this page is: the
+// key stays in the wallet's worker meanwhile. The server keeps a mailbox for it (its signed
+// listings, the offers buyers leave, the replies), and every request to it is signed with the
+// item key.
+
+const SHOP_POLL_MS = 4000;
+const SHOP_SYNC_MS = 30000;
+
+function listedItems() {
+  try {
+    return E.cfg && E.cfg.listings ? JSON.parse(E.cfg.listings).items || [] : [];
+  } catch {
+    return [];
+  }
+}
+function shopUrl() {
+  return E.cfg && E.cfg.listings && E.shop.code ? location.origin + '/shop/' + E.shop.code : null;
+}
+function shopEvent(e) {
+  E.shop.events.push({ at: now(), ...e });
+  if (E.shop.events.length > 200) E.shop.events.splice(0, E.shop.events.length - 200);
+}
+
+async function mailbox(action, payload, extra = {}) {
+  const at = now();
+  const what = action === 'listings' ? 'listings\n' + E.shop.code + '\n' + payload : action === 'reply' ? 'reply\n' + E.shop.code + '\n' + extra.tag + '\n' + payload : action + '\n' + E.shop.code;
+  const sig = await call('shopAuth', [what + '\n' + at]);
+  const r = await fetch('/api/mailbox/' + E.shop.code + '/' + action, {
+    method: 'POST',
+    headers: { 'X-Zsettle': '1', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ at, sig, ...extra }),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || 'the server did not take it');
+  return j;
+}
+
+async function setListings(listings) {
+  E.cfg.listings = listings;
+  E.shop.code = await call('listingsCode', [listings]);
+  await saveCfg();
+  if (E.shop.open) await mailbox('listings', listings, { listings });
+}
+
+async function shopStart() {
+  if (!E.cfg.listings) throw new Error('list an item first, then open the shop');
+  const phrase = await takePhrase();
+  await call('shopOpen', [phrase]);
+  E.shop.code = await call('listingsCode', [E.cfg.listings]);
+  try {
+    await mailbox('listings', E.cfg.listings, { listings: E.cfg.listings });
+  } catch (e) {
+    await call('shopClose', []);
+    throw e;
+  }
+  E.shop.open = true;
+  shopEvent({ event: 'opened' });
+  clearInterval(E.shop.timer);
+  E.shop.timer = setInterval(shopPass, SHOP_POLL_MS);
+  shopPass();
+}
+
 async function shopStop() {
-  /* the browser shop comes with selling */
+  if (!E.shop.open) return;
+  clearInterval(E.shop.timer);
+  E.shop.timer = null;
+  try {
+    await mailbox('close', '');
+  } catch {
+    /* the server closes it by itself a little later */
+  }
+  E.shop.open = false;
+  await call('shopClose', []).catch(() => {});
+}
+
+// One pass: now and then a sync (to see sales and new blocks), then every waiting offer.
+async function shopPass() {
+  if (!E.shop.open || E.shop.busy || !E.record) return;
+  E.shop.busy = true;
+  try {
+    if (Date.now() - E.shop.lastSync > SHOP_SYNC_MS) {
+      E.shop.lastSync = Date.now();
+      await syncNow();
+      const rec = await call('shopReconcile', [E.cfg.listings]);
+      for (const sold of rec.sold || []) {
+        shopEvent({ event: 'sold', name: sold.name, txid: sold.txid });
+        await addActivity({ kind: 'sale', txid: sold.txid, price_zat: sold.price_zat, text: 'Sold ' + (sold.name || 'an item') });
+      }
+      if (rec.listings) await setListings(rec.listings);
+    }
+    const { offers } = await mailbox('poll', '');
+    for (const o of offers || []) {
+      const bytes = Uint8Array.from(o.envelope.match(/../g).map((x) => parseInt(x, 16)));
+      const r = await call('shopSign', [bytes, E.cfg.listings]);
+      if (r.state === 'signed') {
+        await mailbox('reply', 'signed:' + r.reply, { tag: o.tag, signed: r.reply });
+        shopEvent({ event: 'signed', name: r.name, paid_zat: r.paid_zat });
+      } else if (r.state === 'rejected') {
+        await mailbox('reply', 'refused:' + r.reason, { tag: o.tag, refused: r.reason });
+        shopEvent({ event: 'rejected', reason: r.reason });
+      } else {
+        shopEvent({ event: 'deferred', reason: r.reason });
+      }
+    }
+  } catch (e) {
+    shopEvent({ event: 'error', error: String(e.message || e) });
+  } finally {
+    E.shop.busy = false;
+  }
 }

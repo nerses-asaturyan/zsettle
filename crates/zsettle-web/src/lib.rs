@@ -50,6 +50,8 @@ use zsettle_core::{
 
 pub use wasm_bindgen_rayon::init_thread_pool;
 
+mod seller;
+
 /// Blocks downloaded and scanned per step: small enough for a phone's memory, large enough
 /// that the per-request overhead does not dominate.
 const SYNC_BATCH_BLOCKS: u32 = 500;
@@ -286,6 +288,8 @@ pub struct WebWallet {
     cache: MemBlockCache,
     /// Transactions already fetched for their memos this session.
     memo_tried: std::collections::HashSet<zcash_protocol::TxId>,
+    /// The shop, while it is open: the item key and the proofs already verified.
+    shop: seller::ShopState,
 }
 
 fn progress(cb: &Option<js_sys::Function>, v: Value) {
@@ -346,6 +350,7 @@ impl WebWallet {
             relay,
             cache: MemBlockCache::default(),
             memo_tried: Default::default(),
+            shop: Default::default(),
         })
     }
 
@@ -371,6 +376,7 @@ impl WebWallet {
                 },
                 cache: MemBlockCache::default(),
                 memo_tried: Default::default(),
+            shop: Default::default(),
             })
         })()
         .map_err(js)
