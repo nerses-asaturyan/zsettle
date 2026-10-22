@@ -43,6 +43,7 @@ const ops = {
   address: () => need().address(),
   pay: (progress, mnemonic, to, amount, memo) => need().pay(mnemonic, to, BigInt(amount), memo || undefined),
   buy: (progress, mnemonic, shop, note) => need().buy(mnemonic, shop, note, progress),
+  prepareShop: (shop) => need().prepare_shop(shop),
   prove: (mnemonic, note, label, challenge) => need().prove(mnemonic, note, label || undefined, challenge || undefined),
   checkPhrase: (mnemonic) => need().check_phrase(mnemonic),
 };

@@ -81,6 +81,13 @@ pub type Client = CompactTxStreamerClient<Shielded<Channel>>;
 /// Open a gRPC channel to a lightwalletd server (TLS with WebPKI roots for `https` URLs),
 /// wrapped so that transparent addresses never go out.
 pub async fn connect(server: &str) -> Result<Client> {
+    Ok(CompactTxStreamerClient::new(Shielded(
+        channel(server).await?,
+    )))
+}
+
+/// The gRPC channel under [`connect`]; it reconnects by itself, so it can be kept.
+async fn channel(server: &str) -> Result<Channel> {
     let uri: tonic::transport::Uri = server.parse().map_err(|e| anyhow!("server url: {e}"))?;
     let host = uri
         .host()
@@ -92,11 +99,10 @@ pub async fn connect(server: &str) -> Result<Client> {
             .tls_config(ClientTlsConfig::new().domain_name(host).with_webpki_roots())
             .map_err(|e| anyhow!("tls config: {e}"))?;
     }
-    let channel = endpoint
+    endpoint
         .connect()
         .await
-        .map_err(|e| anyhow!("connecting to {server}: {e}"))?;
-    Ok(CompactTxStreamerClient::new(Shielded(channel)))
+        .map_err(|e| anyhow!("connecting to {server}: {e}"))
 }
 
 /// Install the process-wide rustls crypto provider. Call before any TLS connection.
@@ -392,14 +398,65 @@ pub mod relay {
         BlockId, BlockRange, ChainSpec, GetSubtreeRootsArg, ShieldedProtocol,
     };
 
-    use super::connect;
+    use std::collections::HashMap;
+    use std::future::Future;
+    use std::sync::{Mutex, OnceLock};
 
-    /// One relay call: a single-threaded runtime is plenty and cheap to start.
-    fn runtime() -> Result<tokio::runtime::Runtime> {
-        super::install_crypto_provider();
-        Ok(tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?)
+    use tonic::transport::Channel;
+    use zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient;
+
+    use super::{Client, Shielded};
+
+    /// One runtime for every relay call, and one kept channel per server: a browser wallet's
+    /// sync is many small requests, and a new TLS connection for each would dominate.
+    fn runtime() -> &'static tokio::runtime::Runtime {
+        static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+        RT.get_or_init(|| {
+            super::install_crypto_provider();
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("the relay's runtime")
+        })
+    }
+
+    fn channels() -> &'static Mutex<HashMap<String, Channel>> {
+        static CH: OnceLock<Mutex<HashMap<String, Channel>>> = OnceLock::new();
+        CH.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    async fn client(server: &str) -> Result<Client> {
+        let kept = channels().lock().unwrap().get(server).cloned();
+        let ch = match kept {
+            Some(ch) => ch,
+            None => {
+                let ch = super::channel(server).await?;
+                channels()
+                    .lock()
+                    .unwrap()
+                    .insert(server.to_string(), ch.clone());
+                ch
+            }
+        };
+        Ok(CompactTxStreamerClient::new(Shielded(ch)))
+    }
+
+    /// Run one call on the kept channel; after a failure, once more on a fresh one.
+    fn call<T, F, Fut>(server: &str, f: F) -> Result<T>
+    where
+        F: Fn(Client) -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        runtime().block_on(async {
+            match f(client(server).await?).await {
+                Ok(v) => Ok(v),
+                Err(_) => {
+                    channels().lock().unwrap().remove(server);
+                    f(client(server).await?).await
+                }
+            }
+        })
     }
 
     /// Most blocks one request may ask for.
@@ -410,9 +467,8 @@ pub mod relay {
 
     /// The chain tip as an encoded `BlockID`.
     pub fn latest_block(server: &str) -> Result<Vec<u8>> {
-        runtime()?.block_on(async {
-            let tip = connect(server)
-                .await?
+        call(server, |mut c| async move {
+            let tip = c
                 .get_latest_block(ChainSpec {})
                 .await
                 .map_err(|e| anyhow!("get_latest_block: {e}"))?
@@ -426,13 +482,12 @@ pub mod relay {
         if end < start || end - start >= MAX_BLOCKS {
             return Err(anyhow!("ask for 1 to {MAX_BLOCKS} blocks"));
         }
-        runtime()?.block_on(async {
+        call(server, |mut c| async move {
             let id = |h: u32| BlockId {
                 height: u64::from(h),
                 hash: vec![],
             };
-            let mut stream = connect(server)
-                .await?
+            let mut stream = c
                 .get_block_range(BlockRange {
                     start: Some(id(start)),
                     end: Some(id(end)),
@@ -455,9 +510,17 @@ pub mod relay {
 
     /// The commitment tree state after block `height`, as an encoded `TreeState`.
     pub fn tree_state(server: &str, height: u32) -> Result<Vec<u8>> {
-        Ok(runtime()?
-            .block_on(super::fetch_tree_state(server, height))?
-            .encode_to_vec())
+        call(server, |mut c| async move {
+            let ts = c
+                .get_tree_state(BlockId {
+                    height: u64::from(height),
+                    hash: vec![],
+                })
+                .await
+                .map_err(|e| anyhow!("get_tree_state({height}): {e}"))?
+                .into_inner();
+            Ok(ts.encode_to_vec())
+        })
     }
 
     /// Subtree roots of a shielded pool (`sapling`, `orchard` or `ironwood`), each
@@ -468,9 +531,8 @@ pub mod relay {
         if max == 0 || max > MAX_ROOTS {
             return Err(anyhow!("ask for 1 to {MAX_ROOTS} roots"));
         }
-        runtime()?.block_on(async {
-            let mut stream = connect(server)
-                .await?
+        call(server, |mut c| async move {
+            let mut stream = c
                 .get_subtree_roots(GetSubtreeRootsArg {
                     start_index: start,
                     shielded_protocol: protocol as i32,

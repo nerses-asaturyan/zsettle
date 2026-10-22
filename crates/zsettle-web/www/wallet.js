@@ -376,8 +376,8 @@ async function restoreFlow() {
 }
 
 function protectFlow(sh, phrase, network, birthday) {
-  const pass = h('input', { type: 'password', id: 'pass', autocomplete: 'new-password' });
-  const pass2 = h('input', { type: 'password', id: 'pass2', autocomplete: 'new-password' });
+  const pass = h('input', { type: 'password', id: 'newpass', autocomplete: 'new-password' });
+  const pass2 = h('input', { type: 'password', id: 'newpass2', autocomplete: 'new-password' });
   const err = h('p', { class: 'note err', hidden: true });
   const usePasskey = h('button', { class: 'btn primary block', hidden: !passkeyUsable() }, 'Lock with a passkey');
   const usePass = h('button', { class: 'btn block' }, 'Lock with a passphrase');
@@ -385,9 +385,9 @@ function protectFlow(sh, phrase, network, birthday) {
     h('p', null, 'How should this browser lock the wallet? You unlock it the same way each visit, and confirm each payment.'),
     usePasskey,
     h('h3', null, 'Or a passphrase'),
-    h('label', { for: 'pass' }, 'Passphrase (12 characters or more)'),
+    h('label', { for: 'newpass' }, 'Passphrase (12 characters or more)'),
     pass,
-    h('label', { for: 'pass2' }, 'Repeat it'),
+    h('label', { for: 'newpass2' }, 'Repeat it'),
     pass2,
     err,
     usePass,
@@ -689,6 +689,13 @@ async function shop(s) {
     if (!r.ok) throw new Error('the shop is closed');
     const l = await r.json();
     const items = (l.items || []).slice().sort((a, b) => a.price_zat - b.price_zat);
+    // Take the shop's item key now and scan for its items in the background, so a purchase
+    // does not wait for that scan.
+    if (l.network === S.record.network && items.length) {
+      call('prepareShop', [path])
+        .then(() => sync())
+        .catch(() => {});
+    }
     sh.set(
       l.network !== S.record.network ? h('p', { class: 'note' }, 'This shop sells on the ' + (l.network === 'main' ? 'mainnet' : 'testnet') + '; this wallet is on the other network.') : null,
       h('ul', { class: 'list' }, items.map((it) =>
@@ -739,7 +746,11 @@ async function buy(path, it) {
     }
   };
   try {
-    const r = await call('buy', [phrase, path, it.note], (p) => p && p.step && mark(p.step));
+    const syncLi = list.querySelector('[data-k="sync"]');
+    const r = await call('buy', [phrase, path, it.note], (p) => {
+      if (p && p.step) mark(p.step);
+      else if (p && p.scanned && p.tip && syncLi) syncLi.textContent = 'Finding the item on chain: block ' + p.scanned.toLocaleString('en') + ' of ' + p.tip.toLocaleString('en');
+    });
     await refresh();
     sh.lock(false);
     sh.set(h('p', null, 'Bought ' + (r.name || 'the item') + '. It arrives with the next block.'), h('p', { class: 'mono' }, r.txid), h('button', { class: 'btn primary block', onclick: () => sh.close() }, 'Done'));

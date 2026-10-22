@@ -653,22 +653,27 @@ impl WebWallet {
         Ok(js_sys::JSON::parse(&r.to_string()).unwrap_or(JsValue::NULL))
     }
 
-    async fn buy_inner(
+    /// Take a shop's item key ahead of a purchase, so the next sync already looks for its
+    /// items and buying does not wait for that scan. Returns the shop's checked listings.
+    pub async fn prepare_shop(&mut self, shop: String) -> Result<JsValue, JsError> {
+        let (listings, _) = self.shop_key(&shop, &None).await.map_err(js)?;
+        Ok(js_sys::JSON::parse(&serde_json::to_string(&listings).unwrap_or_default())
+            .unwrap_or(JsValue::NULL))
+    }
+
+    /// The shop's listings, checked, and the wallet account holding its item key (imported
+    /// on first use).
+    async fn shop_key(
         &mut self,
-        mnemonic: &str,
         shop: &str,
-        item_note: &str,
         cb: &Option<js_sys::Function>,
-    ) -> Result<Value> {
+    ) -> Result<(Listings, WalletAccount)> {
         // Shops on this server only: the page talks to no other site.
         if !shop.starts_with("/shop/") || shop.contains("..") || shop.contains("//") {
             return Err(anyhow!("a shop of this server is named /shop/<code>"));
         }
         let shop = shop.trim_end_matches('/');
-        let seed = seed_of(mnemonic)?;
-        let item = NoteRef::from_str(item_note)?;
         let network = self.wallet.network;
-
         progress(cb, json!({ "step": "listings" }));
         let text = fetch_ok(&format!("{shop}/listings"), None).await?;
         let listings = Listings::parse(&String::from_utf8_lossy(&text), "the shop's listings")?;
@@ -676,14 +681,9 @@ impl WebWallet {
         if listings.network()? != network {
             return Err(anyhow!("this shop sells on another network"));
         }
-        let listed = listings
-            .find(item_note)
-            .cloned()
-            .ok_or_else(|| anyhow!("the shop no longer lists this item"))?;
-
         // The shop's item key lets this wallet see the item note and prove its spend.
         let mut db = self.wallet.db()?;
-        let consignment = match find_account_by_ufvk(&db, network, &listings.item_ufvk)? {
+        let account = match find_account_by_ufvk(&db, network, &listings.item_ufvk)? {
             Some(a) => a,
             None => {
                 progress(cb, json!({ "step": "import" }));
@@ -695,7 +695,25 @@ impl WebWallet {
                 import_viewing_key_at(&mut db, network, &name, &listings.item_ufvk, tree)?
             }
         };
-        drop(db);
+        Ok((listings, account))
+    }
+
+    async fn buy_inner(
+        &mut self,
+        mnemonic: &str,
+        shop: &str,
+        item_note: &str,
+        cb: &Option<js_sys::Function>,
+    ) -> Result<Value> {
+        let seed = seed_of(mnemonic)?;
+        let item = NoteRef::from_str(item_note)?;
+        let network = self.wallet.network;
+        let (listings, consignment) = self.shop_key(shop, cb).await?;
+        let shop = shop.trim_end_matches('/');
+        let listed = listings
+            .find(item_note)
+            .cloned()
+            .ok_or_else(|| anyhow!("the shop no longer lists this item"))?;
         progress(cb, json!({ "step": "sync" }));
         self.sync_inner(cb).await?;
 

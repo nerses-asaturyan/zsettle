@@ -17,9 +17,9 @@ use anyhow::{anyhow, Context, Result};
 #[cfg(feature = "native")]
 use bip0039::{Count, English, Mnemonic};
 use rand::rngs::ThreadRng;
-use secrecy::{ExposeSecret, SecretVec};
 #[cfg(feature = "native")]
 use secrecy::Zeroize;
+use secrecy::{ExposeSecret, SecretVec};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "native")]
 use zcash_client_backend::data_api::{chain::BlockCache, scanning::ScanRange};
@@ -31,9 +31,9 @@ use zcash_client_backend::data_api::{
     WalletCommitmentTrees, WalletRead, WalletWrite,
 };
 use zcash_client_backend::proto::compact_formats::CompactBlock;
-use zcash_client_backend::wallet::Note;
 use zcash_client_backend::proto::service::TreeState;
 use zcash_client_backend::util::Clock;
+use zcash_client_backend::wallet::Note;
 #[cfg(feature = "native")]
 use zcash_client_sqlite::wallet::init::init_wallet_db;
 use zcash_client_sqlite::{AccountUuid, WalletDb};
@@ -241,7 +241,7 @@ impl Wallet {
 
     fn open_db(&self) -> Result<Db> {
         WalletDb::for_path(self.location(), self.network, WalletClock, rand::rng())
-        .context("opening wallet database")
+            .context("opening wallet database")
     }
 
     /// Run the wallet database migrations with the seed available.
@@ -1004,7 +1004,8 @@ const RESERVED_TABLE: &str = "CREATE TABLE IF NOT EXISTS zsettle_reserved_notes 
 fn read_reservations(wallet: &Wallet) -> Result<Reservations> {
     if wallet.memory {
         let conn = wallet.connection(false)?;
-        conn.execute(RESERVED_TABLE, []).map_err(|e| anyhow!("{e}"))?;
+        conn.execute(RESERVED_TABLE, [])
+            .map_err(|e| anyhow!("{e}"))?;
         let mut stmt = conn
             .prepare("SELECT note, expiry_height FROM zsettle_reserved_notes ORDER BY rowid")
             .map_err(|e| anyhow!("{e}"))?;

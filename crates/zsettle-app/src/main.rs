@@ -70,6 +70,8 @@ const MAX_CALLS_PER_IP_MIN: usize = 120;
 /// Chain relay requests per visitor a minute. A browser wallet's first sync of a few
 /// thousand blocks takes two requests per 500 blocks.
 const MAX_RELAY_CALLS_PER_IP_MIN: usize = 300;
+/// Chain relay requests a minute from all visitors together.
+const MAX_RELAY_CALLS_MIN: usize = 3_000;
 /// Largest browser wallet file served (the WebAssembly module).
 const MAX_WALLET_FILE: u64 = 64 * 1024 * 1024;
 /// Ownership proofs a wallet checks a minute: each reads the chain from the item's first
@@ -558,7 +560,12 @@ fn load_wallet_files(dir: &Path) -> Result<HashMap<String, WalletFile>> {
                 .replace('\\', "/");
             let etag = format!(
                 "\"{}\"",
-                hex::encode(blake2b_simd::Params::new().hash_length(16).hash(&body).as_bytes())
+                hex::encode(
+                    blake2b_simd::Params::new()
+                        .hash_length(16)
+                        .hash(&body)
+                        .as_bytes()
+                )
             );
             out.insert(rel, WalletFile { ctype, body, etag });
         }
@@ -566,7 +573,11 @@ fn load_wallet_files(dir: &Path) -> Result<HashMap<String, WalletFile>> {
     }
     let mut out = HashMap::new();
     walk(dir, dir, &mut out)?;
-    for needed in ["index.html", "pkg/zsettle_web.js", "pkg/zsettle_web_bg.wasm"] {
+    for needed in [
+        "index.html",
+        "pkg/zsettle_web.js",
+        "pkg/zsettle_web_bg.wasm",
+    ] {
         if !out.contains_key(needed) {
             return Err(anyhow!(
                 "{} has no {needed}: build crates/zsettle-web (build.sh) and pass its www directory",
@@ -999,9 +1010,20 @@ fn handle(hub: &Arc<Hub>, mut stream: TcpStream) {
 
 /// The browser wallet's page and the chain relay: public, the same for every visitor, and
 /// holding nothing of anyone's. Returns the stream when the request is for something else.
-fn public_route(hub: &Hub, req: &Request, mut stream: TcpStream, limit: impl Fn() -> bool) -> Option<TcpStream> {
+fn public_route(
+    hub: &Hub,
+    req: &Request,
+    mut stream: TcpStream,
+    limit: impl Fn() -> bool,
+) -> Option<TcpStream> {
     if req.path == "/wallet" {
-        respond_with(&mut stream, 301, "text/plain", b"", "Location: /wallet/\r\n");
+        respond_with(
+            &mut stream,
+            301,
+            "text/plain",
+            b"",
+            "Location: /wallet/\r\n",
+        );
         return None;
     }
     if let Some(rel) = req.path.strip_prefix("/wallet/") {
@@ -1218,10 +1240,12 @@ fn handle_hosted(hub: &Arc<Hub>, h: &Hosted, req: Request, mut stream: TcpStream
         .filter(|v| !v.is_empty())
         .map(|v| visitor(&v))
         .unwrap_or_else(|| "local".into());
-    let relay_key = (format!("r:{ip}"), MAX_RELAY_CALLS_PER_IP_MIN);
-    let Some(mut stream) = public_route(hub, &req, stream, || {
-        h.count_check(std::slice::from_ref(&relay_key)).is_ok()
-    }) else {
+    let relay_keys = [
+        (format!("r:{ip}"), MAX_RELAY_CALLS_PER_IP_MIN),
+        ("r:all".to_string(), MAX_RELAY_CALLS_MIN),
+    ];
+    let Some(mut stream) = public_route(hub, &req, stream, || h.count_check(&relay_keys).is_ok())
+    else {
         return;
     };
     if req.method == "GET" {
@@ -1271,6 +1295,7 @@ fn handle_hosted(hub: &Arc<Hub>, h: &Hosted, req: Request, mut stream: TcpStream
             let r = Ok(json!({
                 "mode": "hosted", "network": h.network, "salt": h.salt,
                 "signed_in": app.is_some(), "has_house": h.apps.lock().unwrap().contains_key(HOUSE),
+                "web_wallet": !hub.wallet_files.is_empty(),
             }));
             return json_answer(&mut stream, r, "");
         }
