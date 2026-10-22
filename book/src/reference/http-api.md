@@ -64,14 +64,18 @@ The relay passes public chain data from the server's light server, for either ne
 | Method and path | Answer |
 |---|---|
 | `GET /api/chain/tip?net=` | The chain tip, an encoded `BlockID`. |
-| `GET /api/chain/blocks?net=&start=&end=` | Compact blocks `start..=end` (at most 1,000), each length-delimited. |
+| `GET /api/chain/blocks?net=&start=&end=` | Compact blocks `start..=end` (at most 500 blocks and 16 MB), each length-delimited. |
 | `GET /api/chain/tree-state?net=&height=` | The tree state after `height`, an encoded `TreeState`. |
 | `GET /api/chain/subtree-roots?net=&pool=&start=&max=` | Subtree roots of `sapling`, `orchard` or `ironwood` (at most 10,000), each length-delimited. |
 | `GET /api/chain/info?net=` | `{ chain_name, consensus_branch_id, block_height }` as JSON. |
 | `POST /api/chain/send?net=` | Sends the raw transaction in the body (needs `X-Zsettle: 1`); the server's message as text. |
 
-Calls are limited per visitor (300 a minute) and for the whole server (3,000 a minute). In
-hosted mode `GET /api/shops` lists the open shops without a session.
+Calls are limited per visitor (300 a minute), per wider network (an IPv6 /48 or IPv4 /24, 600
+a minute), for the whole server (3,000 a minute) and to 24 at once; a visitor may send 10
+transactions a minute. Each call has a time limit at the light server. In hosted mode
+`GET /api/shops` lists the open shops without a session, and `POST /api/wallet-faucet`
+(`{ "address": "utest1..." }`) sends test coins to a browser wallet once per address, under
+the faucet's limits.
 
 ## The app's own API
 

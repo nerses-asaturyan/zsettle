@@ -72,6 +72,14 @@ const MAX_CALLS_PER_IP_MIN: usize = 120;
 const MAX_RELAY_CALLS_PER_IP_MIN: usize = 300;
 /// Chain relay requests a minute from all visitors together.
 const MAX_RELAY_CALLS_MIN: usize = 3_000;
+/// Chain relay requests a minute from one wider network (an IPv6 /48 or an IPv4 /24).
+const MAX_RELAY_CALLS_PER_NET_MIN: usize = 600;
+/// Transactions sent through the relay a minute per visitor.
+const MAX_RELAY_SENDS_PER_IP_MIN: usize = 10;
+/// Chain relay requests running at once; each holds a connection thread while the light
+/// server answers.
+const MAX_RELAY_RUNNING: usize = 24;
+static RELAY_RUNNING: AtomicUsize = AtomicUsize::new(0);
 /// Largest browser wallet file served (the WebAssembly module).
 const MAX_WALLET_FILE: u64 = 64 * 1024 * 1024;
 /// Ownership proofs a wallet checks a minute: each reads the chain from the item's first
@@ -903,7 +911,7 @@ fn read_request(stream: &mut TcpStream) -> Result<Request> {
         .map(|v| v.parse())
         .transpose()?
         .unwrap_or(0);
-    let limit = if path.starts_with("/shop/") {
+    let limit = if path.starts_with("/shop/") || path == "/api/chain/send" {
         MAX_RELAY_BODY
     } else {
         MAX_BODY
@@ -998,6 +1006,8 @@ fn static_file(path: &str) -> Option<(&'static str, &'static [u8])> {
 }
 
 fn handle(hub: &Arc<Hub>, mut stream: TcpStream) {
+    // A reader that stops reading must not hold an answer (and its thread) for ever.
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(60)));
     let req = match read_request(&mut stream) {
         Ok(r) => r,
         Err(_) => return respond(&mut stream, 400, "text/plain", b"bad request"),
@@ -1068,6 +1078,15 @@ fn public_route(
         );
         return None;
     }
+    let Some(_running) = Slot::try_take(&RELAY_RUNNING, MAX_RELAY_RUNNING) else {
+        respond(
+            &mut stream,
+            503,
+            "application/json",
+            br#"{"error":"the server is busy; try again in a moment"}"#,
+        );
+        return None;
+    };
     let q: HashMap<&str, &str> = req
         .query
         .split('&')
@@ -1103,17 +1122,16 @@ fn public_route(
             ),
             ("GET", "info") => (
                 "application/json",
-                serde_json::to_vec(&zsettle_core::broadcast::server_info_blocking(&server)?)?,
+                serde_json::to_vec(&relay::server_info(&server)?)?,
             ),
             ("POST", "send") => {
                 if req.headers.get("x-zsettle").map(String::as_str) != Some("1") {
                     return Err(anyhow!("missing header"));
                 }
-                let msg = zsettle_core::broadcast::send_raw_transaction_blocking(
-                    &server,
-                    req.body.clone(),
-                )?;
-                ("text/plain; charset=utf-8", msg.into_bytes())
+                (
+                    "text/plain; charset=utf-8",
+                    relay::send(&server, &req.body)?.into_bytes(),
+                )
             }
             _ => return Err(anyhow!("no such call")),
         })
@@ -1240,10 +1258,14 @@ fn handle_hosted(hub: &Arc<Hub>, h: &Hosted, req: Request, mut stream: TcpStream
         .filter(|v| !v.is_empty())
         .map(|v| visitor(&v))
         .unwrap_or_else(|| "local".into());
-    let relay_keys = [
+    let mut relay_keys = vec![
         (format!("r:{ip}"), MAX_RELAY_CALLS_PER_IP_MIN),
+        (format!("r:{}", wider_net(&ip)), MAX_RELAY_CALLS_PER_NET_MIN),
         ("r:all".to_string(), MAX_RELAY_CALLS_MIN),
     ];
+    if req.path == "/api/chain/send" {
+        relay_keys.push((format!("s:{ip}"), MAX_RELAY_SENDS_PER_IP_MIN));
+    }
     let Some(mut stream) = public_route(hub, &req, stream, || h.count_check(&relay_keys).is_ok())
     else {
         return;

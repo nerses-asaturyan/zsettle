@@ -305,8 +305,9 @@ impl WebWallet {
         let relay = Relay {
             net: network_name(network),
         };
+        // Rounded down like a new wallet's, so the tree-state request names no exact height.
         let height = if birthday > 0 {
-            birthday
+            (birthday / BIRTHDAY_ROUNDING) * BIRTHDAY_ROUNDING
         } else {
             (relay.tip().await?.saturating_sub(100) / BIRTHDAY_ROUNDING) * BIRTHDAY_ROUNDING
         };
@@ -639,15 +640,21 @@ impl WebWallet {
     /// listings, take its item key, sync, build and prove the trade, hand the seller its copy,
     /// wait for the seller's signature, sign the payment and send the transaction.
     /// `on_progress` gets `{ step }` as it goes.
+    /// `price_zat` and `payout` are what the buyer confirmed: the purchase is refused if the
+    /// shop's signed listings say anything else by the time the trade is built. Before the
+    /// offer leaves, `on_progress` also gets the database bytes, for the page to save the
+    /// reservation of the paying note at once.
     pub async fn buy(
         &mut self,
         mnemonic: String,
         shop: String,
         item_note: String,
+        price_zat: u64,
+        payout: String,
         on_progress: Option<js_sys::Function>,
     ) -> Result<JsValue, JsError> {
         let r = self
-            .buy_inner(&mnemonic, &shop, &item_note, &on_progress)
+            .buy_inner(&mnemonic, &shop, &item_note, price_zat, &payout, &on_progress)
             .await
             .map_err(js)?;
         Ok(js_sys::JSON::parse(&r.to_string()).unwrap_or(JsValue::NULL))
@@ -703,6 +710,8 @@ impl WebWallet {
         mnemonic: &str,
         shop: &str,
         item_note: &str,
+        price_zat: u64,
+        payout: &str,
         cb: &Option<js_sys::Function>,
     ) -> Result<Value> {
         let seed = seed_of(mnemonic)?;
@@ -714,6 +723,11 @@ impl WebWallet {
             .find(item_note)
             .cloned()
             .ok_or_else(|| anyhow!("the shop no longer lists this item"))?;
+        if listed.price_zat != price_zat || listings.payout_address != payout {
+            return Err(anyhow!(
+                "the shop changed this item's price or payment address since you confirmed; open the shop again"
+            ));
+        }
         progress(cb, json!({ "step": "sync" }));
         self.sync_inner(cb).await?;
 
@@ -760,6 +774,12 @@ impl WebWallet {
         // Held before the offer leaves: the seller learns this note's nullifier, so it must not
         // pay for a second offer while this one can still settle.
         reserve_note(&self.wallet, paying, built.expiry_height)?;
+        // The page saves this at once: a reload while the shop signs must not forget it.
+        if let Some(cb) = cb {
+            let bytes = js_sys::Uint8Array::from(&self.wallet.export()?[..]);
+            let step = js_sys::JSON::parse(r#"{"step":"reserved"}"#).unwrap_or(JsValue::NULL);
+            let _ = cb.call2(&JsValue::NULL, &step, &bytes);
+        }
 
         progress(cb, json!({ "step": "offer" }));
         let answer: Value = serde_json::from_slice(&fetch_ok(&format!("{shop}/offer"), Some(&envelope)).await?)

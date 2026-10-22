@@ -12,7 +12,8 @@ let ready = null;
 const crash = (text) => self.postMessage({ type: 'crash', err: String(text).slice(0, 2000) });
 const consoleError = console.error;
 console.error = (...a) => {
-  crash(a.map(String).join(' '));
+  const text = a.map(String).join(' ');
+  if (/panicked at/.test(text)) crash(text);
   consoleError(...a);
 };
 self.addEventListener('error', (e) => crash(e.message || 'the wallet stopped'));
@@ -42,7 +43,7 @@ const ops = {
   view: () => need().view(),
   address: () => need().address(),
   pay: (progress, mnemonic, to, amount, memo) => need().pay(mnemonic, to, BigInt(amount), memo || undefined),
-  buy: (progress, mnemonic, shop, note) => need().buy(mnemonic, shop, note, progress),
+  buy: (progress, mnemonic, shop, note, price, payout) => need().buy(mnemonic, shop, note, BigInt(price), payout, progress),
   prepareShop: (shop) => need().prepare_shop(shop),
   prove: (mnemonic, note, label, challenge) => need().prove(mnemonic, note, label || undefined, challenge || undefined),
   checkPhrase: (mnemonic) => need().check_phrase(mnemonic),
@@ -72,7 +73,8 @@ self.onmessage = async ({ data }) => {
     await ready;
     const fn = ops[op];
     if (!fn) throw new Error('unknown call ' + op);
-    const a = WITH_PROGRESS.has(op) ? [(p) => self.postMessage({ id, progress: p }), ...args] : args;
+    const report = (p, db) => self.postMessage({ id, progress: p, db: db instanceof Uint8Array ? db.slice() : undefined });
+    const a = WITH_PROGRESS.has(op) ? [report, ...args] : args;
     let ok = await fn(...a);
     // Bytes leave as their own copy: the shared wasm memory cannot be posted.
     if (ok instanceof Uint8Array) ok = ok.slice();

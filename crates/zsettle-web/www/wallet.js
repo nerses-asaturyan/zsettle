@@ -101,8 +101,9 @@ let queue = Promise.resolve();
 function call(op, args = [], onProgress) {
   const run = () =>
     new Promise((resolve, reject) => {
+      if (S.dead) return reject(new Error(S.dead));
       const id = nextId++;
-      pending.set(id, { resolve, reject, onProgress });
+      pending.set(id, { resolve, reject, onProgress, worker: S.worker });
       S.worker.postMessage({ id, op, args });
     });
   const p = queue.then(run, run);
@@ -130,17 +131,25 @@ function spawn(module, memory) {
       if (data.type === 'ready') return resolve(worker);
       if (data.type === 'failed') return reject(new Error(data.err));
       if (data.type === 'crash') {
-        // The worker cannot go on after a panic: fail what is in flight and say so.
+        // A worker cannot go on after a panic. The helper only builds the proving key, which
+        // the wallet then builds itself; a crashed wallet worker fails its calls and takes no
+        // more until the page is reloaded.
         console.warn('wallet worker:', data.err);
+        if (worker !== S.worker) return;
+        S.dead = 'The wallet stopped: ' + data.err.split('\n')[0] + ' Reload the page.';
         for (const [id, p] of pending) {
+          if (p.worker !== worker) continue;
           pending.delete(id);
-          p.reject(new Error('The wallet stopped: ' + data.err.split('\n')[0] + ' Reload the page.'));
+          p.reject(new Error(S.dead));
         }
         return;
       }
       const p = pending.get(data.id);
       if (!p) return;
-      if ('progress' in data) return p.onProgress && p.onProgress(data.progress);
+      if ('progress' in data) {
+        if (data.db) saveBytes(data.db).catch(() => {});
+        return p.onProgress && p.onProgress(data.progress);
+      }
       pending.delete(data.id);
       if ('err' in data) p.reject(new Error(data.err));
       else p.resolve(data.ok);
@@ -249,7 +258,9 @@ async function passkeyCreate(network) {
         { type: 'public-key', alg: -7 },
         { type: 'public-key', alg: -257 },
       ],
-      authenticatorSelection: { residentKey: 'preferred', userVerification: 'required' },
+      // Not discoverable: the wallet names its passkey, and it stays out of the list the
+      // custodial app on the same site offers at sign-in.
+      authenticatorSelection: { residentKey: 'discouraged', userVerification: 'required' },
       extensions: { prf: { eval: { first: salt } } },
     },
   });
@@ -286,13 +297,24 @@ async function unlockKey(record, passphrase) {
 // The recovery phrase, for one signing call. A passkey wallet asks the passkey again, so every
 // payment needs the owner's touch; a passphrase wallet uses the key it was unlocked with, after
 // the confirm step.
-async function phraseForSigning() {
-  const key = S.record.lock.kind === 'passkey' ? await unlockKey(S.record) : S.key;
-  return dec.decode(await open_(key, S.record.phrase));
+async function phraseForSigning(passphrase) {
+  let key = S.key;
+  if (S.record.lock.kind === 'passkey') key = await unlockKey(S.record);
+  else if (passphrase !== undefined) key = await unlockKey(S.record, passphrase);
+  try {
+    return dec.decode(await open_(key, S.record.phrase));
+  } catch {
+    throw new Error('Wrong passphrase.');
+  }
 }
 
 async function saveDb() {
-  const bytes = await call('save');
+  await saveBytes(await call('save'));
+}
+
+// Keep the wallet database in this browser, encrypted.
+async function saveBytes(bytes) {
+  if (!S.key || !S.record) return;
   S.record.db = await seal(S.key, bytes);
   S.record.opened = Date.now();
   await idbPut(KEY(S.record.network), S.record);
@@ -587,16 +609,19 @@ async function lockNow() {
 }
 
 // Confirm a transaction. A passkey wallet asks for the passkey here.
-async function confirmStep(sh, lines, label) {
+// With askPass, a passphrase wallet asks for its passphrase again.
+async function confirmStep(sh, lines, label, { askPass = false } = {}) {
   return new Promise((resolve) => {
     const go = h('button', { class: 'btn primary block' }, S.record.lock.kind === 'passkey' ? label + ' with passkey' : label);
     const back = h('button', { class: 'btn block', onclick: () => resolve(null) }, 'Back');
     const err = h('p', { class: 'note err', hidden: true });
-    sh.set(h('div', { class: 'card stack' }, lines), err, go, back);
+    const ask = askPass && S.record.lock.kind === 'passphrase';
+    const pass = h('input', { type: 'password', id: 'again', autocomplete: 'current-password' });
+    sh.set(h('div', { class: 'card stack' }, lines), ask ? [h('label', { for: 'again' }, 'Passphrase'), pass] : null, err, go, back);
     go.onclick = async () => {
       go.disabled = true;
       try {
-        resolve(await phraseForSigning());
+        resolve(await phraseForSigning(ask ? pass.value : undefined));
       } catch (e) {
         err.textContent = human(e.name === 'NotAllowedError' ? 'The passkey prompt was cancelled.' : e.message);
         err.hidden = false;
@@ -662,7 +687,16 @@ function send() {
       err.hidden = false;
       return;
     }
-    const phrase = await confirmStep(sh, [h('div', null, 'Send ', h('b', null, zec(zat))), h('div', { class: 'mono' }, to.value.trim()), h('div', { class: 'muted small' }, 'Plus a network fee of about 0.0001 ZEC.')], 'Send');
+    const phrase = await confirmStep(
+      sh,
+      [
+        h('div', null, 'Send ', h('b', null, zec(zat))),
+        h('div', { class: 'mono' }, to.value.trim()),
+        memo.value.trim() ? h('div', null, 'Memo: ', memo.value.trim()) : null,
+        h('div', { class: 'muted small' }, 'Plus a network fee of at least 0.0001 ZEC: 0.00005 ZEC for each note spent or made beyond two, so more when many small notes pay.'),
+      ],
+      'Send',
+    );
     if (!phrase) return send();
     sh.lock(true);
     sh.set(h('p', null, 'Building and proving the payment…'), h('p', { class: 'muted small' }, 'This takes up to a minute on a phone. Keep this page open.'));
@@ -704,24 +738,18 @@ async function shop(s) {
   const path = '/shop/' + s.code;
   const sh = sheet(s.name || s.code, [h('p', { class: 'muted' }, 'Loading…')]);
   try {
-    const r = await fetch(path + '/listings');
-    if (!r.ok) throw new Error('the shop is closed');
-    const l = await r.json();
+    // The wallet fetches the listings, checks the shop's signature and takes its item key, so
+    // the next sync already looks for its items; what is shown here is what was checked, and a
+    // purchase is refused if the shop changes it before signing.
+    const l = await call('prepareShop', [path]);
+    sync();
     const items = (l.items || []).slice().sort((a, b) => a.price_zat - b.price_zat);
-    // Take the shop's item key now and scan for its items in the background, so a purchase
-    // does not wait for that scan.
-    if (l.network === S.record.network && items.length) {
-      call('prepareShop', [path])
-        .then(() => sync())
-        .catch(() => {});
-    }
     sh.set(
-      l.network !== S.record.network ? h('p', { class: 'note' }, 'This shop sells on the ' + (l.network === 'main' ? 'mainnet' : 'testnet') + '; this wallet is on the other network.') : null,
       h('ul', { class: 'list' }, items.map((it) =>
         h('li', null,
           h('span', { class: 'icon' }, it.icon || '🎟️'),
           h('div', { class: 'grow' }, h('div', { class: 'name' }, it.name || 'Item'), it.description ? h('div', { class: 'muted small' }, it.description) : null, h('div', { class: 'small' }, zec(it.price_zat))),
-          l.network === S.record.network ? h('button', { class: 'btn primary', onclick: () => (sh.close(), buy(path, it)) }, 'Buy') : null,
+          h('button', { class: 'btn primary', onclick: () => (sh.close(), buy(path, it, l)) }, 'Buy'),
         ))),
     );
   } catch (e) {
@@ -740,13 +768,21 @@ const STEPS = [
   ['send', 'Sending the transaction'],
 ];
 
-async function buy(path, it) {
+// A price list signed this many blocks before the tip is old enough to mention, as the
+// command-line buy does.
+const STALE_LISTING_BLOCKS = 1000;
+
+async function buy(path, it, l) {
   const sh = sheet('Buy ' + (it.name || 'item'), []);
+  const tip = S.view && S.view.chain_tip;
+  const age = tip && l.issued_at ? tip - l.issued_at : 0;
   const phrase = await confirmStep(
     sh,
     [
       h('div', { class: 'name' }, (it.icon || '🎟️') + ' ' + (it.name || 'Item')),
       h('div', null, 'Price ', h('b', null, zec(it.price_zat)), ', plus a network fee of about 0.00015 ZEC.'),
+      h('div', { class: 'muted small' }, 'Paid to the shop’s address ', h('span', { class: 'mono' }, short(l.payout_address)), ', as its signed price list names it.'),
+      age > STALE_LISTING_BLOCKS ? h('p', { class: 'note' }, 'The shop signed this price list ' + age.toLocaleString('en') + ' blocks ago. Prices may have changed; the shop refuses an offer that no longer matches.') : null,
       h('p', { class: 'muted small' }, 'The item and your payment move in one transaction: either both happen or neither does. Your payment is signed here, in this page.'),
     ],
     'Buy',
@@ -766,7 +802,7 @@ async function buy(path, it) {
   };
   try {
     const syncLi = list.querySelector('[data-k="sync"]');
-    const r = await call('buy', [phrase, path, it.note], (p) => {
+    const r = await call('buy', [phrase, path, it.note, it.price_zat, l.payout_address], (p) => {
       if (p && p.step) mark(p.step);
       else if (p && p.scanned && p.tip && syncLi) syncLi.textContent = 'Finding the item on chain: block ' + p.scanned.toLocaleString('en') + ' of ' + p.tip.toLocaleString('en');
     });
@@ -826,7 +862,7 @@ function prove(it) {
 
 async function showPhrase() {
   const sh = sheet('Recovery phrase', []);
-  const phrase = await confirmStep(sh, [h('p', null, 'Show the 24 words on screen. Make sure nobody can see it.')], 'Show');
+  const phrase = await confirmStep(sh, [h('p', null, 'Show the 24 words on screen. Make sure nobody can see it.')], 'Show', { askPass: true });
   if (!phrase) return sh.close();
   sh.set(h('ol', { class: 'words' }, phrase.split(' ').map((w) => h('li', null, w))), h('p', { class: 'muted small' }, 'Birthday (first block): ' + (S.record.birthday || 0).toLocaleString('en')), h('button', { class: 'btn block', onclick: () => sh.close() }, 'Done'));
 }
@@ -857,6 +893,17 @@ function removeWallet() {
     render(h('div', { class: 'card stack' }, h('p', { class: 'note err' }, human(e.message))));
   }
 })();
+// An open wallet locks itself after a quarter of an hour without a touch or a key, unless a
+// call is running.
+const IDLE_MS = 15 * 60 * 1000;
+let lastActive = Date.now();
+for (const ev of ['pointerdown', 'keydown']) document.addEventListener(ev, () => (lastActive = Date.now()), true);
+setInterval(() => {
+  if (S.record && pending.size === 0 && Date.now() - lastActive > IDLE_MS) {
+    document.getElementById('layer').replaceChildren();
+    lockNow();
+  }
+}, 30000);
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && S.record && !S.syncing) sync();
 });

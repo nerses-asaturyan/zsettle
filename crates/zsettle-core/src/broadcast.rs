@@ -93,7 +93,11 @@ async fn channel(server: &str) -> Result<Channel> {
         .host()
         .ok_or_else(|| anyhow!("server url has no host"))?
         .to_string();
-    let mut endpoint = Channel::builder(uri.clone());
+    // A stalled server must not hold a caller for ever: each request, and the connection,
+    // has a time limit.
+    let mut endpoint = Channel::builder(uri.clone())
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(90));
     if uri.scheme_str() == Some("https") {
         endpoint = endpoint
             .tls_config(ClientTlsConfig::new().domain_name(host).with_webpki_roots())
@@ -120,7 +124,10 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
 
 /// Send raw transaction bytes to a lightwalletd server. Returns the server's message.
 pub async fn send_raw_transaction(server: &str, tx_bytes: Vec<u8>) -> Result<String> {
-    let mut client = connect(server).await?;
+    send_with(connect(server).await?, tx_bytes).await
+}
+
+async fn send_with(mut client: Client, tx_bytes: Vec<u8>) -> Result<String> {
     let response = client
         .send_transaction(RawTransaction {
             data: tx_bytes,
@@ -249,7 +256,10 @@ pub struct ServerInfo {
 
 /// Ask the server which chain and consensus branch it is on.
 pub async fn server_info(server: &str) -> Result<ServerInfo> {
-    let mut client = connect(server).await?;
+    lightd_info(connect(server).await?).await
+}
+
+async fn lightd_info(mut client: Client) -> Result<ServerInfo> {
     let info = client
         .get_lightd_info(Empty {})
         .await
@@ -442,25 +452,62 @@ pub mod relay {
         Ok(CompactTxStreamerClient::new(Shielded(ch)))
     }
 
-    /// Run one call on the kept channel; after a failure, once more on a fresh one.
+    /// A failure of the connection rather than of the request: worth a fresh channel.
+    fn transient(e: &anyhow::Error) -> bool {
+        let m = format!("{e:#}");
+        [
+            "transport error",
+            "Unavailable",
+            "connecting to",
+            "timed out",
+            "broken pipe",
+            "Cancelled",
+        ]
+        .iter()
+        .any(|t| m.contains(t))
+    }
+
+    /// Run one call on the kept channel; after a connection failure, once more on a fresh one.
     fn call<T, F, Fut>(server: &str, f: F) -> Result<T>
     where
         F: Fn(Client) -> Fut,
         Fut: Future<Output = Result<T>>,
     {
         runtime().block_on(async {
-            match f(client(server).await?).await {
-                Ok(v) => Ok(v),
-                Err(_) => {
-                    channels().lock().unwrap().remove(server);
-                    f(client(server).await?).await
+            tokio::time::timeout(CALL_LIMIT, async {
+                match f(client(server).await?).await {
+                    Ok(v) => Ok(v),
+                    Err(e) if transient(&e) => {
+                        channels().lock().unwrap().remove(server);
+                        f(client(server).await?).await
+                    }
+                    Err(e) => Err(e),
                 }
-            }
+            })
+            .await
+            .map_err(|_| anyhow!("the light server did not answer in time"))?
         })
     }
 
+    /// What the light server reports about its chain.
+    pub fn server_info(server: &str) -> Result<super::ServerInfo> {
+        call(server, super::lightd_info)
+    }
+
+    /// Send a finished transaction; the server's message.
+    pub fn send(server: &str, tx: &[u8]) -> Result<String> {
+        call(server, |c| super::send_with(c, tx.to_vec()))
+    }
+
     /// Most blocks one request may ask for.
-    pub const MAX_BLOCKS: u32 = 1_000;
+    pub const MAX_BLOCKS: u32 = 500;
+
+    /// Most bytes of compact blocks one answer may hold; a range over that is refused, so one
+    /// request cannot make the server hold an unbounded answer.
+    pub const MAX_BLOCK_BYTES: usize = 16 * 1024 * 1024;
+
+    /// Longest one relay call may take, retry included.
+    const CALL_LIMIT: std::time::Duration = std::time::Duration::from_secs(120);
 
     /// Most subtree roots one request may ask for.
     pub const MAX_ROOTS: u32 = 10_000;
@@ -503,6 +550,11 @@ pub mod relay {
                 .map_err(|e| anyhow!("get_block_range: {e}"))?
             {
                 block.encode_length_delimited(&mut out)?;
+                if out.len() > MAX_BLOCK_BYTES {
+                    return Err(anyhow!(
+                        "these blocks are too large for one answer; ask for fewer"
+                    ));
+                }
             }
             Ok(out)
         })

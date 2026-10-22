@@ -18,7 +18,9 @@ On the hosted demo it is at `https://<demo domain>/wallet/`, and the start page 
 
 The key that encrypts the phrase and the database comes from a passkey (its PRF output) or
 from a passphrase (PBKDF2, 600,000 rounds). A passkey wallet asks for the passkey again
-before every payment, purchase, proof and backup.
+before every payment, purchase, proof and backup; a passphrase wallet asks for the passphrase
+again before showing the recovery phrase. An open wallet locks itself after 15 minutes
+without a touch or a key.
 
 ## Create or restore
 
@@ -40,9 +42,14 @@ The browser keeps one wallet per network. The lock screen offers the other one.
 - **Send** pays a unified address with an Orchard receiver.
 - **Shops** lists the open shops of this server. Opening a shop adds its item key to the
   wallet and scans for its items in the background, so a purchase does not wait for that scan.
-- **Buy** builds and proves the trade in the page, hands the shop its copy, waits for the
-  shop's signature, signs the payment and sends the transaction. The steps show as they run.
-  On a phone, proving takes up to a minute or two.
+- **Buy** shows the price and the shop's payment address from its signed price list, which
+  the wallet has checked. It then builds and proves the trade in the page, hands the shop its
+  copy, waits for the shop's signature, signs the payment and sends the transaction. If the
+  shop's signed list says another price or address by then, the purchase stops. The paying
+  note is saved as held for this offer before the offer leaves. On a phone, proving takes up
+  to a minute or two.
+- On the testnet, **Receive** offers free test coins from the server's faucet, once per
+  address.
 - **Prove** makes an ownership proof of an item you hold, as `zsettle-seller prove` does.
   Anyone can check it with `zsettle check-proof` or the app.
 - **Show recovery phrase** and **Remove from this browser** are under *This wallet*.
