@@ -29,7 +29,7 @@ use zsettle_core::{
     DEFAULT_MAX_EXPIRY_DELTA, MIN_PRICE_ZAT, ZIP317_MARGINAL_FEE,
 };
 
-use crate::{js, seed_of, WebWallet, ITEM_ACCOUNT, PAY_ACCOUNT};
+use crate::{js, progress, seed_of, WebWallet, ITEM_ACCOUNT, PAY_ACCOUNT};
 
 /// Longest item name.
 const MAX_NAME_CHARS: usize = 80;
@@ -213,12 +213,25 @@ impl WebWallet {
 
     /// End every signed offer on an item for good: move it to a fresh note of the item
     /// account, the fee paid from the paying account. Returns `{ txid, fee }`.
-    pub async fn cancel(&mut self, mnemonic: String, note: String) -> Result<JsValue, JsError> {
-        let r = self.cancel_inner(&mnemonic, &note).await.map_err(js)?;
+    pub async fn cancel(
+        &mut self,
+        mnemonic: String,
+        note: String,
+        on_progress: Option<js_sys::Function>,
+    ) -> Result<JsValue, JsError> {
+        let r = self
+            .cancel_inner(&mnemonic, &note, &on_progress)
+            .await
+            .map_err(js)?;
         Ok(obj(r))
     }
 
-    async fn cancel_inner(&mut self, mnemonic: &str, note: &str) -> Result<Value> {
+    async fn cancel_inner(
+        &mut self,
+        mnemonic: &str,
+        note: &str,
+        cb: &Option<js_sys::Function>,
+    ) -> Result<Value> {
         let mut db = self.wallet.db()?;
         let (item_ask, _) = self.item_keys(&db, mnemonic)?;
         let seed = seed_of(mnemonic)?;
@@ -226,6 +239,23 @@ impl WebWallet {
         let item_account = self.account(&db, ITEM_ACCOUNT.0)?;
         let pay_account = self.account(&db, PAY_ACCOUNT.0)?;
         let item_note = NoteRef::from_str(note)?;
+        // What the item is called and where its history starts go with it to the new note.
+        let mut meta = self.item_meta()?.remove(note).unwrap_or(json!({}));
+        if meta["name"].as_str().is_none() {
+            let memo = mint::unspent_notes(&self.wallet, &db, item_account)?
+                .into_iter()
+                .find(|n| n.note == item_note)
+                .and_then(|n| n.memo);
+            if let Some(name) = memo
+                .as_deref()
+                .and_then(|t| t.strip_prefix("zsettle item: "))
+            {
+                meta["name"] = json!(name);
+            }
+        }
+        if meta["bought_from"].as_str().is_none() {
+            meta["bought_from"] = json!(note);
+        }
         let min_conf = 3;
         let (target, _) = heights(&db, min_conf)?;
         let item_value = ironwood_note(&db, item_note, target)?.note.value().inner();
@@ -259,6 +289,7 @@ impl WebWallet {
         self.relay
             .check_consensus(self.wallet.network, next)
             .await?;
+        progress(cb, json!({ "step": "prove" }));
         let built = build_transfer(
             &mut db,
             self.wallet.network,
@@ -277,9 +308,19 @@ impl WebWallet {
         }
         let tx = pczt_ops::extract(pczt)?;
         let bytes = pczt_ops::tx_bytes(&tx)?;
+        progress(cb, json!({ "step": "send" }));
         self.relay.send(&bytes).await?;
+        progress(cb, json!({ "step": "record" }));
         record_transaction(&self.wallet, &mut db, &tx)?;
-        Ok(json!({ "txid": tx.txid().to_string(), "fee": built.fee }))
+        let txid = tx.txid().to_string();
+        progress(cb, json!({ "step": "name" }));
+        if let Some(n) = mint::unspent_notes(&self.wallet, &db, item_account)?
+            .into_iter()
+            .find(|n| n.note.txid.to_string() == txid)
+        {
+            self.set_item_meta(&n.note.to_string(), &meta)?;
+        }
+        Ok(json!({ "txid": txid, "fee": built.fee }))
     }
 
     /// Open the shop: the item key stays in this worker until [`WebWallet::shop_close`].
@@ -323,9 +364,16 @@ impl WebWallet {
             let mut l = Listings::parse(&listings, "your listings")?;
             let mut sold = Vec::new();
             let mut kept = Vec::new();
+            // An item spent into this wallet's own item account moved (a cancel); it was not sold.
+            let item_account = self.account(&db, ITEM_ACCOUNT.0)?;
+            let own: HashSet<String> = mint::unspent_notes(&self.wallet, &db, item_account)?
+                .into_iter()
+                .map(|n| n.note.txid.to_string())
+                .collect();
             for item in std::mem::take(&mut l.items) {
                 let Ok(r) = item.note_ref() else { continue };
                 match mint::note_state(&self.wallet, &db, r)? {
+                    NoteState::Spent { txid } if own.contains(&txid.to_string()) => {}
                     NoteState::Spent { txid } => sold.push(json!({ "note": item.note, "name": item.name, "price_zat": item.price_zat, "txid": txid })),
                     _ => kept.push(item),
                 }

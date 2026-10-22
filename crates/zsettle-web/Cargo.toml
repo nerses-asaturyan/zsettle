@@ -38,7 +38,7 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 wasm-bindgen-rayon = "1.3"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Request", "RequestInit", "Response", "Headers", "WorkerGlobalScope"] }
+web-sys = { version = "0.3", features = ["AbortSignal", "Request", "RequestInit", "Response", "Headers", "WorkerGlobalScope"] }
 console_error_panic_hook = "0.1"
 # Every generation of getrandom in the tree takes its randomness from the browser.
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }

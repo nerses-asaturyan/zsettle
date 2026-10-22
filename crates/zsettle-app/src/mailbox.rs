@@ -328,6 +328,7 @@ impl Mailboxes {
                 json!({
                     "base": format!("{origin}/shop/{code}"), "code": code,
                     "name": format!("Shop {code}"), "items": s.listings.items.len(), "house": false,
+                    "network": s.listings.network,
                 })
             })
             .collect()

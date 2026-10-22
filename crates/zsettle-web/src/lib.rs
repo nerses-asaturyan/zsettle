@@ -38,7 +38,7 @@ use zsettle_core::{
     mint::{self, NoteState, PayRequest},
     ownership::{check_challenge, check_label, OwnershipProof},
     pczt as pczt_ops,
-    trade::{build_trade, TradeRequest},
+    trade::{build_self_spend, build_trade, TradeRequest},
     wallet::{
         account_birthday, account_orchard_fvk, find_account_by_ufvk, heights,
         import_viewing_key_at, largest_spendable_note, list_accounts, max_scanned_height,
@@ -139,9 +139,15 @@ fn network_name(n: Network) -> &'static str {
 
 // ---- HTTP from the worker -------------------------------------------------------------
 
+/// Longest wait for one answer from the server: past it the call fails instead of hanging.
+const FETCH_LIMIT_MS: u32 = 150_000;
+
 async fn fetch(url: &str, body: Option<&[u8]>) -> Result<(u16, Vec<u8>)> {
     let init = web_sys::RequestInit::new();
     init.set_method(if body.is_some() { "POST" } else { "GET" });
+    init.set_signal(Some(&web_sys::AbortSignal::timeout_with_u32(
+        FETCH_LIMIT_MS,
+    )));
     if let Some(b) = body {
         // A copy: a request body cannot be a view of the shared wasm memory.
         init.set_body(&js_sys::Uint8Array::from(b).into());
@@ -303,6 +309,9 @@ pub struct WebWallet {
     memo_tried: std::collections::HashSet<zcash_protocol::TxId>,
     /// The shop, while it is open: the item key and the proofs already verified.
     shop: seller::ShopState,
+    /// The paying note of the purchase in progress, once its offer left, and whether its
+    /// transaction was being sent (then it may be out, and is not given up).
+    offer: Option<(NoteRef, bool)>,
 }
 
 fn progress(cb: &Option<js_sys::Function>, v: Value) {
@@ -363,6 +372,7 @@ impl WebWallet {
             relay,
             cache: MemBlockCache::default(),
             memo_tried: Default::default(),
+            offer: None,
             shop: Default::default(),
         })
     }
@@ -389,6 +399,7 @@ impl WebWallet {
                 },
                 cache: MemBlockCache::default(),
                 memo_tried: Default::default(),
+                offer: None,
                 shop: Default::default(),
             })
         })()
@@ -641,6 +652,7 @@ impl WebWallet {
                 })
             })
             .collect();
+        let held = self.held()?;
         let balance: u64 = notes
             .iter()
             .filter(|n| !n["reserved"].as_bool().unwrap_or(false))
@@ -652,6 +664,9 @@ impl WebWallet {
             "chain_tip": db.chain_height().map_err(|e| anyhow!("{e}"))?.map(u32::from),
             "birthday": self.wallet.birthday,
             "balance_zat": balance,
+            "movable_zat": held.0,
+            "waiting_zat": held.1,
+            "waiting_until": held.2,
             "notes": notes,
             "items": items,
         }))
@@ -749,6 +764,7 @@ impl WebWallet {
         payout: String,
         on_progress: Option<js_sys::Function>,
     ) -> Result<JsValue, JsError> {
+        self.offer = None;
         let r = self
             .buy_inner(
                 &mnemonic,
@@ -758,9 +774,92 @@ impl WebWallet {
                 &payout,
                 &on_progress,
             )
-            .await
-            .map_err(js)?;
+            .await;
+        let r = match (r, self.offer.take()) {
+            (Ok(v), _) => v,
+            // The offer left but its transaction can no longer be mined: the shop knows the
+            // paying note's nullifier, so the note moves to a fresh one now, with the key at
+            // hand, before it pays for anything else.
+            (Err(e), Some((note, sending)))
+                if !sending || format!("{e:#}").contains("rejected") =>
+            {
+                reserve_note(&self.wallet, note, 0).map_err(js)?;
+                let moved = self.rotate_inner(&mnemonic).await;
+                let tail = match moved {
+                    Ok(t) if !t.is_empty() => "; the coins held for it moved to a fresh note",
+                    _ => "; the coins held for it can be moved from the wallet page",
+                };
+                return Err(JsError::new(&format!("{e:#}{tail}")));
+            }
+            (Err(e), _) => return Err(js(e)),
+        };
         Ok(js_sys::JSON::parse(&r.to_string()).unwrap_or(JsValue::NULL))
+    }
+
+    /// Move every held note whose offer can no longer be mined to a fresh note of the paying
+    /// account, so the nullifier a shop saw never points at a later payment. Returns
+    /// `{ moved: [txid], waiting }` (waiting: held notes whose offers can still settle).
+    pub async fn rotate(&mut self, mnemonic: String) -> Result<JsValue, JsError> {
+        let moved = self.rotate_inner(&mnemonic).await.map_err(js)?;
+        let waiting = self.held().map_err(js)?.1;
+        Ok(
+            js_sys::JSON::parse(&json!({ "moved": moved, "waiting": waiting }).to_string())
+                .unwrap_or(JsValue::NULL),
+        )
+    }
+
+    async fn rotate_inner(&mut self, mnemonic: &str) -> Result<Vec<String>> {
+        let seed = seed_of(mnemonic)?;
+        let mut db = self.wallet.db()?;
+        let pay = self.account(&db, PAY_ACCOUNT.0)?;
+        let tip = max_scanned_height(&db)?.unwrap_or(0);
+        let mut moved = Vec::new();
+        for (note, expiry) in reservations(&self.wallet)? {
+            match mint::note_state(&self.wallet, &db, note)? {
+                NoteState::Spent { .. } => release_note(&self.wallet, note)?,
+                NoteState::Unspent { .. } if expiry <= tip => {
+                    self.relay
+                        .check_consensus(self.wallet.network, tip + 1)
+                        .await?;
+                    let built = build_self_spend(&mut db, self.wallet.network, pay, note, 1)?;
+                    let usk = self.wallet.spending_key(&seed, PAY_ACCOUNT.1)?;
+                    let ask = SpendAuthorizingKey::from(usk.orchard());
+                    let (pczt, signed) = pczt_ops::sign_matching_actions(built.pczt, &ask)?;
+                    if signed == 0 {
+                        return Err(anyhow!("the key signs no action of the move"));
+                    }
+                    let tx = pczt_ops::extract(pczt)?;
+                    self.relay.send(&pczt_ops::tx_bytes(&tx)?).await?;
+                    record_transaction(&self.wallet, &mut db, &tx)?;
+                    // Held until the move is mined; then the view releases it as spent.
+                    reserve_note(&self.wallet, note, built.expiry_height)?;
+                    moved.push(tx.txid().to_string());
+                }
+                _ => {}
+            }
+        }
+        Ok(moved)
+    }
+
+    /// Held notes: the value that can move now, the value still waiting for its offer to
+    /// expire, and the height at which the last of those offers expires.
+    fn held(&self) -> Result<(u64, u64, u32)> {
+        let db = self.wallet.db()?;
+        let pay = self.account(&db, PAY_ACCOUNT.0)?;
+        let tip = max_scanned_height(&db)?.unwrap_or(0);
+        let held = reservations(&self.wallet)?;
+        let (mut movable, mut waiting, mut until) = (0, 0, 0);
+        for n in mint::unspent_notes(&self.wallet, &db, pay)? {
+            if let Some((_, expiry)) = held.iter().find(|(r, _)| *r == n.note) {
+                if *expiry <= tip && n.mined_height.is_some() {
+                    movable += n.value_zat;
+                } else {
+                    waiting += n.value_zat;
+                    until = until.max(*expiry);
+                }
+            }
+        }
+        Ok((movable, waiting, until))
     }
 
     /// Take a shop's item key ahead of a purchase, so the next sync already looks for its
@@ -892,6 +991,7 @@ impl WebWallet {
         // Held before the offer leaves: the seller learns this note's nullifier, so it must not
         // pay for a second offer while this one can still settle.
         reserve_note(&self.wallet, paying, built.expiry_height)?;
+        self.offer = Some((paying, false));
         // The page saves this at once: a reload while the shop signs must not forget it.
         if let Some(cb) = cb {
             let bytes = js_sys::Uint8Array::from(&self.wallet.export()?[..]);
@@ -945,6 +1045,7 @@ impl WebWallet {
         let tx = pczt_ops::extract(pczt)?;
         let bytes = pczt_ops::tx_bytes(&tx)?;
         progress(cb, json!({ "step": "send" }));
+        self.offer = Some((paying, true));
         self.relay.send(&bytes).await?;
         record_transaction(&self.wallet, &mut db, &tx)?;
         // The new item note is the receiving account's output of this transaction.

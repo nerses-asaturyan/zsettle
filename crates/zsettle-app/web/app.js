@@ -197,12 +197,14 @@ function human(msg) {
   if (/^the faucet/i.test(m)) return m.charAt(0).toUpperCase() + m.slice(1) + '.';
   if (/; your coins were freed for the next purchase$/i.test(m)) return human(m.replace(/; your coins were freed for the next purchase$/i, '')) + ' Your coins were freed for the next purchase.';
   if (/would be dust/i.test(m)) return 'This would leave less than 0.00005 ZEC of change, too little to ever spend. Pick a cheaper item, or add coins first.';
-  if (/insufficient|not enough|no spendable|InsufficientFunds/i.test(m)) return 'Not enough spendable ZEC. ' + confirmingNote();
+  if (/already spent some of its inputs|another transaction in the mempool|double-spend|duplicate nullifier/i.test(m)) return 'Someone else bought this item first. Your ZEC did not move.' + (/moved to a fresh note/.test(m) ? ' The coins held for it moved to a fresh note.' : '');
+  if (/insufficient|not enough|no spendable|no note can pay|InsufficientFunds/i.test(m)) return 'Not enough spendable ZEC. ' + confirmingNote();
   if (/Connection (Failed|refused)|fetching http|could not be reached|timed out/i.test(m)) return 'Could not reach the shop. Check the address and that the shop is open.';
   if (/seller refused the offer/i.test(m)) return m.replace(/^.*?seller refused the offer:\s*/i, 'The seller refused the offer: ');
   if (/no answer from the seller/i.test(m)) return 'The seller did not answer in time. Your ZEC did not move; try again later.';
   if (/the wallet is locked/i.test(m)) return 'The wallet is locked. Unlock it first.';
-  return m.length > 280 ? m.slice(0, 280) + '…' : m;
+  const t = m.charAt(0).toUpperCase() + m.slice(1);
+  return t.length > 280 ? t.slice(0, 280) + '…' : t;
 }
 
 function minutesFor(blocks) {
@@ -223,6 +225,21 @@ function maturity(w) {
   const left = rows.length ? Math.max(...rows.map((r) => r.left)) : 0;
   const slow = rows.find((r) => r.left === left) || { have: 0, need: 0 };
   return { zat: rows.reduce((a, r) => a + r.value, 0), left, have: slow.have, need: slow.need, minutes: minutesFor(left) };
+}
+
+// Coins spendable now: mined, with their confirmations.
+function spendableZat() {
+  const w = S.wallet;
+  if (!w || !w.notes) return null;
+  const mined = w.notes.filter((n) => n.mined && !n.reserved).reduce((a, n) => a + n.value_zat, 0);
+  return mined - maturity(w).zat;
+}
+// A warning for a confirm step when the coins spendable now do not cover `zat`.
+function spendWarning(zat) {
+  const can = spendableZat();
+  if (can === null || can >= zat) return null;
+  const all = (S.wallet && S.wallet.balance_zat) || 0;
+  return h('div', { class: 'callout warn' }, icon('alert'), h('span', null, all >= zat ? 'Not spendable yet. ' + confirmingNote() : 'Your balance is too low for this. ' + (S.status && S.status.network === 'test' ? 'Get test coins on the Wallet tab.' : 'Add ZEC first.')));
 }
 
 function confirmingNote() {
@@ -698,6 +715,7 @@ async function viewWelcomeBrowser() {
     const pass = h('input', { class: 'input', type: 'password', id: 'unlockpw', autocomplete: 'current-password', placeholder: 'Passphrase', 'aria-label': 'Passphrase' });
     const btn = h('button', { class: 'btn primary lg block' }, w.lock === 'passkey' ? [icon('finger'), 'Unlock with passkey'] : 'Unlock');
     btn.onclick = () => act(btn, async () => {
+      if (w.lock !== 'passkey' && !pass.value) throw new Error('Enter your passphrase.');
       note.textContent = w.lock === 'passkey' ? 'Confirm with your device.' : 'Opening your wallet…';
       await S.engine.unlock(w.network, pass.value);
       await opened(false);
@@ -1109,7 +1127,7 @@ function viewWallet() {
   // not among its notes. The next block brings it in.
   const known = new Set(w.notes.map((n) => String(n.note).split(':')[0]));
   const nowSec = Date.now() / 1000;
-  const told = (S.activity || []).filter((a) => (a.kind === 'faucet' || a.kind === 'sale') && a.txid && !known.has(a.txid) && nowSec - a.at < 1800);
+  const told = (S.activity || []).filter((a) => nowSec - a.at < 1800 && ((a.kind === 'faucet' || a.kind === 'sale') && a.txid ? !known.has(a.txid) : a.kind === 'faucet' && !w.notes.length));
   const incoming = w.notes.filter((n) => !n.mined && !n.change).reduce((a, n) => a + n.value_zat, 0) + told.reduce((a, x) => a + (x.amount_zat || x.price_zat || 0), 0);
   // Change that is not mined yet means a payment of ours is on its way out: the wallet
   // records its own transactions when it sends them, before the next block.
@@ -1131,6 +1149,12 @@ function viewWallet() {
     S.faucetPending
       ? h('div', { class: 'card row nowrap' }, h('span', { class: 'ico' }, h('span', { class: 'spinner sm', 'aria-hidden': 'true' })), h('div', { class: 'grow' }, h('b', null, 'Free test coins on the way'), h('div', { class: 'small muted' }, '0.003 test ZEC is being sent to your new wallet. This can take a minute.')))
       : S.status.faucet ? h('div', { class: 'card row nowrap' }, h('span', { class: 'ico' }, icon('spark')), h('div', { class: 'grow' }, h('b', null, 'Free test coins'), h('div', { class: 'small muted' }, 'Get 0.003 test ZEC to try buying and selling.')), h('button', { class: 'btn primary', onclick: getCoins }, 'Get coins')) : null,
+    w.waiting_zat && !w.movable_zat
+      ? h('div', { class: 'card row nowrap' }, h('span', { class: 'ico' }, icon('shield')), h('div', { class: 'grow' }, h('b', null, zec(w.waiting_zat) + ' held for an offer'), h('div', { class: 'small muted' }, 'These coins pay for an offer that has not settled. If it does not, they come back after the offer expires' + (w.waiting_until && S.status.last_sync ? ', in about ' + minutesFor(Math.max(1, w.waiting_until - ((S.status.last_sync.report || {}).chain_tip || 0))) + ' min' : '') + '.')))
+      : null,
+    w.movable_zat
+      ? h('div', { class: 'card row nowrap' }, h('span', { class: 'ico' }, icon('shield')), h('div', { class: 'grow' }, h('b', null, zec(w.movable_zat) + ' held'), h('div', { class: 'small muted' }, 'These coins paid for an offer that did not settle. Move them to a fresh note, so the shop cannot link them to your next payment.')), h('button', { class: 'btn primary', onclick: moveHeld }, 'Move them'))
+      : null,
     h(
       'section',
       { class: 'balance-card', 'aria-label': 'Balance' },
@@ -1145,8 +1169,8 @@ function viewWallet() {
           ? zec(incoming) + ' on its way · arrives with the next block'
           : mat.zat
             ? zec(mat.zat) + ' confirming · ' + mat.have + ' of ' + mat.need + ' confirmations · spendable in about ' + mat.minutes + ' min'
-            : w.notes.length
-              ? w.notes.length + ' note' + (w.notes.length > 1 ? 's' : '') + ' · shielded'
+            : w.notes.some((n) => !n.reserved)
+              ? w.notes.filter((n) => !n.reserved).length + ' note' + (w.notes.filter((n) => !n.reserved).length > 1 ? 's' : '') + ' · shielded'
               : 'Shielded',
       ),
       h(
@@ -1175,6 +1199,14 @@ function viewWallet() {
       ? h('div', null, h('div', { class: 'section-title' }, 'Recent activity', h('span', { class: 'spacer' }), h('button', { class: 'linkbtn', onclick: () => go('activity') }, 'See all')), h('div', { class: 'card', style: null }, activityList(S.activity.slice(0, 4))))
       : null,
   );
+}
+
+async function moveHeld() {
+  const ok = await askConfirm();
+  if (!ok) return;
+  const sh = sheet({ title: 'Moving held coins', body: [] });
+  await runInSheet(sh, '/api/rotate', ok, { total: 2, doneTitle: 'Held coins', success: (r) => ({ title: (r.moved || []).length ? 'Moved' : 'Nothing to move yet', text: (r.moved || []).length ? 'They come back to your balance once the move is mined, in a few minutes.' : 'The offer they paid for can still settle; try again later.', extra: (r.moved || []).length ? txRow(r.moved[0]) : null }), failTitle: 'Not moved' });
+  loadView(true);
 }
 
 // A hosted server sends a new wallet its test coins by itself; the wallet page shows them coming.
@@ -1481,6 +1513,7 @@ function openSend() {
     sh.setTitle('Confirm payment');
     sh.setBody(
       h('div', { class: 'summary' }, h('div', { class: 'r' }, h('span', null, 'To'), h('span', { class: 'mono' }, short(a, 10))), h('div', { class: 'r' }, h('span', null, 'Amount'), h('span', null, zec(zat))), h('div', { class: 'r' }, h('span', null, 'Network fee'), h('span', null, 'about ' + zec(FEE_ZAT))), memo.value.trim() ? h('div', { class: 'r' }, h('span', null, 'Message'), h('span', null, memo.value.trim())) : null, h('div', { class: 'r total' }, h('span', null, 'Total'), h('span', null, 'about ' + zec(zat + FEE_ZAT)))),
+      spendWarning(zat + FEE_ZAT),
       h('div', { class: 'callout warn' }, icon('alert'), h('span', null, 'Check the address. Confirming sends the payment; it cannot be undone.')),
     );
     sh.setFoot(
@@ -1608,7 +1641,7 @@ function buyReview(sh, it) {
   sh.setBody(
     h('div', { class: 'row nowrap' }, art(it.note, it.name, 'ico', it.icon), h('div', null, h('b', null, it.name || 'Item'), h('div', { class: 'small muted' }, 'from ' + S.market.base.replace(/^https?:\/\//, '')))),
     h('div', { class: 'summary' }, h('div', { class: 'r' }, h('span', null, 'Price'), h('span', null, zec(it.price_zat))), h('div', { class: 'r' }, h('span', null, 'Network fee'), h('span', null, 'about ' + zec(FEE_ZAT))), h('div', { class: 'r total' }, h('span', null, 'Total'), h('span', null, 'about ' + zec(it.price_zat + FEE_ZAT)))),
-    bal !== null && bal < it.price_zat + FEE_ZAT ? h('div', { class: 'callout warn' }, icon('alert'), h('span', null, 'Your balance may be too low for this purchase.')) : null,
+    bal !== null ? spendWarning(it.price_zat + FEE_ZAT) : null,
     h('div', { class: 'callout' }, icon('shield'), h('span', null, 'Your payment and the item move in one transaction. If someone else buys it first, your ZEC stays with you.')),
     h('p', { class: 'small muted' }, 'Confirming sends the transaction. It cannot be undone.'),
   );
@@ -1843,6 +1876,7 @@ function mint(text) {
     body: [
       h('ul', { class: 'small plainlist' }, names.map((x) => h('li', null, x))),
       h('div', { class: 'summary' }, h('div', { class: 'r' }, h('span', null, 'Item notes'), h('span', null, zec(ITEM_ZAT * n))), h('div', { class: 'r' }, h('span', null, 'Network fee'), h('span', null, 'about ' + zec(mintFee(n)))), h('div', { class: 'r total' }, h('span', null, 'Total'), h('span', null, 'about ' + zec(ITEM_ZAT * n + mintFee(n))))),
+      spendWarning(ITEM_ZAT * n + mintFee(n)),
       h('p', { class: 'small muted' }, 'Each item becomes a shielded note of ' + zec(ITEM_ZAT) + ' in your wallet, named in its encrypted memo. Confirming sends the transaction; it cannot be undone.'),
     ],
     foot: [

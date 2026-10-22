@@ -453,7 +453,7 @@ async function reconcileSales() {
 
 async function walletView() {
   const v = await call('view');
-  const notes = v.notes.map((n) => ({ note: n.note, value_zat: n.value_zat, mined: n.mined, change: n.change }));
+  const notes = v.notes.map((n) => ({ note: n.note, value_zat: n.value_zat, mined: n.mined, change: n.change, reserved: n.reserved }));
   const listed = {};
   for (const it of listedItems()) listed[it.note] = it;
   const items = v.items.map((i) => {
@@ -461,7 +461,9 @@ async function walletView() {
     const l = listed[i.note] || {};
     return { note: i.note, value_zat: i.value_zat, mined: i.mined, name: i.name || l.name || d.name || null, listed_zat: l.price_zat || null, icon: i.icon || l.icon || d.icon || null, description: i.description || l.description || d.description || null };
   });
-  return { balance_zat: notes.reduce((a, n) => a + n.value_zat, 0), notes, items };
+  // Notes held for an offer are not part of the balance; those whose offer can no longer
+  // settle can be moved to a fresh note (movable_zat).
+  return { balance_zat: v.balance_zat, movable_zat: v.movable_zat || 0, waiting_zat: v.waiting_zat || 0, waiting_until: v.waiting_until || 0, notes, items };
 }
 
 function status() {
@@ -531,7 +533,9 @@ export async function api(path, body) {
   }
   if (path === '/api/shops') {
     const r = await fetch('/api/shops', { headers: { 'X-Zsettle': '1' } });
-    return r.ok ? r.json() : [];
+    const shops = r.ok ? await r.json() : [];
+    // Only the shops of the open wallet's network.
+    return E.record ? shops.filter((s) => !s.network || s.network === E.record.network) : shops;
   }
   if (!E.record) throw new Error('Please unlock your wallet.');
   switch (m + ' ' + path) {
@@ -589,12 +593,20 @@ export async function api(path, body) {
         const it = (l.items || []).find((i) => i.note === body.item);
         if (!it) throw new Error('the shop no longer lists this item');
         let last = null;
-        const r = await call('buy', [phrase, path, body.item, it.price_zat, l.payout_address], (p) => {
-          if (p && p.step && p.step !== last && BUY_STEPS[p.step]) {
-            last = p.step;
-            step(BUY_STEPS[p.step]);
-          }
-        });
+        let r;
+        try {
+          r = await call('buy', [phrase, path, body.item, it.price_zat, l.payout_address], (p) => {
+            if (p && p.step && p.step !== last && BUY_STEPS[p.step]) {
+              last = p.step;
+              step(BUY_STEPS[p.step]);
+            }
+          });
+        } catch (e) {
+          // A failed purchase may have moved the held coins: keep that.
+          await saveDb();
+          if (/moved to a fresh note/.test(String(e.message || e))) await addActivity({ kind: 'rotate', text: 'Coins moved to a fresh note after a failed offer' });
+          throw e;
+        }
         await saveDb();
         await addActivity({ kind: 'buy', txid: r.txid, price_zat: r.price_zat, fee_zat: r.fee_zat, text: 'Bought ' + (r.name || 'an item') });
         return r;
@@ -689,6 +701,18 @@ export async function api(path, body) {
         await addActivity({ kind: 'delist', text: 'Delisted an item' });
         return { ok: true };
       });
+    case 'POST /api/rotate':
+      return job('rotate', async (step) => {
+        const phrase = await takePhrase();
+        await afterSync(step);
+        step('Syncing with the network');
+        await syncNow();
+        step('Moving the held coins to a fresh note, in your browser');
+        const r = await call('rotate', [phrase]);
+        await saveDb();
+        for (const txid of r.moved || []) await addActivity({ kind: 'rotate', txid, text: 'Coins moved to a fresh note after a failed offer' });
+        return r;
+      });
     case 'POST /api/cancel':
       return job('cancel', async (step) => {
         const phrase = await takePhrase();
@@ -696,9 +720,12 @@ export async function api(path, body) {
         step('Syncing with the network');
         await syncNow();
         step('Moving the item to a fresh note, so no signed offer can settle');
-        const r = await call('cancel', [phrase, body.note]);
+        const CANCEL_STEPS = { prove: 'Proving the move in your browser', send: 'Sending the transaction', record: 'Recording it in your wallet', name: 'Keeping the item’s name' };
+        const r = await call('cancel', [phrase, body.note], (p) => p && CANCEL_STEPS[p.step] && step(CANCEL_STEPS[p.step]));
+        step('Sent; saving the wallet');
         await saveDb();
         if (listedItems().some((i) => i.note === body.note)) {
+          step('Taking the item off your listings');
           try {
             await setListings(await call('delist', [phrase, E.cfg.listings, body.note]));
           } catch {
@@ -815,7 +842,16 @@ async function shopPass() {
       E.shop.lastSync = Date.now();
       await syncNow();
     }
-    const { offers } = await mailbox('poll', '');
+    let offers;
+    try {
+      ({ offers } = await mailbox('poll', ''));
+    } catch (e) {
+      // The server forgot the mailbox (it restarted): hand it the listings again.
+      if (!/no such shop/i.test(String(e.message || e))) throw e;
+      await mailbox('listings', E.cfg.listings, { listings: E.cfg.listings });
+      shopEvent({ event: 'reopened' });
+      ({ offers } = await mailbox('poll', ''));
+    }
     for (const o of offers || []) {
       const bytes = Uint8Array.from(o.envelope.match(/../g).map((x) => parseInt(x, 16)));
       const r = await call('shopSign', [bytes, E.cfg.listings]);

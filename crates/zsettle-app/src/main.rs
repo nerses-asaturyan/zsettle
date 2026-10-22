@@ -1490,6 +1490,7 @@ impl Hub {
                     "name": if a.profile == HOUSE { "House shop".to_string() } else { format!("Shop {}", a.profile) },
                     "items": items,
                     "house": a.profile == HOUSE,
+                    "network": a.cfg.lock().unwrap().network,
                 })
             })
             .collect();

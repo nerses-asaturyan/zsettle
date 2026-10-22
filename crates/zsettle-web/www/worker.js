@@ -49,7 +49,7 @@ const ops = {
   mint: (mnemonic, names) => need().mint(mnemonic, names),
   publish: (mnemonic, listings, note, name, price, description, icon) => need().publish(mnemonic, listings || '', note, name || '', BigInt(price), description || undefined, icon || undefined),
   delist: (mnemonic, listings, note) => need().delist(mnemonic, listings, note),
-  cancel: (mnemonic, note) => need().cancel(mnemonic, note),
+  cancel: (progress, mnemonic, note) => need().cancel(mnemonic, note, progress),
   shopOpen: (mnemonic) => need().shop_open(mnemonic),
   shopClose: () => (wallet ? wallet.shop_close() : undefined),
   shopAuth: (message) => need().shop_auth(message),
@@ -58,12 +58,13 @@ const ops = {
   listingsCode: (listings) => zw.listings_code(listings),
   prove: (mnemonic, note, label, challenge) => need().prove(mnemonic, note, label || undefined, challenge || undefined),
   checkPhrase: (mnemonic) => need().check_phrase(mnemonic),
+  rotate: (mnemonic) => need().rotate(mnemonic),
   history: (progress, note, listings) => need().history(note, listings, progress),
   checkProof: (progress, proof, challenge) => need().check_proof(proof, challenge || undefined, progress),
 };
 
 // Calls that report progress get a callback as their first argument.
-const WITH_PROGRESS = new Set(['sync', 'pay', 'buy', 'history', 'checkProof']);
+const WITH_PROGRESS = new Set(['sync', 'pay', 'buy', 'history', 'checkProof', 'cancel']);
 
 function need() {
   if (!wallet) throw new Error('no wallet is open');
