@@ -582,7 +582,8 @@ fn load_wallet_files(dir: &Path) -> Result<HashMap<String, WalletFile>> {
     let mut out = HashMap::new();
     walk(dir, dir, &mut out)?;
     for needed in [
-        "index.html",
+        "engine.js",
+        "worker.js",
         "pkg/zsettle_web.js",
         "pkg/zsettle_web_bg.wasm",
     ] {
@@ -1026,18 +1027,17 @@ fn public_route(
     mut stream: TcpStream,
     limit: impl Fn() -> bool,
 ) -> Option<TcpStream> {
-    if req.path == "/wallet" {
-        respond_with(
-            &mut stream,
-            301,
-            "text/plain",
-            b"",
-            "Location: /wallet/\r\n",
-        );
+    // The separate wallet page is gone: the app itself is the wallet.
+    if req.path == "/wallet" || req.path.starts_with("/wallet/") {
+        respond_with(&mut stream, 301, "text/plain", b"", "Location: /\r\n");
         return None;
     }
-    if let Some(rel) = req.path.strip_prefix("/wallet/") {
-        let rel = if rel.is_empty() { "index.html" } else { rel };
+    // The wallet engine: its module, its worker and the WebAssembly package.
+    let engine_file = match req.path.as_str() {
+        "/engine.js" | "/worker.js" => Some(&req.path[1..]),
+        p => p.strip_prefix('/').filter(|r| r.starts_with("pkg/")),
+    };
+    if let Some(rel) = engine_file.filter(|_| !hub.wallet_files.is_empty()) {
         match hub.wallet_files.get(rel) {
             Some(f) if req.method == "GET" => {
                 if req.headers.get("if-none-match") == Some(&f.etag) {
@@ -1164,11 +1164,16 @@ fn public_route(
 }
 
 /// An answer for the browser wallet: isolated from other sites (its threads need shared
-/// memory), allowed to run WebAssembly, and revalidated by entity tag.
+/// memory), allowed to run WebAssembly, and revalidated by entity tag (when one is given).
 fn wallet_respond(stream: &mut TcpStream, status: u16, ctype: &str, body: &[u8], etag: &str) {
     let reason = if status == 304 { "Not Modified" } else { "OK" };
+    let etag = if etag.is_empty() {
+        String::new()
+    } else {
+        format!("ETag: {etag}\r\n")
+    };
     let head = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nETag: {etag}\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Embedder-Policy: require-corp\r\nCross-Origin-Resource-Policy: same-origin\r\nContent-Security-Policy: default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-cache\r\n{etag}X-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Embedder-Policy: require-corp\r\nCross-Origin-Resource-Policy: same-origin\r\nContent-Security-Policy: default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'\r\nConnection: close\r\n\r\n",
         body.len()
     );
     let _ = stream.write_all(head.as_bytes());
@@ -1292,7 +1297,11 @@ fn handle_hosted(hub: &Arc<Hub>, h: &Hosted, req: Request, mut stream: TcpStream
     };
     if req.method == "GET" {
         if let Some((ctype, body)) = static_file(&req.path) {
-            return respond(&mut stream, 200, ctype, body);
+            if hub.wallet_files.is_empty() {
+                return respond(&mut stream, 200, ctype, body);
+            }
+            // The wallet runs in this page: isolated, and allowed to run WebAssembly.
+            return wallet_respond(&mut stream, 200, ctype, body, "");
         }
     }
     if !req.path.starts_with("/api/") {
@@ -1337,7 +1346,8 @@ fn handle_hosted(hub: &Arc<Hub>, h: &Hosted, req: Request, mut stream: TcpStream
             let r = Ok(json!({
                 "mode": "hosted", "network": h.network, "salt": h.salt,
                 "signed_in": app.is_some(), "has_house": h.apps.lock().unwrap().contains_key(HOUSE),
-                "web_wallet": !hub.wallet_files.is_empty(),
+                // The wallet runs in the visitor's browser; this server keeps none.
+                "browser": !hub.wallet_files.is_empty(),
             }));
             return json_answer(&mut stream, r, "");
         }

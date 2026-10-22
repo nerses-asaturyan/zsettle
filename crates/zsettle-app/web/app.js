@@ -232,6 +232,18 @@ function confirmingNote() {
 }
 
 async function api(path, body) {
+  if (S.engine) {
+    try {
+      return await S.engine.api(path, body);
+    } catch (e) {
+      if (/unlock your wallet/i.test(e.message) && !S.engine.isOpen()) {
+        S.timers.forEach(clearInterval);
+        document.getElementById('layer').replaceChildren();
+        render(await viewWelcomeBrowser());
+      }
+      throw e;
+    }
+  }
   const headers = { 'X-Zsettle': '1' };
   if (S.token) headers['X-Zsettle-Token'] = S.token;
   const opt = { method: body === undefined ? 'GET' : 'POST', headers, credentials: 'same-origin' };
@@ -485,6 +497,7 @@ async function passkeySecret(pk) {
 // wallet is derived once more and sent with the request, and the server checks it is the same.
 // A passphrase wallet confirms with the confirm step alone.
 async function confirmSecret() {
+  if (S.engine) return S.engine.confirm();
   const pk = S.status && S.status.passkey;
   if (!pk) return {};
   const salt = pk.salt || (S.hosted && S.hosted.salt);
@@ -526,6 +539,18 @@ function linksRow() {
 async function boot() {
   try {
     const hello = await (await fetch('/api/hello', { headers: { 'X-Zsettle': '1' } })).json();
+    if (hello.mode === 'hosted' && hello.browser) {
+      // The wallet runs in this page: keys, proofs and signatures stay on this device.
+      S.hosted = hello;
+      render(h('div', { class: 'boot' }, h('div', { class: 'spinner', 'aria-label': 'Starting the wallet' }), h('p', { class: 'small muted' }, 'Starting the wallet in your browser…')));
+      try {
+        S.engine = await import('/engine.js');
+        await S.engine.start();
+      } catch (e) {
+        return render(h('div', { class: 'onboard' }, h('div', { class: 'panel card stack' }, h('div', { class: 'hero' }, logo(), h('h1', null, 'This browser cannot run the wallet')), h('p', { class: 'err' }, human(e.message)), h('p', { class: 'small muted' }, 'Use a current Chrome, Safari, Firefox or Edge, outside other apps.'), linksRow())));
+      }
+      return refresh();
+    }
     if (hello.mode === 'hosted') {
       S.hosted = hello;
       if (!hello.signed_in) return render(viewWelcomeHosted());
@@ -549,6 +574,7 @@ async function boot() {
 }
 
 async function refresh() {
+  if (S.engine && !S.engine.isOpen()) return render(await viewWelcomeBrowser());
   try {
     S.status = await api('/api/status');
   } catch (e) {
@@ -747,6 +773,205 @@ function viewWelcomeHosted() {
   );
 }
 
+// ------------------------------------------------------------ the wallet in this browser
+
+// First visit: create or restore. Later visits: unlock the wallet this browser holds.
+async function viewWelcomeBrowser() {
+  const held = await S.engine.wallets();
+  // The wallet asked for last, or the one opened last, comes first.
+  const pref = held.findIndex((x) => x.network === S.preferNet);
+  if (pref > 0) held.unshift(held.splice(pref, 1)[0]);
+  const err = h('p', { class: 'small err', role: 'alert' });
+  const note = h('p', { class: 'small muted', 'aria-live': 'polite' });
+  const hero = (title, lede) => h('div', { class: 'hero' }, logo(), h('h1', null, title), h('p', { class: 'lede' }, lede));
+  async function act(btn, fn) {
+    err.textContent = '';
+    btn.disabled = true;
+    try {
+      await fn();
+    } catch (e) {
+      err.textContent = e.name === 'NotAllowedError' ? passkeyCancelled() : human(e.message);
+    } finally {
+      btn.disabled = false;
+      note.textContent = '';
+    }
+  }
+  async function opened(fresh) {
+    S.view = 'wallet';
+    await refresh();
+    // A new testnet wallet asks the faucet for its test coins at once.
+    if (fresh && S.status && S.status.faucet) {
+      try {
+        watchFaucet(await api('/api/faucet', {}));
+      } catch {
+        /* the Get coins button stays */
+      }
+    }
+  }
+  if (held.length) {
+    const w = held[0];
+    const pass = h('input', { class: 'input', type: 'password', id: 'unlockpw', autocomplete: 'current-password', placeholder: 'Passphrase', 'aria-label': 'Passphrase' });
+    const btn = h('button', { class: 'btn primary lg block' }, w.lock === 'passkey' ? [icon('finger'), 'Unlock with passkey'] : 'Unlock');
+    btn.onclick = () => act(btn, async () => {
+      note.textContent = w.lock === 'passkey' ? 'Confirm with your device.' : 'Opening your wallet…';
+      await S.engine.unlock(w.network, pass.value);
+      await opened(false);
+    });
+    pass.addEventListener('keydown', (e) => e.key === 'Enter' && btn.click());
+    const other = held[1];
+    const otherNet = w.network === 'main' ? 'test' : 'main';
+    return h(
+      'main',
+      { class: 'onboard' },
+      h(
+        'div',
+        { class: 'panel' },
+        hero('Welcome back', 'Your ' + (w.network === 'main' ? 'mainnet' : 'testnet') + ' wallet is in this browser.'),
+        h(
+          'div',
+          { class: 'card stack lg' },
+          w.lock === 'passkey' ? null : pass,
+          btn,
+          note,
+          err,
+          other
+            ? h('button', { class: 'linkbtn', onclick: async () => { S.preferNet = other.network; render(await viewWelcomeBrowser()); } }, 'Open the ' + (other.network === 'main' ? 'mainnet' : 'testnet') + ' wallet instead')
+            : h('button', { class: 'linkbtn', onclick: () => createSheet(otherNet) }, 'Add a ' + (otherNet === 'main' ? 'mainnet' : 'testnet') + ' wallet'),
+          h('button', { class: 'linkbtn', onclick: () => restoreSheet(w.network, true) }, w.lock === 'passkey' ? 'Lost the passkey? Restore from the 24 words' : 'Forgot the passphrase? Restore from the 24 words'),
+        ),
+        linksRow(),
+      ),
+    );
+  }
+  let network = 'test';
+  const seg = h(
+    'div',
+    { class: 'segment', role: 'group', 'aria-label': 'Network' },
+    ['test', 'main'].map((n) =>
+      h('button', { type: 'button', 'aria-pressed': String(n === network), onclick: (e) => { network = n; seg.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b === e.currentTarget))); } }, n === 'test' ? 'Testnet · free coins' : 'Mainnet · real ZEC'),
+    ),
+  );
+  return h(
+    'main',
+    { class: 'onboard' },
+    h(
+      'div',
+      { class: 'panel' },
+      hero('Trade privately on Zcash', 'Buy and sell items for ZEC in one shielded transaction. No escrow, no one in the middle.'),
+      h(
+        'div',
+        { class: 'card stack lg' },
+        inAppBrowser()
+          ? h('div', { class: 'callout warn' }, icon('alert'), h('span', null, 'This page is open inside an app, where passkeys usually do not work. Tap the ⋮ or ··· menu and choose “Open in browser” (Chrome or Safari), or use a passphrase.'))
+          : null,
+        h(
+          'div',
+          { class: 'points' },
+          h('div', { class: 'p' }, icon('shield'), h('span', null, 'Your wallet lives in this browser. The keys never leave your device.')),
+          h('div', { class: 'p' }, icon('finger'), h('span', null, 'Unlock it with your fingerprint, face or device PIN.')),
+          h('div', { class: 'p' }, icon('check'), h('span', null, 'Item and payment move together, or not at all.')),
+        ),
+        h('div', { class: 'field' }, h('label', null, 'Network'), seg),
+        h('button', { class: 'btn primary lg block', onclick: () => createSheet(network) }, icon('spark'), 'Create a wallet'),
+        h('button', { class: 'btn lg block', onclick: () => restoreSheet(network) }, icon('down'), 'Restore from 24 words'),
+        err,
+      ),
+      howItWorks(),
+      linksRow(),
+    ),
+  );
+
+  // A new wallet: the 24 words first, then how this browser locks it.
+  async function createSheet(net) {
+    const phrase = await S.engine.newMnemonic();
+    const ok = h('input', { type: 'checkbox', id: 'wrote' });
+    const sh = sheet({
+      title: 'Your recovery words',
+      body: [
+        h('div', { class: 'callout warn' }, icon('alert'), h('span', null, 'Write these 24 words on paper, in order. They are the only way back to this wallet if this browser loses its data. Anyone who sees them controls the wallet.')),
+        h('ol', { class: 'words' }, phrase.split(' ').map((x) => h('li', null, x))),
+        h('label', { class: 'check' }, ok, ' I wrote the 24 words down'),
+      ],
+      foot: [h('button', { class: 'btn primary', onclick: () => (ok.checked ? lockSheet(sh, net, phrase, 0) : toast('Write the words down first, then tick the box', 'err')) }, 'Next')],
+    });
+  }
+  async function restoreSheet(net, replacing) {
+    const text = h('textarea', { class: 'input mono', id: 'phrase', rows: '4', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', placeholder: '24 words, separated by spaces' });
+    const bday = h('input', { class: 'input', id: 'bday', inputmode: 'numeric', placeholder: 'optional' });
+    const e2 = h('p', { class: 'small err', role: 'alert' });
+    let n2 = net;
+    const seg2 = h('div', { class: 'segment', role: 'group', 'aria-label': 'Network' }, ['test', 'main'].map((n) => h('button', { type: 'button', 'aria-pressed': String(n === n2), onclick: (e) => { n2 = n; seg2.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b === e.currentTarget))); } }, n === 'test' ? 'Testnet' : 'Mainnet')));
+    const sh = sheet({
+      title: 'Restore a wallet',
+      body: [
+        replacing ? h('p', { class: 'small muted' }, 'Your money is safe on chain. Restoring replaces the locked copy in this browser with a new one, locked the way you choose next.') : null,
+        h('div', { class: 'field' }, h('label', null, 'Network'), seg2),
+        h('div', { class: 'field' }, h('label', { for: 'phrase' }, 'Recovery words'), text),
+        h('div', { class: 'field' }, h('label', { for: 'bday' }, 'Block height the wallet was made at (optional)'), bday, h('div', { class: 'hint' }, 'Empty for a wallet made in the last day. An older wallet needs its height, or it misses its first payments.')),
+        e2,
+      ],
+      foot: [h('button', {
+        class: 'btn primary',
+        onclick: async () => {
+          e2.textContent = '';
+          const phrase = text.value.trim().toLowerCase().split(/\s+/).join(' ');
+          try {
+            await S.engine.checkMnemonic(phrase);
+            const b = bday.value.trim() ? Number(bday.value.trim()) : 0;
+            if (!Number.isInteger(b) || b < 0) throw new Error('the height is a whole number');
+            lockSheet(sh, n2, phrase, b);
+          } catch (e) {
+            e2.textContent = /not a valid recovery phrase/i.test(e.message) ? 'That is not a valid recovery phrase. Check the words and their order.' : human(e.message);
+          }
+        },
+      }, 'Next')],
+    });
+  }
+  function lockSheet(sh, net, phrase, birthday) {
+    const p1 = h('input', { class: 'input', type: 'password', id: 'np1', autocomplete: 'new-password', placeholder: '12 characters or more' });
+    const p2 = h('input', { class: 'input', type: 'password', id: 'np2', autocomplete: 'new-password', placeholder: 'Repeat it' });
+    const e3 = h('p', { class: 'small err', role: 'alert' });
+    const n3 = h('p', { class: 'small muted', 'aria-live': 'polite' });
+    const pk = h('button', { class: 'btn primary lg block', disabled: !passkeyUsable() }, icon('finger'), 'Lock with a passkey');
+    const pw = h('button', { class: 'btn block' }, 'Lock with this passphrase');
+    sh.setTitle('Lock it in this browser');
+    sh.setBody(
+      h('p', { class: 'small muted' }, 'You unlock the wallet this way on each visit, and confirm each payment with it.'),
+      pk,
+      h('div', { class: 'section-title' }, 'Or a passphrase'),
+      h('div', { class: 'field' }, h('label', { for: 'np1' }, 'Passphrase'), p1),
+      h('div', { class: 'field' }, h('label', { for: 'np2' }, 'Repeat passphrase'), p2),
+      pw,
+      n3,
+      e3,
+    );
+    sh.setFoot();
+    const go = (btn, args) => async () => {
+      e3.textContent = '';
+      btn.disabled = true;
+      sh.setDismissable(false);
+      try {
+        n3.textContent = birthday ? 'Restoring the wallet…' : 'Creating the wallet…';
+        await S.engine.create({ network: net, phrase, birthday, ...args() });
+        sh.close();
+        await opened(!birthday);
+      } catch (e) {
+        e3.textContent = e.name === 'NotAllowedError' ? passkeyCancelled() : human(e.message);
+        n3.textContent = '';
+      } finally {
+        btn.disabled = false;
+        sh.setDismissable(true);
+      }
+    };
+    pk.onclick = go(pk, () => ({ lock: 'passkey' }));
+    pw.onclick = go(pw, () => {
+      if (p1.value.length < 12) throw new Error('use a passphrase of 12 characters or more');
+      if (p1.value !== p2.value) throw new Error('the two passphrases differ');
+      return { lock: 'passphrase', passphrase: p1.value };
+    });
+  }
+}
+
 /** One trade in three steps, for a first visit. */
 function howItWorks() {
   const steps = [
@@ -861,8 +1086,8 @@ function renderShell() {
       h('a', { href: LINKS.github, target: '_blank', rel: 'noopener noreferrer' }, icon('github'), 'GitHub'),
       h('a', { href: LINKS.x, target: '_blank', rel: 'noopener noreferrer' }, icon('xlogo'), 'Follow on X'),
       h('a', { href: '#', onclick: (e) => { e.preventDefault(); openBackup(); } }, icon('shield'), 'Backup words'),
-      h('div', { class: 'who' }, h('span', null, st.hosted ? 'Code ' + st.code : st.profile), netChip.cloneNode(true)),
-      h('a', { href: '#', onclick: (e) => { e.preventDefault(); lock(); } }, icon('lock'), st.hosted ? 'Sign out' : 'Lock wallet'),
+      h('div', { class: 'who' }, h('span', null, st.browser ? 'Keys in this browser' : st.hosted ? 'Code ' + st.code : st.profile), netChip.cloneNode(true)),
+      h('a', { href: '#', onclick: (e) => { e.preventDefault(); lock(); } }, icon('lock'), st.hosted && !st.browser ? 'Sign out' : 'Lock wallet'),
     ),
   );
   const top = h(
@@ -884,9 +1109,9 @@ function openMenu() {
     title: 'zsettle',
     body: [
       h('div', { class: 'list' }, a(LINKS.docs, 'book', 'Docs'), a(LINKS.github, 'github', 'Source on GitHub'), a(LINKS.x, 'xlogo', 'Follow on X')),
-      h('p', { class: 'small muted' }, (S.status.hosted ? 'Wallet code ' + S.status.code : 'Wallet ' + S.status.profile) + ' · ' + (S.status.network === 'main' ? 'Mainnet' : 'Testnet')),
+      h('p', { class: 'small muted' }, (S.status.browser ? 'Keys in this browser' : S.status.hosted ? 'Wallet code ' + S.status.code : 'Wallet ' + S.status.profile) + ' · ' + (S.status.network === 'main' ? 'Mainnet' : 'Testnet')),
     ],
-    foot: [h('button', { class: 'btn', onclick: () => { sh.close(); openBackup(); } }, icon('shield'), 'Backup words'), h('button', { class: 'btn', onclick: () => { sh.close(); lock(); } }, icon('lock'), S.hosted ? 'Sign out' : 'Lock wallet')],
+    foot: [h('button', { class: 'btn', onclick: () => { sh.close(); openBackup(); } }, icon('shield'), 'Backup words'), h('button', { class: 'btn', onclick: () => { sh.close(); lock(); } }, icon('lock'), S.hosted && !S.status.browser ? 'Sign out' : 'Lock wallet')],
   });
   sh.box.querySelectorAll('a.li').forEach((x) => (x.style.textDecoration = 'none'));
 }
@@ -907,8 +1132,9 @@ async function openBackup() {
   async function show() {
     err.textContent = '';
     try {
-      const passphrase = pk ? 'passkey:' + hexOf(await passkeySecret(pk)) : pass.value;
-      const r = await api('/api/backup', { passphrase });
+      const r = S.engine
+        ? { words: await S.engine.words(pass.value) }
+        : await api('/api/backup', { passphrase: pk ? 'passkey:' + hexOf(await passkeySecret(pk)) : pass.value });
       const grid = h('ol', { class: 'words' }, r.words.map((w) => h('li', null, w)));
       sh.setBody(h('div', { class: 'callout warn' }, icon('alert'), h('span', null, 'Write these down in order. Close this when you are done.')), grid);
       sh.setFoot(h('button', { class: 'btn primary', onclick: () => sh.close() }, 'I wrote them down'));
@@ -932,6 +1158,13 @@ function go(view, push = true) {
 }
 
 async function lock() {
+  if (S.engine) {
+    S.timers.forEach(clearInterval);
+    await S.engine.lock();
+    S.wallet = S.market = S.shop = S.activity = S.status = null;
+    document.getElementById('layer').replaceChildren();
+    return render(await viewWelcomeBrowser());
+  }
   // A hosted shop keeps selling after its owner signs out; say so first.
   if (S.hosted && S.status && S.status.shop && S.status.shop.running &&
       !confirm('Your shop stays open while you are away: it keeps selling and signing offers. To close it, stop it on the Sell tab first. Sign out anyway?')) return;
@@ -1017,9 +1250,11 @@ function viewWallet() {
     'div',
     { class: 'stack lg' },
     h('h2', { class: 'sr-only' }, 'Wallet'),
-    S.hosted
-      ? h('div', { class: 'callout info' }, icon('info'), h('span', null, S.status.network === 'test' ? 'This wallet is on the Zcash testnet: its coins are free and have no value.' : 'This wallet is kept on this server.', S.status.passkey ? null : [' Your wallet code is ', h('b', null, S.status.code || ''), '; you need it to sign in again.']))
-      : null,
+    S.status.browser
+      ? h('div', { class: 'callout info' }, icon('shield'), h('span', null, (S.status.network === 'test' ? 'Testnet: these coins are free and have no value. ' : '') + 'Your keys stay in this browser: proofs and signatures are made here, and the server only passes blocks along.'))
+      : S.hosted
+        ? h('div', { class: 'callout info' }, icon('info'), h('span', null, S.status.network === 'test' ? 'This wallet is on the Zcash testnet: its coins are free and have no value.' : 'This wallet is kept on this server.', S.status.passkey ? null : [' Your wallet code is ', h('b', null, S.status.code || ''), '; you need it to sign in again.']))
+        : null,
     S.faucetPending
       ? h('div', { class: 'card row nowrap' }, h('span', { class: 'ico' }, h('span', { class: 'spinner sm', 'aria-hidden': 'true' })), h('div', { class: 'grow' }, h('b', null, 'Free test coins on the way'), h('div', { class: 'small muted' }, '0.003 test ZEC is being sent to your new wallet. This can take a minute.')))
       : S.status.faucet ? h('div', { class: 'card row nowrap' }, h('span', { class: 'ico' }, icon('spark')), h('div', { class: 'grow' }, h('b', null, 'Free test coins'), h('div', { class: 'small muted' }, 'Get 0.003 test ZEC to try buying and selling.')), h('button', { class: 'btn primary', onclick: getCoins }, 'Get coins')) : null,
@@ -1163,6 +1398,7 @@ function openProve(it) {
         onclick: async () => {
           const c = ch.value.trim();
           const l = label.value.trim();
+          if (S.engine && !(await askConfirm(err))) return;
           sh.setTitle('Making the proof');
           await runInSheet(sh, '/api/prove', { note: it.note, challenge: c, label: l }, {
             total: 2,

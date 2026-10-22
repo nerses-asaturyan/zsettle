@@ -509,3 +509,10 @@ ol.plainlist { margin: 0; padding-left: 20px; display: grid; gap: 4px; }
 .txlink a::before { inset: -13px -6px; }
 .btn.sm { position: relative; }
 .btn.sm::before { content: ""; position: absolute; inset: -2px 0; }
+
+/* The recovery words, and a checkbox line (the wallet in the browser). */
+.words { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; counter-reset: w; padding: 0; margin: 0; list-style: none; }
+.words li { background: var(--surface-2); border-radius: 8px; padding: 6px 8px; font-family: var(--mono); font-size: 13px; counter-increment: w; overflow-wrap: anywhere; }
+.words li::before { content: counter(w) ". "; color: var(--muted); }
+label.check { display: flex; gap: 10px; align-items: flex-start; font-size: 14px; color: var(--text-2); }
+label.check input { width: auto; margin-top: 3px; }
