@@ -253,12 +253,6 @@ async function api(path, body) {
   }
   const r = await fetch(path, opt);
   if (r.status === 401) {
-    if (S.hosted) {
-      S.timers.forEach(clearInterval);
-      document.getElementById('layer').replaceChildren();
-      render(viewWelcomeHosted());
-      throw new Error('Please sign in.');
-    }
     sessionExpired();
     throw new Error('This session ended: open the new link from the terminal.');
   }
@@ -440,17 +434,17 @@ const passkeyCancelled = () =>
 
 // The passkey's PRF output, never stored, is the wallet's passphrase.
 async function passkeyCreate() {
-  const salt = S.hosted ? unb64u(S.hosted.salt) : crypto.getRandomValues(new Uint8Array(32));
+  const salt = crypto.getRandomValues(new Uint8Array(32));
   const cred = await navigator.credentials.create({
     publicKey: {
       challenge: crypto.getRandomValues(new Uint8Array(32)),
       rp: { name: 'zsettle', id: location.hostname },
-      user: { id: crypto.getRandomValues(new Uint8Array(16)), name: S.hosted ? 'zsettle wallet' : 'zsettle-' + S.status.profile, displayName: S.hosted ? 'zsettle wallet' : 'zsettle wallet (' + S.status.profile + ')' },
+      user: { id: crypto.getRandomValues(new Uint8Array(16)), name: 'zsettle-' + S.status.profile, displayName: 'zsettle wallet (' + S.status.profile + ')' },
       pubKeyCredParams: [
         { type: 'public-key', alg: -7 },
         { type: 'public-key', alg: -257 },
       ],
-      authenticatorSelection: { residentKey: S.hosted ? 'required' : 'preferred', requireResidentKey: !!S.hosted, userVerification: 'required' },
+      authenticatorSelection: { residentKey: 'preferred', userVerification: 'required' },
       extensions: { prf: { eval: { first: salt } } },
     },
   });
@@ -463,21 +457,6 @@ async function passkeyCreate() {
   }
   return { pk, passphrase: 'passkey:' + hexOf(secret) };
 }
-// Hosted sign-in: the browser offers this site's passkeys; the chosen one names the wallet.
-async function passkeySignIn() {
-  const a = await navigator.credentials.get({
-    publicKey: {
-      challenge: crypto.getRandomValues(new Uint8Array(32)),
-      rpId: location.hostname,
-      userVerification: 'required',
-      extensions: { prf: { eval: { first: unb64u(S.hosted.salt) } } },
-    },
-  });
-  const r = a.getClientExtensionResults().prf;
-  if (!r || !r.results || !r.results.first) throw new Error(NO_PRF);
-  return { credential: b64u(a.rawId), passphrase: 'passkey:' + hexOf(r.results.first) };
-}
-
 async function passkeySecret(pk) {
   const a = await navigator.credentials.get({
     publicKey: {
@@ -500,8 +479,7 @@ async function confirmSecret() {
   if (S.engine) return S.engine.confirm();
   const pk = S.status && S.status.passkey;
   if (!pk) return {};
-  const salt = pk.salt || (S.hosted && S.hosted.salt);
-  const secret = await passkeySecret({ id: pk.id, salt });
+  const secret = await passkeySecret(pk);
   return { confirm: 'passkey:' + hexOf(secret) };
 }
 // The label of a confirm button: a passkey wallet is told the passkey will be asked.
@@ -539,7 +517,7 @@ function linksRow() {
 async function boot() {
   try {
     const hello = await (await fetch('/api/hello', { headers: { 'X-Zsettle': '1' } })).json();
-    if (hello.mode === 'hosted' && hello.browser) {
+    if (hello.mode === 'hosted') {
       // The wallet runs in this page: keys, proofs and signatures stay on this device.
       S.hosted = hello;
       render(h('div', { class: 'boot' }, h('div', { class: 'spinner', 'aria-label': 'Starting the wallet' }), h('p', { class: 'small muted' }, 'Starting the wallet in your browser…')));
@@ -549,11 +527,6 @@ async function boot() {
       } catch (e) {
         return render(h('div', { class: 'onboard' }, h('div', { class: 'panel card stack' }, h('div', { class: 'hero' }, logo(), h('h1', null, 'This browser cannot run the wallet')), h('p', { class: 'err' }, human(e.message)), h('p', { class: 'small muted' }, 'Use a current Chrome, Safari, Firefox or Edge, outside other apps.'), linksRow())));
       }
-      return refresh();
-    }
-    if (hello.mode === 'hosted') {
-      S.hosted = hello;
-      if (!hello.signed_in) return render(viewWelcomeHosted());
       return refresh();
     }
   } catch {
@@ -580,7 +553,6 @@ async function refresh() {
   } catch (e) {
     return render(h('div', { class: 'onboard' }, h('div', { class: 'panel card' }, h('p', { class: 'err' }, human(e.message)))));
   }
-  if (S.hosted && !S.status.unlocked) return render(viewWelcomeHosted());
   if (!S.status.wallet) return render(viewCreate());
   if (!S.status.unlocked) return render(viewUnlock());
   const hv = location.hash.slice(1);
@@ -681,93 +653,6 @@ function viewCreate() {
         err,
         h('div', { class: 'callout warn' }, icon('alert'), h('span', null, 'The passkey is the only key to this wallet. If you lose it, the funds are gone, so keep amounts small.')),
       ),
-      linksRow(),
-    ),
-  );
-}
-
-function viewWelcomeHosted() {
-  const err = h('p', { class: 'small err', role: 'alert' });
-  const note = h('p', { class: 'small muted', 'aria-live': 'polite' });
-  const busy = (b) => document.querySelectorAll('.onboard .btn').forEach((x) => (x.disabled = b));
-  // Say what is happening at each step, so the wait never looks stuck.
-  const say = (t) => (note.textContent = t || '');
-  async function act(fn) {
-    err.textContent = '';
-    busy(true);
-    try {
-      await fn();
-    } catch (e) {
-      err.textContent = e.name === 'NotAllowedError' ? passkeyCancelled() : human(e.message);
-    } finally {
-      busy(false);
-      say('');
-    }
-  }
-  async function done() {
-    S.hosted.signed_in = true;
-    S.view = 'wallet';
-    await refresh();
-  }
-  const createPk = () => act(async () => {
-    say('Confirm with your device. Some devices ask twice: once to make the passkey, once to read its key.');
-    const { pk, passphrase } = await passkeyCreate();
-    say('Creating your shielded wallet…');
-    const r = await api('/api/wallet/create', { passphrase, passkey: pk });
-    say('Opening your wallet…');
-    await done();
-    watchFaucet(r.faucet);
-  });
-  const signInPk = () => act(async () => {
-    say('Confirm with your device.');
-    const body = await passkeySignIn();
-    say('Opening your wallet…');
-    await api('/api/unlock', body);
-    await done();
-  });
-  const code = h('input', { class: 'input', id: 'code', placeholder: 'Wallet code', autocomplete: 'username', autocapitalize: 'off', spellcheck: 'false' });
-  const pass = h('input', { class: 'input', id: 'pw', type: 'password', placeholder: 'Passphrase (12 characters or more)', autocomplete: 'current-password' });
-  const signInPw = () => act(async () => {
-    await api('/api/unlock', { code: code.value.trim(), passphrase: pass.value });
-    await done();
-  });
-  const createPw = () => act(async () => {
-    if (pass.value.length < 12) throw new Error('Use a passphrase of at least 12 characters.');
-    const r = await api('/api/wallet/create', { passphrase: pass.value });
-    await done();
-    showCode(r.code);
-    watchFaucet(r.faucet);
-  });
-  const pwBox = h(
-    'div',
-    { class: 'stack', hidden: !inAppBrowser() },
-    h('div', { class: 'field' }, h('label', { for: 'code' }, 'Wallet code (to sign in)'), code),
-    h('div', { class: 'field' }, h('label', { for: 'pw' }, 'Passphrase'), pass),
-    h('div', { class: 'row' }, h('button', { class: 'btn', onclick: signInPw }, 'Sign in'), h('button', { class: 'btn', onclick: createPw }, 'New wallet with this passphrase')),
-  );
-  return h(
-    'main',
-    { class: 'onboard' },
-    h(
-      'div',
-      { class: 'panel' },
-      h('div', { class: 'hero' }, logo(), h('h1', null, 'Trade privately on Zcash'), h('p', { class: 'lede' }, 'Buy and sell items for ZEC in one shielded transaction. No escrow, no one in the middle.')),
-      h(
-        'div',
-        { class: 'card stack lg' },
-        inAppBrowser()
-          ? h('div', { class: 'callout warn' }, icon('alert'), h('span', null, 'This page is open inside an app, where passkeys usually do not work. Tap the ⋮ or ··· menu and choose “Open in browser” (Chrome or Safari), or use a wallet code and passphrase below.'))
-          : null,
-        h('div', { class: 'callout info' }, icon('info'), h('span', null, (S.hosted && S.hosted.network === 'test' ? 'This server runs on the Zcash testnet: its coins are free and have no value. ' : '') + 'Your wallet is kept on this server, so there is nothing to install. ' + (S.hosted && S.hosted.web_wallet ? 'To keep the keys yourself, use the wallet that runs in your browser instead.' : 'Run zsettle-app on your own computer to keep the keys there.'))),
-        S.hosted && S.hosted.web_wallet ? h('a', { class: 'btn lg block', href: '/wallet/' }, icon('wallet'), 'Keep the keys yourself') : null,
-        h('button', { class: 'btn primary lg block', onclick: createPk, disabled: !passkeyUsable() }, icon('finger'), 'Create a wallet with a passkey'),
-        h('button', { class: 'btn lg block', onclick: signInPk, disabled: !passkeyUsable() }, icon('lock'), 'Sign in with your passkey'),
-        h('button', { class: 'linkbtn', onclick: () => (pwBox.hidden = !pwBox.hidden) }, 'No passkey? Use a wallet code and passphrase'),
-        pwBox,
-        note,
-        err,
-      ),
-      howItWorks(),
       linksRow(),
     ),
   );
@@ -975,7 +860,7 @@ async function viewWelcomeBrowser() {
 /** One trade in three steps, for a first visit. */
 function howItWorks() {
   const steps = [
-    ['Get a wallet and coins', 'A passkey makes a shielded wallet' + ((S.hosted && S.hosted.has_house) || (S.status && S.status.faucet) ? '; free test coins arrive by themselves.' : '.')],
+    ['Get a wallet and coins', 'Your wallet is made in this browser and its keys stay here' + ((S.hosted && S.hosted.has_house && S.hosted.network === 'test') || (S.status && S.status.faucet) ? '; free test coins are one tap away.' : '.')],
     ['Pick an item', 'Shops list real shielded notes, signed by their seller.'],
     ['Buy in one transaction', 'The item and the ZEC change hands together, or not at all. The seller never sees your address or balance.'],
   ];
@@ -984,15 +869,6 @@ function howItWorks() {
     { class: 'how', 'aria-label': 'How a trade works' },
     steps.map(([t, d], i) => h('div', { class: 'how-step' }, h('span', { class: 'how-n', 'aria-hidden': 'true' }, String(i + 1)), h('div', null, h('div', { class: 'how-t' }, t), h('div', { class: 'how-d' }, d)))),
   );
-}
-
-function showCode(code) {
-  const sh = sheet({
-    title: 'Your wallet code',
-    body: [h('p', { class: 'muted' }, 'You sign in with this code and your passphrase. Write both down: nobody can recover them.'), h('div', { class: 'addr mono' }, code)],
-    foot: [h('button', { class: 'btn primary', onclick: () => copy(code, 'Code copied') }, icon('copy'), 'Copy code')],
-  });
-  sh.box.querySelector('.addr').style.fontSize = '22px';
 }
 
 function viewUnlock() {
@@ -1111,7 +987,7 @@ function openMenu() {
       h('div', { class: 'list' }, a(LINKS.docs, 'book', 'Docs'), a(LINKS.github, 'github', 'Source on GitHub'), a(LINKS.x, 'xlogo', 'Follow on X')),
       h('p', { class: 'small muted' }, (S.status.browser ? 'Keys in this browser' : S.status.hosted ? 'Wallet code ' + S.status.code : 'Wallet ' + S.status.profile) + ' · ' + (S.status.network === 'main' ? 'Mainnet' : 'Testnet')),
     ],
-    foot: [h('button', { class: 'btn', onclick: () => { sh.close(); openBackup(); } }, icon('shield'), 'Backup words'), h('button', { class: 'btn', onclick: () => { sh.close(); lock(); } }, icon('lock'), S.hosted && !S.status.browser ? 'Sign out' : 'Lock wallet')],
+    foot: [h('button', { class: 'btn', onclick: () => { sh.close(); openBackup(); } }, icon('shield'), 'Backup words'), h('button', { class: 'btn', onclick: () => { sh.close(); lock(); } }, icon('lock'), 'Lock wallet')],
   });
   sh.box.querySelectorAll('a.li').forEach((x) => (x.style.textDecoration = 'none'));
 }
@@ -1165,9 +1041,6 @@ async function lock() {
     document.getElementById('layer').replaceChildren();
     return render(await viewWelcomeBrowser());
   }
-  // A hosted shop keeps selling after its owner signs out; say so first.
-  if (S.hosted && S.status && S.status.shop && S.status.shop.running &&
-      !confirm('Your shop stays open while you are away: it keeps selling and signing offers. To close it, stop it on the Sell tab first. Sign out anyway?')) return;
   try {
     await api('/api/lock', {});
   } catch {
@@ -1175,10 +1048,6 @@ async function lock() {
   }
   S.timers.forEach(clearInterval);
   S.wallet = S.market = S.shop = S.activity = null;
-  if (S.hosted) {
-    S.hosted.signed_in = false;
-    return render(viewWelcomeHosted());
-  }
   await refresh();
 }
 
@@ -1844,9 +1713,7 @@ function viewSell() {
           : h('p', { class: 'small muted' }, listed ? 'Open the shop so buyers can reach it.' : 'List an item below, then open the shop.'),
         shop.running && S.status.browser
           ? h('p', { class: 'small muted' }, 'Your shop is open while this page is open: it signs offers here, with the key in this browser. Close the page and the shop closes.')
-          : shop.running && S.hosted
-            ? h('p', { class: 'small muted' }, 'Your shop stays open and keeps signing offers after you sign out.')
-            : null,
+          : null,
         S.hosted ? null : h('details', null, h('summary', { class: 'small muted' }, 'Advanced'), h('div', { class: 'field', style: null }, h('label', { for: 'listen' }, 'Listen on'), h('input', { class: 'input', id: 'listen', value: listen, onchange: (e) => (S.listen = e.target.value) }), h('div', { class: 'hint' }, 'Use 0.0.0.0:8900 to let other machines in. For the internet, put a TLS proxy or a Tor hidden service in front.'))),
       ),
       h(

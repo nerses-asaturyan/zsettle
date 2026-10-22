@@ -54,20 +54,7 @@ const MAX_EVENTS: usize = 300;
 const MAX_ACTIVITY: usize = 200;
 /// Largest listings file fetched from a seller.
 const MAX_LISTINGS_BYTES: u64 = 1024 * 1024;
-/// Hosted: wallets the server keeps at most, and new ones per hour.
-const MAX_PROFILES: usize = 500;
-const MAX_NEW_PER_HOUR: usize = 40;
-/// Hosted: a wallet nothing ever happened to (no coins, no items, nothing listed, no shop)
-/// is removed after this long, so made-and-left wallets do not fill the server.
-const UNUSED_WALLET_SECS: u64 = 86_400;
-/// Hosted: new wallets an hour from one wider network (an IPv6 /48 or an IPv4 /24), so a
-/// handful of addresses cannot fill the server either.
-const MAX_NEW_PER_NET_HOUR: usize = 12;
-/// Hosted: API calls a minute per signed-in wallet (a busy page makes about seventy), and
-/// per visitor before sign-in, so one page cannot keep the server forking processes for
-/// everyone else. Counted per wallet, not per address, so people behind one shared address
-/// (an office, a phone network) do not count against each other.
-const MAX_CALLS_PER_WALLET_MIN: usize = 240;
+/// Hosted: API calls a minute per visitor (the wallet's own calls go to the relay).
 const MAX_CALLS_PER_IP_MIN: usize = 120;
 /// Chain relay requests per visitor a minute. A browser wallet's first sync of a few
 /// thousand blocks takes two requests per 500 blocks.
@@ -89,11 +76,6 @@ const MAX_WALLET_FILE: u64 = 64 * 1024 * 1024;
 /// Ownership proofs a wallet checks a minute: each reads the chain from the item's first
 /// block.
 const MAX_PROOF_CHECKS_PER_WALLET_MIN: usize = 3;
-/// Hosted: shops open at once (each is a process that syncs every few seconds).
-const MAX_OPEN_SHOPS: usize = 25;
-/// Hosted: a session lasts this long; an idle wallet is locked after this long.
-const SESSION_SECS: u64 = 12 * 3600;
-const IDLE_LOCK_SECS: u64 = 2 * 3600;
 /// Hosted: first port of the shops behind the relay (a range nothing common uses).
 const FIRST_SHOP_PORT: u16 = 19100;
 /// Work a server takes on at once: jobs per wallet and in all, passphrase checks (age scrypt
@@ -108,19 +90,10 @@ const MAX_HEAVY: usize = 3;
 /// house's coins can take minutes to confirm), and in all per hour.
 const MAX_FAUCET_WAITING: usize = 4;
 const MAX_FAUCET_PER_HOUR: usize = 12;
-/// Hosted: passphrase checks (sign-ins, backups) per visitor and per wallet a minute, wrong
-/// or right, so nobody keeps the checks busy for everyone else.
-const MAX_CHECKS_PER_IP_MIN: usize = 10;
-const MAX_CHECKS_PER_WALLET_MIN: usize = 6;
 /// A request must arrive whole within this time.
 const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
-/// Hosted: per visitor (by the proxy's X-Forwarded-For), new wallets an hour and test coins a
-/// day; failed sign-ins before a wallet or a visitor must wait.
-const MAX_NEW_PER_IP_HOUR: usize = 5;
+/// Hosted: test coins a day per visitor (by the proxy's X-Forwarded-For).
 const MAX_FAUCET_PER_IP_DAY: usize = 4;
-const FREE_FAILURES: u32 = 5;
-/// Hosted passphrases are at least this long.
-const MIN_HOSTED_PASSPHRASE: usize = 12;
 
 static RUNNING_JOBS: AtomicUsize = AtomicUsize::new(0);
 static SCRYPT_RUNNING: AtomicUsize = AtomicUsize::new(0);
@@ -269,20 +242,17 @@ struct Cli {
     /// (https://demo.example). A TLS proxy in front forwards it to 127.0.0.1:<port>.
     #[arg(long)]
     public: Option<String>,
-    /// Hosted mode: the network new wallets are made on.
+    /// Hosted mode: the network of the house shop and its faucet. Visitors' wallets run in
+    /// their browsers, on either network.
     #[arg(long, default_value = "test")]
     network: String,
     /// Hosted mode: a file holding the house shop's passphrase. With it, a house shop is
     /// created if missing, unlocked at start, kept stocked, and pays the test coins.
     #[arg(long)]
     house_passphrase_file: Option<PathBuf>,
-    /// Hosted mode on mainnet: the server would hold real money for its visitors. Refused
-    /// unless this is given.
-    #[arg(long)]
-    allow_hosted_mainnet: bool,
-    /// Directory of the browser wallet (crates/zsettle-web: www/ with pkg/ inside), served
-    /// at /wallet/. The browser wallet keeps its keys in the visitor's page; this server
-    /// only relays public chain data to it, on either network.
+    /// Directory of the wallet engine (crates/zsettle-web: www/ with pkg/ inside), served
+    /// with the app. Required in hosted mode: the wallet runs in the visitor's page, and this
+    /// server only relays public chain data to it, on either network.
     #[arg(long)]
     web_wallet: Option<PathBuf>,
 }
@@ -339,7 +309,6 @@ struct Shop {
 }
 
 struct Bins {
-    dir: PathBuf,
     buyer: PathBuf,
     seller: PathBuf,
 }
@@ -362,95 +331,43 @@ struct App {
     paused: AtomicBool,
     events: Arc<Mutex<Vec<Value>>>,
     last_sync: Mutex<Value>,
-    last_seen: AtomicU64,
     /// When this wallet checked ownership proofs lately.
     proof_checks: Mutex<Vec<u64>>,
 }
 
-/// The hosted side: every profile, who may use which, and the sessions.
+/// The hosted side's lasting state: the house shop's port and the faucet's payments.
 #[derive(Serialize, Deserialize, Default)]
 struct Index {
-    /// Passkey credential id -> profile.
-    by_cred: HashMap<String, String>,
     /// Profile -> its shop port.
     ports: HashMap<String, u16>,
-    /// Profiles that got their test coins.
+    /// Addresses that got their test coins.
     funded: HashSet<String>,
-    /// Profiles whose faucet payment was under way: after a restart each is looked at, and a
-    /// wallet that never received anything gets its chance back.
+    /// Addresses whose faucet payment was under way: after a restart each gets its chance
+    /// back.
     #[serde(default)]
     faucet_pending: HashSet<String>,
 }
 
-struct Session {
-    profile: String,
-    expires: u64,
-}
-
+/// The hosted side. It keeps no visitor's wallet: the house shop is its only wallet.
 struct Hosted {
     origin: String,
     host: String,
     network: String,
-    /// The PRF salt every passkey of this site is asked for (base64url).
-    salt: String,
+    /// The server's own wallets: the house shop.
     apps: Mutex<HashMap<String, Arc<App>>>,
     index: Mutex<Index>,
-    sessions: Mutex<HashMap<String, Session>>,
-    /// New wallets: when, and from which visitor.
-    created: Mutex<Vec<(u64, String)>>,
     /// Test coins handed out per visitor, when; and in all, when.
     faucet_by_ip: Mutex<HashMap<String, Vec<u64>>>,
     faucet_all: Mutex<Vec<u64>>,
-    /// Failed sign-ins (and backup requests) per visitor, and per wallet and visitor: count,
-    /// the time before which the next try is refused, and the last failure. A count is
-    /// forgotten an hour after its last failure.
-    fails: Mutex<HashMap<String, (u32, u64, u64)>>,
-    /// Passphrase checks per visitor and per wallet, when.
+    /// Calls per visitor (and per wider network, and in all), when.
     checks: Mutex<HashMap<String, Vec<u64>>>,
     /// Shops run by visitors' browsers.
     mailboxes: mailbox::Mailboxes,
 }
 
 impl Hosted {
-    fn check_fails(&self, keys: &[String]) -> Result<()> {
-        let f = self.fails.lock().unwrap();
-        for k in keys {
-            if let Some((_, until, _)) = f.get(k) {
-                if *until > now() {
-                    let mins = (*until - now()).div_ceil(60);
-                    return Err(anyhow!(
-                        "too many wrong tries; wait {mins} minute{} and try again",
-                        if mins == 1 { "" } else { "s" }
-                    ));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn record_fail(&self, keys: &[String]) {
-        let mut f = self.fails.lock().unwrap();
-        let t = now();
-        for k in keys {
-            let e = f.entry(k.clone()).or_insert((0, 0, 0));
-            if e.2 + 3600 < t {
-                *e = (0, 0, 0);
-            }
-            e.0 += 1;
-            e.2 = t;
-            if e.0 >= FREE_FAILURES {
-                let wait = 60u64 << (e.0 - FREE_FAILURES).min(6);
-                e.1 = t + wait.min(3600);
-            }
-        }
-    }
-
-    fn clear_fails(&self, key: &str) {
-        self.fails.lock().unwrap().remove(key);
-    }
-
-    /// Count one passphrase check against each (key, limit a minute); refused when one is
-    /// over its limit.
+    /// Count one call against each (key, limit a minute); refused when one is over its
+    /// limit.
     fn count_check(&self, keys: &[(String, usize)]) -> Result<()> {
         let mut c = self.checks.lock().unwrap();
         let t = now();
@@ -470,10 +387,6 @@ impl Hosted {
     /// Drop what no limit needs any more.
     fn prune(&self) {
         let t = now();
-        self.fails
-            .lock()
-            .unwrap()
-            .retain(|_, e| e.1 > t || e.2 + 3600 > t);
         self.checks.lock().unwrap().retain(|_, v| {
             v.retain(|x| *x + 60 > t);
             !v.is_empty()
@@ -622,7 +535,6 @@ fn main() -> Result<()> {
     let bins = Bins {
         buyer: exe("zsettle"),
         seller: exe("zsettle-seller"),
-        dir: bin_dir.clone(),
     };
     for b in [&bins.buyer, &bins.seller] {
         if !b.exists() {
@@ -724,46 +636,30 @@ fn hosted_hub(cli: &Cli, public: &str, base: PathBuf, bins: Bins) -> Result<Hub>
     if cli.network != "test" && cli.network != "main" {
         return Err(anyhow!("--network is test or main"));
     }
-    if cli.network == "main" && !cli.allow_hosted_mainnet {
+    if cli.web_wallet.is_none() {
         return Err(anyhow!(
-            "a hosted server holds its visitors' wallets: on mainnet that is real money in your custody; pass --allow-hosted-mainnet if you mean it"
+            "hosted mode serves the wallet engine: pass --web-wallet with crates/zsettle-web's www directory"
         ));
     }
     let index: Index = read_state(&base.join("hub.json"))?;
-    // One PRF salt for the whole site, kept with the data: a passkey of this site always
-    // gives the same passphrase.
-    let salt_path = base.join("prf.salt");
-    let salt = match fs::read_to_string(&salt_path) {
-        Ok(s) if s.trim().len() >= 40 => s.trim().to_string(),
-        _ => {
-            let s = b64u(&rand::random::<[u8; 32]>());
-            zsettle_core::wallet::write_owner_only(&salt_path, s.as_bytes())?;
-            s
-        }
-    };
+    // The house shop is the only wallet this server runs.
     let mut apps = HashMap::new();
-    for entry in fs::read_dir(&base)?.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if entry.path().join("app.json").exists() && valid_name(&name) {
-            let public_shop = Some(format!("{origin}/shop/{name}"));
-            apps.insert(
-                name.clone(),
-                App::open(&entry.path(), &name, &bins, public_shop)?,
-            );
-        }
+    let house_dir = base.join(HOUSE);
+    if house_dir.join("app.json").exists() {
+        let public_shop = Some(format!("{origin}/shop/{HOUSE}"));
+        apps.insert(
+            HOUSE.to_string(),
+            App::open(&house_dir, HOUSE, &bins, public_shop)?,
+        );
     }
     let hosted = Hosted {
         origin: origin.clone(),
         host,
         network: cli.network.clone(),
-        salt,
         apps: Mutex::new(apps),
         index: Mutex::new(index),
-        sessions: Mutex::new(HashMap::new()),
-        created: Mutex::new(Vec::new()),
         faucet_by_ip: Mutex::new(HashMap::new()),
         faucet_all: Mutex::new(Vec::new()),
-        fails: Mutex::new(HashMap::new()),
         checks: Mutex::new(HashMap::new()),
         mailboxes: Default::default(),
     };
@@ -854,21 +750,6 @@ fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
-}
-
-fn b64u(bytes: &[u8]) -> String {
-    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut out = String::new();
-    for chunk in bytes.chunks(3) {
-        let n = chunk
-            .iter()
-            .enumerate()
-            .fold(0u32, |a, (i, &b)| a | (b as u32) << (16 - 8 * i));
-        for i in 0..=chunk.len() {
-            out.push(A[((n >> (18 - 6 * i)) & 63) as usize] as char);
-        }
-    }
-    out
 }
 
 // ---------------------------------------------------------------- HTTP
@@ -1262,15 +1143,6 @@ fn parse_body(req: &Request) -> Result<Value> {
     serde_json::from_slice(&req.body).context("the request is not JSON")
 }
 
-fn cookie(req: &Request, name: &str) -> Option<String> {
-    req.headers.get("cookie").and_then(|c| {
-        c.split(';')
-            .filter_map(|p| p.trim().split_once('='))
-            .find(|(k, _)| *k == name)
-            .map(|(_, v)| v.to_string())
-    })
-}
-
 fn handle_hosted(hub: &Arc<Hub>, h: &Hosted, req: Request, mut stream: TcpStream) {
     if req.headers.get("host").map(String::as_str) != Some(h.host.as_str()) {
         return respond(&mut stream, 421, "text/plain", b"wrong host");
@@ -1322,28 +1194,9 @@ fn handle_hosted(hub: &Arc<Hub>, h: &Hosted, req: Request, mut stream: TcpStream
     if req.method == "POST" && req.headers.get("x-zsettle").map(String::as_str) != Some("1") {
         return respond(&mut stream, 403, "text/plain", b"missing header");
     }
-    let session = cookie(&req, "__Host-zs").and_then(|t| {
-        let mut s = h.sessions.lock().unwrap();
-        match s.get(&t) {
-            Some(x) if x.expires > now() => Some((t, x.profile.clone())),
-            Some(_) => {
-                s.remove(&t);
-                None
-            }
-            None => None,
-        }
-    });
-    let app = session
-        .as_ref()
-        .and_then(|(_, p)| h.apps.lock().unwrap().get(p).cloned());
-    if let Some(a) = &app {
-        a.last_seen.store(now(), Ordering::SeqCst);
-    }
-    let call_key = match &session {
-        Some((_, p)) => (format!("c:w:{p}"), MAX_CALLS_PER_WALLET_MIN),
-        None => (format!("c:{ip}"), MAX_CALLS_PER_IP_MIN),
-    };
-    if h.count_check(&[call_key]).is_err() {
+    if h.count_check(&[(format!("c:{ip}"), MAX_CALLS_PER_IP_MIN)])
+        .is_err()
+    {
         return respond(
             &mut stream,
             429,
@@ -1351,158 +1204,43 @@ fn handle_hosted(hub: &Arc<Hub>, h: &Hosted, req: Request, mut stream: TcpStream
             br#"{"error":"too many requests; wait a moment"}"#,
         );
     }
-    match (req.method.as_str(), req.path.as_str()) {
-        ("GET", "/api/hello") => {
-            let r = Ok(json!({
-                "mode": "hosted", "network": h.network, "salt": h.salt,
-                "signed_in": app.is_some(), "has_house": h.apps.lock().unwrap().contains_key(HOUSE),
-                // The wallet runs in the visitor's browser; this server keeps none.
-                "browser": !hub.wallet_files.is_empty(),
-            }));
-            return json_answer(&mut stream, r, "");
-        }
-        ("POST", "/api/wallet/create") => {
-            let r = parse_body(&req)
-                .and_then(|b| hub.hosted_create(h, &b, &ip))
-                .map(|(mut v, token)| {
-                    // A new wallet gets its test coins at once: one step fewer for a visitor.
-                    // A refusal (limits, no house) just leaves the "Get coins" button.
-                    let app = v["code"]
-                        .as_str()
-                        .and_then(|c| h.apps.lock().unwrap().get(c).cloned());
-                    if let Some(app) = app {
-                        if let Ok(j) = hub.faucet(h, &app, &ip) {
-                            v["faucet"] = j;
-                        }
-                    }
-                    (v, token)
-                });
-            return answer_with_session(hub, &mut stream, r);
-        }
-        ("POST", "/api/unlock") => {
-            let r = parse_body(&req).and_then(|b| hub.hosted_unlock(h, &b, &ip));
-            return answer_with_session(hub, &mut stream, r);
-        }
-        // A browser shop's owner: listings, offers and replies, each signed with its item key.
-        ("POST", p) if p.starts_with("/api/mailbox/") => {
-            let r = h
-                .count_check(&[(format!("m:{ip}"), MAX_MAILBOX_CALLS_PER_IP_MIN)])
-                .and_then(|_| parse_body(&req))
-                .and_then(|b| {
-                    let rest = &p["/api/mailbox/".len()..];
-                    let (code, action) = rest.split_once('/').unwrap_or((rest, ""));
-                    if !valid_name(code) {
-                        return Err(anyhow!("no such shop"));
-                    }
-                    let t = now();
-                    match action {
-                        "listings" => h.mailboxes.publish(code, &b, t),
-                        "poll" => h.mailboxes.poll(code, &b, t),
-                        "reply" => h.mailboxes.reply(code, &b, t),
-                        "close" => h.mailboxes.close(code, &b, t),
-                        _ => Err(anyhow!("unknown request")),
-                    }
-                });
-            return json_answer(&mut stream, r, "");
-        }
-        ("POST", "/api/wallet-faucet") => {
-            let r = parse_body(&req).and_then(|b| hub.web_faucet(h, &b, &ip));
-            return json_answer(&mut stream, r, "");
-        }
-        _ => {}
-    }
-    let Some(app) = app else {
-        return respond(
-            &mut stream,
-            401,
-            "application/json",
-            br#"{"error":"sign in first","signin":true}"#,
-        );
-    };
     let r = match (req.method.as_str(), req.path.as_str()) {
-        ("POST", "/api/lock") => {
-            if let Some((t, _)) = &session {
-                h.sessions.lock().unwrap().remove(t);
-            }
-            *app.passphrase.lock().unwrap() = None;
-            return json_answer(
+        ("GET", "/api/hello") => Ok(json!({
+            "mode": "hosted", "network": h.network,
+            "has_house": h.apps.lock().unwrap().contains_key(HOUSE),
+            // The wallet runs in the visitor's browser; this server keeps none.
+            "browser": true,
+        })),
+        // A browser shop's owner: listings, offers and replies, each signed with its item key.
+        ("POST", p) if p.starts_with("/api/mailbox/") => h
+            .count_check(&[(format!("m:{ip}"), MAX_MAILBOX_CALLS_PER_IP_MIN)])
+            .and_then(|_| parse_body(&req))
+            .and_then(|b| {
+                let rest = &p["/api/mailbox/".len()..];
+                let (code, action) = rest.split_once('/').unwrap_or((rest, ""));
+                if !valid_name(code) {
+                    return Err(anyhow!("no such shop"));
+                }
+                let t = now();
+                match action {
+                    "listings" => h.mailboxes.publish(code, &b, t),
+                    "poll" => h.mailboxes.poll(code, &b, t),
+                    "reply" => h.mailboxes.reply(code, &b, t),
+                    "close" => h.mailboxes.close(code, &b, t),
+                    _ => Err(anyhow!("unknown request")),
+                }
+            }),
+        ("POST", "/api/wallet-faucet") => parse_body(&req).and_then(|b| hub.web_faucet(h, &b, &ip)),
+        _ => {
+            return respond(
                 &mut stream,
-                Ok(json!({ "locked": true })),
-                "Set-Cookie: __Host-zs=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0\r\n",
-            );
+                404,
+                "application/json",
+                br#"{"error":"this server keeps no wallets: the wallet runs in your browser"}"#,
+            )
         }
-        ("GET", "/api/status") => app.status().map(|mut v| {
-            v["hosted"] = json!(true);
-            v["code"] = json!(app.profile);
-            v["public_shop"] = json!(app.public_shop);
-            v["faucet"] = json!(
-                h.apps.lock().unwrap().contains_key(HOUSE)
-                    && !h.index.lock().unwrap().funded.contains(&app.profile)
-            );
-            v
-        }),
-        ("GET", "/api/shops") => Ok(hub.open_shops(h)),
-        ("POST", "/api/faucet") => hub.faucet(h, &app, &ip),
-        ("POST", "/api/shop/start") => {
-            let open = h
-                .apps
-                .lock()
-                .unwrap()
-                .values()
-                .filter(|a| a.shop_running())
-                .count();
-            if open >= MAX_OPEN_SHOPS && !app.shop_running() {
-                Err(anyhow!(
-                    "the server has too many open shops right now; try later"
-                ))
-            } else {
-                app.shop_start(&json!({}))
-            }
-        }
-        ("POST", "/api/backup") => {
-            let keys = [format!("w:{}:{ip}", app.profile), format!("ip:{ip}")];
-            h.check_fails(&keys)
-                .and_then(|_| {
-                    h.count_check(&[
-                        (format!("ip:{ip}"), MAX_CHECKS_PER_IP_MIN),
-                        (format!("w:{}", app.profile), MAX_CHECKS_PER_WALLET_MIN),
-                    ])
-                })
-                .and_then(|_| {
-                    parse_body(&req)
-                        .and_then(|b| app.backup(&b))
-                        .inspect_err(|_| {
-                            h.record_fail(&keys);
-                            thread::sleep(Duration::from_secs(1));
-                        })
-                })
-        }
-        _ => api(&app, &req),
     };
-    json_answer(&mut stream, scrub(hub, r), "");
-}
-
-/// No server paths in what a visitor sees.
-fn scrub(hub: &Hub, r: Result<Value>) -> Result<Value> {
-    r.map_err(|e| {
-        let mut text = format!("{e:#}");
-        for p in [&hub.base, &hub.bins.dir] {
-            text = text.replace(&p.display().to_string(), "");
-        }
-        anyhow!(text)
-    })
-}
-
-fn answer_with_session(hub: &Hub, stream: &mut TcpStream, r: Result<(Value, String)>) {
-    match r {
-        Ok((v, token)) => {
-            let set = format!(
-                "Set-Cookie: __Host-zs={token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age={SESSION_SECS}\r\n"
-            );
-            json_answer(stream, Ok(v), &set);
-        }
-        Err(e) => json_answer(stream, scrub(hub, Err(e)), ""),
-    }
+    json_answer(&mut stream, r, "");
 }
 
 /// Forward `/shop/<code>/<rest>` to that profile's shop on its local port. Only the three
@@ -1687,18 +1425,6 @@ impl Hub {
         zsettle_core::wallet::write_owner_only(&self.base.join("hub.json"), &bytes)
     }
 
-    fn new_session(&self, h: &Hosted, profile: &str) -> String {
-        let token = hex::encode(rand::random::<[u8; 24]>());
-        h.sessions.lock().unwrap().insert(
-            token.clone(),
-            Session {
-                profile: profile.to_string(),
-                expires: now() + SESSION_SECS,
-            },
-        );
-        token
-    }
-
     /// A port for a profile's shop, kept for good.
     fn shop_port(&self, h: &Hosted, profile: &str) -> Result<u16> {
         let port = {
@@ -1727,181 +1453,6 @@ impl Hub {
         )?;
         app.cfg.lock().unwrap().shop_listen = Some(format!("127.0.0.1:{port}"));
         Ok(app)
-    }
-
-    fn hosted_create(&self, h: &Hosted, body: &Value, ip: &str) -> Result<(Value, String)> {
-        if field(body, "passphrase").map(|p| p.len()).unwrap_or(0) < MIN_HOSTED_PASSPHRASE {
-            return Err(anyhow!(
-                "use a passphrase of at least {MIN_HOSTED_PASSPHRASE} characters"
-            ));
-        }
-        // The light scrypt factor is for passkey secrets only: the `passkey:` shape comes
-        // with a passkey, never typed.
-        let with_passkey = body["passkey"]["id"]
-            .as_str()
-            .is_some_and(|id| !id.is_empty());
-        if field(body, "passphrase")?.starts_with("passkey:") != with_passkey {
-            return Err(anyhow!("that passphrase shape is reserved for passkeys"));
-        }
-        let cred = body["passkey"]["id"].as_str().map(str::to_string);
-        if let Some(id) = &cred {
-            if id.len() > 1400 || h.index.lock().unwrap().by_cred.contains_key(id) {
-                return Err(anyhow!("this passkey already belongs to a wallet here"));
-            }
-        }
-        // A place is held while the wallet is made, and given back if that fails, so only
-        // wallets that exist count against the limits.
-        let stamp = (now(), ip.to_string());
-        {
-            let mut created = h.created.lock().unwrap();
-            created.retain(|(t, _)| *t + 3600 > now());
-            if created.len() >= MAX_NEW_PER_HOUR {
-                return Err(anyhow!(
-                    "many wallets were created this hour; try again later"
-                ));
-            }
-            if created.iter().filter(|(_, who)| who == ip).count() >= MAX_NEW_PER_IP_HOUR {
-                return Err(anyhow!(
-                    "you created several wallets this hour; try again later"
-                ));
-            }
-            let net = wider_net(ip);
-            if created
-                .iter()
-                .filter(|(_, who)| wider_net(who) == net)
-                .count()
-                >= MAX_NEW_PER_NET_HOUR
-            {
-                return Err(anyhow!(
-                    "many wallets were created from your network this hour; try again later"
-                ));
-            }
-            if h.apps.lock().unwrap().len() >= MAX_PROFILES {
-                return Err(anyhow!("this server is full"));
-            }
-            created.push(stamp.clone());
-        }
-        let give_back = || {
-            let mut created = h.created.lock().unwrap();
-            if let Some(i) = created.iter().position(|c| *c == stamp) {
-                created.remove(i);
-            }
-        };
-        let r = self.hosted_create_inner(h, body, cred);
-        if r.is_err() {
-            give_back();
-        }
-        r
-    }
-
-    fn hosted_create_inner(
-        &self,
-        h: &Hosted,
-        body: &Value,
-        cred: Option<String>,
-    ) -> Result<(Value, String)> {
-        let _slot = scrypt_slot()?;
-        let code = loop {
-            const ALPHA: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
-            let c: String = rand::random::<[u8; 8]>()
-                .iter()
-                .map(|b| ALPHA[*b as usize % ALPHA.len()] as char)
-                .collect();
-            if !self.base.join(&c).exists() {
-                break c;
-            }
-        };
-        let app = self.new_app(h, &code)?;
-        let mut b = body.clone();
-        b["network"] = json!(h.network);
-        if let Some(pk) = b.get_mut("passkey").filter(|v| v.is_object()) {
-            pk["salt"] = json!(h.salt);
-        }
-        let r = match app.create_wallet(&b) {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = fs::remove_dir_all(self.base.join(&code));
-                h.index.lock().unwrap().ports.remove(&code);
-                let _ = self.save_index(h);
-                return Err(e);
-            }
-        };
-        if let Some(id) = cred {
-            // Never re-point a passkey that already names a wallet.
-            h.index
-                .lock()
-                .unwrap()
-                .by_cred
-                .entry(id)
-                .or_insert_with(|| code.clone());
-            self.save_index(h)?;
-        }
-        h.apps.lock().unwrap().insert(code.clone(), app);
-        let token = self.new_session(h, &code);
-        let mut v = r;
-        v["code"] = json!(code);
-        Ok((v, token))
-    }
-
-    fn hosted_unlock(&self, h: &Hosted, body: &Value, ip: &str) -> Result<(Value, String)> {
-        let ip_key = format!("ip:{ip}");
-        h.check_fails(std::slice::from_ref(&ip_key))?;
-        let (code, by_passkey) = match field(body, "credential") {
-            Ok(id) => (
-                h.index
-                    .lock()
-                    .unwrap()
-                    .by_cred
-                    .get(&id)
-                    .cloned()
-                    .ok_or_else(|| anyhow!("this passkey has no wallet on this server"))?,
-                true,
-            ),
-            Err(_) => (field(body, "code")?.to_ascii_lowercase(), false),
-        };
-        // Wrong tries count per visitor, and per wallet for that visitor only: wallet codes
-        // are public (they name the shops), so a count shared by everyone would let anyone
-        // lock an owner out. A passkey's secret cannot be guessed, so it is never held back
-        // by the wallet's count.
-        let wallet_key = format!("w:{code}:{ip}");
-        let keys = [wallet_key.clone(), ip_key.clone()];
-        if !by_passkey {
-            h.check_fails(&keys)?;
-        }
-        // Every check counts against the visitor, right or wrong (not against the wallet:
-        // that again would let anyone hold an owner back).
-        h.count_check(&[(ip_key, MAX_CHECKS_PER_IP_MIN)])?;
-        let app = h.apps.lock().unwrap().get(&code).cloned();
-        let app = match app {
-            Some(a) if code != HOUSE => a,
-            _ => {
-                h.record_fail(&keys[1..]);
-                thread::sleep(Duration::from_secs(1));
-                return Err(anyhow!("wrong wallet code or passphrase"));
-            }
-        };
-        // A failed guess costs a second and counts against the visitor, so codes and
-        // passphrases cannot be tried quickly. The check's slot is given back first.
-        let ok = {
-            let _slot = scrypt_slot()?;
-            app.unlock(body).is_ok()
-        };
-        if !ok {
-            h.record_fail(&keys);
-            thread::sleep(Duration::from_secs(1));
-            return Err(anyhow!("wrong wallet code or passphrase"));
-        }
-        h.clear_fails(&wallet_key);
-        let open = h
-            .apps
-            .lock()
-            .unwrap()
-            .values()
-            .filter(|a| a.shop_running())
-            .count();
-        app.reopen_shop(open < MAX_OPEN_SHOPS);
-        let token = self.new_session(h, &code);
-        Ok((json!({ "unlocked": true, "code": code }), token))
     }
 
     fn open_shops(&self, h: &Hosted) -> Value {
@@ -1934,112 +1485,8 @@ impl Hub {
         json!(shops)
     }
 
-    /// Test coins from the house wallet, once per wallet.
-    fn faucet(self: &Arc<Self>, h: &Hosted, app: &Arc<App>, ip: &str) -> Result<Value> {
-        let house = h
-            .apps
-            .lock()
-            .unwrap()
-            .get(HOUSE)
-            .cloned()
-            .ok_or_else(|| anyhow!("this server gives no test coins"))?;
-        if h.network != "test" {
-            return Err(anyhow!("test coins exist on the testnet only"));
-        }
-        if h.index.lock().unwrap().funded.contains(&app.profile) {
-            return Err(anyhow!("this wallet already got its test coins"));
-        }
-        // Everything that can refuse comes before the wallet is marked as paid, so a refusal
-        // never uses up its chance.
-        let addr = app.address()?["address"]
-            .as_str()
-            .map(str::to_string)
-            .ok_or_else(|| anyhow!("no address"))?;
-        // Faucet payments wait outside the job limit (the house's coins can take minutes to
-        // confirm), a few at a time.
-        let slot = Slot::try_take(&FAUCET_WAITING, MAX_FAUCET_WAITING).ok_or_else(|| {
-            anyhow!("many people are getting test coins right now; try again in a minute")
-        })?;
-        let stamp = now();
-        {
-            let mut all = h.faucet_all.lock().unwrap();
-            all.retain(|t| *t + 3600 > stamp);
-            if all.len() >= MAX_FAUCET_PER_HOUR {
-                return Err(anyhow!(
-                    "the faucet gave out many coins this hour; try again later"
-                ));
-            }
-            let mut by_ip = h.faucet_by_ip.lock().unwrap();
-            let times = by_ip.entry(ip.to_string()).or_default();
-            times.retain(|t| *t + 86_400 > stamp);
-            if times.len() >= MAX_FAUCET_PER_IP_DAY {
-                return Err(anyhow!(
-                    "you got test coins for several wallets today; try again tomorrow"
-                ));
-            }
-            {
-                let mut idx = h.index.lock().unwrap();
-                if !idx.funded.insert(app.profile.clone()) {
-                    return Err(anyhow!("this wallet already got its test coins"));
-                }
-                idx.faucet_pending.insert(app.profile.clone());
-            }
-            times.push(stamp);
-            all.push(stamp);
-        }
-        let profile = app.profile.clone();
-        let ip = ip.to_string();
-        let hub = self.clone();
-        if let Err(e) = self.save_index(h) {
-            hub.unfund(&profile, &ip, stamp);
-            return Err(e);
-        }
-        app.free_job("faucet", move |app, id| {
-            let _slot = slot;
-            app.step(id, "Sending free test coins");
-            // The house's coins may be confirming after a restock: wait for them a while
-            // rather than fail at once. A failure once the payment may have been sent is not
-            // tried again, so the faucet never pays twice.
-            let started = now();
-            let mut said = false;
-            let paid = loop {
-                match house.faucet_pay(&addr, FAUCET_ZAT) {
-                    Ok(r) => break Ok(r),
-                    Err(e) if now() < started + 600 && !maybe_sent(&e) => {
-                        if !said {
-                            app.step(id, "Waiting for the faucet's coins to confirm (a few minutes)");
-                            said = true;
-                        }
-                        house.push_event(json!({ "event": "log", "text": format!("faucet waits: {e:#}") }));
-                        thread::sleep(Duration::from_secs(30));
-                    }
-                    Err(e) => break Err(e),
-                }
-            };
-            let r = match paid {
-                Ok(r) => {
-                    app.add_activity(json!({ "kind": "faucet", "txid": r["txid"], "amount_zat": FAUCET_ZAT, "text": "Received free test coins" }));
-                    Ok(json!({ "txid": r["txid"], "amount_zat": FAUCET_ZAT }))
-                }
-                Err(e) if maybe_sent(&e) => {
-                    // It may have gone out: keep the wallet marked, and say to look again.
-                    house.push_event(json!({ "event": "log", "text": format!("faucet, maybe sent: {e:#}") }));
-                    Err(anyhow!("the faucet's payment may still arrive; sync in a few minutes and look again"))
-                }
-                Err(e) => {
-                    // Give the chance back; the detail goes to the house log, not to the visitor.
-                    hub.unfund(&profile, &ip, stamp);
-                    house.push_event(json!({ "event": "log", "text": format!("faucet: {e:#}") }));
-                    Err(anyhow!("the faucet cannot pay right now (its coins may still be confirming); try again in a few minutes"))
-                }
-            };
-            hub.faucet_settled(&profile);
-            r
-        })
-    }
-
-    /// Test coins for a browser wallet, which has no session: paid to the address it gives,
-    /// once per address, under the same limits per visitor and per hour as a hosted wallet.
+    /// Test coins for a browser wallet: paid to the address it gives, once per address,
+    /// under limits per visitor and per hour.
     /// The payment goes out in the background; the wallet sees it when it syncs.
     fn web_faucet(self: &Arc<Self>, h: &Hosted, body: &Value, ip: &str) -> Result<Value> {
         if h.network != "test" {
@@ -2136,62 +1583,20 @@ impl Hub {
         }
     }
 
-    /// After a restart: every wallet whose faucet payment was under way is looked at. One
-    /// that holds a note was paid; one that holds nothing gets its chance back.
+    /// After a restart: an address whose faucet payment was cut short gets its chance back
+    /// (its wallet is in someone's browser and cannot be looked at from here).
     fn reconcile_faucet(&self, h: &Hosted) {
-        let pending: Vec<String> = h
-            .index
-            .lock()
-            .unwrap()
-            .faucet_pending
-            .iter()
-            .cloned()
-            .collect();
-        for profile in pending {
-            // A browser wallet's payment cut short by the restart: the address gets its chance
-            // back (its wallet cannot be looked at from here).
-            if profile.starts_with("web:") {
-                let mut idx = h.index.lock().unwrap();
-                idx.faucet_pending.remove(&profile);
-                idx.funded.remove(&profile);
-                drop(idx);
-                let _ = self.save_index(h);
-                continue;
-            }
-            let app = h.apps.lock().unwrap().get(&profile).cloned();
-            let Some(a) = app else {
-                h.index.lock().unwrap().faucet_pending.remove(&profile);
-                let _ = self.save_index(h);
-                continue;
-            };
-            // A payment still in the mempool is not a note yet: a wallet is judged only once
-            // it is an hour old and the look at the chain worked; until then it stays pending
-            // and is looked at again a minute later.
-            let synced = a.exclusive(|| a.sync()).is_ok();
-            let has_note = a
-                .accounts()
-                .and_then(|(payout, _)| a.notes(&payout))
-                .map(|n| !n.is_empty())
-                .unwrap_or(true);
-            let made = fs::metadata(a.dir.join("app.json"))
-                .and_then(|m| m.created().or_else(|_| m.modified()))
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(u64::MAX);
-            let mut idx = h.index.lock().unwrap();
-            if has_note {
-                idx.faucet_pending.remove(&profile);
-            } else if synced && made.saturating_add(3600) < now() {
-                idx.faucet_pending.remove(&profile);
-                idx.funded.remove(&profile);
-                eprintln!(
-                    "faucet: {profile} was marked paid but holds nothing; its chance is given back"
-                );
-            }
-            drop(idx);
-            let _ = self.save_index(h);
+        let pending: Vec<String> = h.index.lock().unwrap().faucet_pending.drain().collect();
+        if pending.is_empty() {
+            return;
         }
+        {
+            let mut idx = h.index.lock().unwrap();
+            for key in &pending {
+                idx.funded.remove(key);
+            }
+        }
+        let _ = self.save_index(h);
     }
 
     /// Give back a faucet chance: the wallet's, the visitor's and the hour's.
@@ -2212,80 +1617,6 @@ impl Hub {
             if let Some(i) = all.iter().position(|t| *t == stamp) {
                 all.remove(i);
             }
-        }
-    }
-
-    /// Remove wallets made and never used: no test coins, nothing in the activity log, nothing
-    /// listed, no shop, no one signed in, older than a day, and (a last look at the wallet
-    /// itself) no note in either account.
-    fn remove_unused(&self, h: &Hosted) {
-        let apps: Vec<Arc<App>> = h.apps.lock().unwrap().values().cloned().collect();
-        let funded = h.index.lock().unwrap().funded.clone();
-        let signed_in: HashSet<String> = h
-            .sessions
-            .lock()
-            .unwrap()
-            .values()
-            .map(|s| s.profile.clone())
-            .collect();
-        for a in apps {
-            let made = fs::metadata(a.dir.join("app.json"))
-                .and_then(|m| m.created().or_else(|_| m.modified()))
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(u64::MAX);
-            let unused = a.profile != HOUSE
-                && made.saturating_add(UNUSED_WALLET_SECS) < now()
-                && a.last_seen.load(Ordering::SeqCst) + UNUSED_WALLET_SECS < now()
-                && !funded.contains(&a.profile)
-                && !signed_in.contains(&a.profile)
-                && !a.listings_path().exists()
-                && !a.shop_running()
-                && a.cfg
-                    .lock()
-                    .unwrap()
-                    .activity
-                    .iter()
-                    .all(|e| e["kind"] == "wallet");
-            if !unused {
-                continue;
-            }
-            // Only under the wallet's lock, so no job of it is running.
-            let Ok(_g) = a.wallet_lock.try_lock() else {
-                continue;
-            };
-            // Coins sent from elsewhere leave no activity entry, but they do leave notes:
-            // look at the chain once more before deciding, and keep the wallet when that
-            // look fails.
-            if a.sync().is_err() {
-                continue;
-            }
-            let holds_something = a.accounts().ok().is_none_or(|(payout, item)| {
-                [payout, item]
-                    .iter()
-                    .any(|acct| a.notes(acct).map(|n| !n.is_empty()).unwrap_or(true))
-            });
-            if holds_something {
-                continue;
-            }
-            if a.jobs
-                .lock()
-                .unwrap()
-                .values()
-                .any(|j| j.state == "running")
-            {
-                continue;
-            }
-            h.apps.lock().unwrap().remove(&a.profile);
-            {
-                let mut idx = h.index.lock().unwrap();
-                idx.by_cred.retain(|_, p| p != &a.profile);
-                idx.ports.remove(&a.profile);
-            }
-            let _ = self.save_index(h);
-            let _ = fs::remove_dir_all(&a.dir);
-            eprintln!("removed the unused wallet {}", a.profile);
         }
     }
 
@@ -2323,22 +1654,16 @@ fn start_hosted_threads(hub: &Arc<Hub>) {
             hb.reconcile_faucet(h);
         }
     });
-    // Lock idle wallets and drop expired sessions.
+    // Drop what the limits no longer need, and old trade files.
     let hb = hub.clone();
     thread::spawn(move || loop {
         thread::sleep(Duration::from_secs(60));
         let Mode::Hosted(h) = &hb.mode else { return };
-        h.sessions.lock().unwrap().retain(|_, s| s.expires > now());
         h.prune();
         let apps: Vec<Arc<App>> = h.apps.lock().unwrap().values().cloned().collect();
         for a in apps {
-            if a.profile != HOUSE && a.last_seen.load(Ordering::SeqCst) + IDLE_LOCK_SECS < now() {
-                *a.passphrase.lock().unwrap() = None;
-            }
             a.prune_trade_files();
         }
-        hb.remove_unused(h);
-        hb.reconcile_faucet(h);
     });
     // Keep the house shop stocked and open.
     let hb = hub.clone();
@@ -2388,7 +1713,6 @@ impl App {
             paused: AtomicBool::new(false),
             events: Arc::new(Mutex::new(Vec::new())),
             last_sync: Mutex::new(last_sync),
-            last_seen: AtomicU64::new(now()),
             proof_checks: Mutex::new(Vec::new()),
         }))
     }
@@ -2669,16 +1993,6 @@ impl App {
                 json!({ "job": id })
             }
         }
-    }
-
-    /// A job outside the limits, for work that has a limit of its own (the faucet).
-    fn free_job(
-        self: &Arc<Self>,
-        kind: &str,
-        f: impl FnOnce(&Arc<App>, u64) -> Result<Value> + Send + 'static,
-    ) -> Result<Value> {
-        let (id, slot) = self.start_job(kind, false)?;
-        Ok(self.run_job(id, slot, f))
     }
 
     /// Register a running job; the check and the count happen under one lock, so parallel
@@ -3958,14 +3272,10 @@ mod tests {
             origin: "https://demo.test".into(),
             host: "demo.test".into(),
             network: "test".into(),
-            salt: String::new(),
             apps: Mutex::new(HashMap::new()),
             index: Mutex::new(Index::default()),
-            sessions: Mutex::new(HashMap::new()),
-            created: Mutex::new(Vec::new()),
             faucet_by_ip: Mutex::new(HashMap::new()),
             faucet_all: Mutex::new(Vec::new()),
-            fails: Mutex::new(HashMap::new()),
             checks: Mutex::new(HashMap::new()),
             mailboxes: Default::default(),
         }
@@ -4007,27 +3317,6 @@ mod tests {
         assert_eq!(url, "https://demo.test/shop/abc/listings");
         assert!(seller_urls("ftp://x").is_err());
         assert!(seller_urls("https://x/?a").is_err());
-    }
-
-    #[test]
-    fn wrong_tries_lock_then_are_forgotten() {
-        let h = hosted();
-        let keys = ["w:abc:1.2.3.4".to_string()];
-        for _ in 0..FREE_FAILURES {
-            assert!(h.check_fails(&keys).is_ok());
-            h.record_fail(&keys);
-        }
-        assert!(h.check_fails(&keys).is_err());
-        // Another visitor is not held back by these tries.
-        assert!(h.check_fails(&["w:abc:5.6.7.8".to_string()]).is_ok());
-        // An hour after the last failure the count starts again.
-        h.fails.lock().unwrap().get_mut(&keys[0]).unwrap().1 = 0;
-        h.fails.lock().unwrap().get_mut(&keys[0]).unwrap().2 = now() - 3601;
-        h.record_fail(&keys);
-        assert_eq!(h.fails.lock().unwrap()[&keys[0]].0, 1);
-        assert!(h.check_fails(&keys).is_ok());
-        h.prune();
-        assert!(h.fails.lock().unwrap().contains_key(&keys[0]));
     }
 
     #[test]
