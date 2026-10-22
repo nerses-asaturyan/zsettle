@@ -51,6 +51,28 @@ So the shop base URL to give a buyer is `https://<domain>/shop/<code>`: `zsettle
 --seller-url https://<domain>/shop/<code>` and `zsettle list --listings
 https://<domain>/shop/<code>/listings` work against it.
 
+## Browser wallet and chain relay (`zsettle-app --web-wallet`)
+
+`GET /wallet/` and the files under it serve the browser wallet from the given directory, read
+once at start. Its answers carry `Cross-Origin-Opener-Policy: same-origin`,
+`Cross-Origin-Embedder-Policy: require-corp` (shared memory for the proving threads), a
+content security policy that allows WebAssembly, and an entity tag.
+
+The relay passes public chain data from the server's light server, for either network
+(`net=main` or `net=test`). It holds no key; each call is one lightwalletd request.
+
+| Method and path | Answer |
+|---|---|
+| `GET /api/chain/tip?net=` | The chain tip, an encoded `BlockID`. |
+| `GET /api/chain/blocks?net=&start=&end=` | Compact blocks `start..=end` (at most 1,000), each length-delimited. |
+| `GET /api/chain/tree-state?net=&height=` | The tree state after `height`, an encoded `TreeState`. |
+| `GET /api/chain/subtree-roots?net=&pool=&start=&max=` | Subtree roots of `sapling`, `orchard` or `ironwood` (at most 10,000), each length-delimited. |
+| `GET /api/chain/info?net=` | `{ chain_name, consensus_branch_id, block_height }` as JSON. |
+| `POST /api/chain/send?net=` | Sends the raw transaction in the body (needs `X-Zsettle: 1`); the server's message as text. |
+
+Calls are limited per visitor (300 a minute) and for the whole server (3,000 a minute). In
+hosted mode `GET /api/shops` lists the open shops without a session.
+
 ## The app's own API
 
 `zsettle-app` serves its page and a JSON API that the page uses. It is meant for the bundled

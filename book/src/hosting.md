@@ -7,7 +7,12 @@ coins once, buys from any open shop, and can open a shop of their own at
 they sell.
 
 The demo is for the testnet. The server holds every demo wallet. That is fine for free test
-coins and wrong for real money: for real ZEC, people run zsettle on their own computer.
+coins and wrong for real money.
+
+With `--web-wallet <dir>` the same server also serves the browser wallet at `/wallet/`, which
+keeps the keys in the visitor's browser and works on the testnet and mainnet; the server only
+relays public chain data for it. See [Use the wallet in your browser](start/browser-wallet.md).
+Build it with `crates/zsettle-web/build.sh` and pass `crates/zsettle-web/www`.
 
 ## What it needs
 
@@ -22,7 +27,7 @@ coins and wrong for real money: for real ZEC, people run zsettle on their own co
 On the server, as root:
 
 ```
-./deploy/setup.sh demo.example.org /path/to/binaries
+./deploy/setup.sh demo.example.org /path/to/binaries [/path/to/zsettle-web/www]
 ```
 
 The script (`deploy/setup.sh`):
@@ -33,9 +38,10 @@ The script (`deploy/setup.sh`):
 4. installs the three binaries to `/usr/local/bin`;
 5. writes the systemd unit `zsettle-demo.service`, which runs
    `zsettle-app --public https://<domain> --port 8080 --network test --data-dir /var/lib/zsettle/data --house-passphrase-file /var/lib/zsettle/house.pass --bin-dir /usr/local/bin`
-   and restarts it by itself;
+   and restarts it by itself; with the third argument the browser wallet is copied to
+   `/usr/local/share/zsettle-web/www` and the unit adds `--web-wallet` for it;
 6. writes the Caddyfile: HTTPS with an automatic certificate, a reverse proxy to
-   `127.0.0.1:8080`, gzip, HSTS;
+   `127.0.0.1:8080`, compression (the browser wallet's WebAssembly included), HSTS;
 7. opens ports 22, 80 and 443 with ufw;
 8. starts the service and prints the house wallet's address.
 

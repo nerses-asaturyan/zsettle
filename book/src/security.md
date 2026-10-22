@@ -162,7 +162,9 @@ The setup script adds more around the process; see [Hosting the demo](hosting.md
 ## Known limits
 
 - Not audited.
-- The hosted demo is custodial by design. Do not use it for real money.
+- The hosted demo's main app is custodial by design. Do not use it for real money. The
+  browser wallet at `/wallet/` is not custodial, but it runs the code the server sends; see
+  [Use the wallet in your browser](start/browser-wallet.md).
 - The privacy limits on the [Privacy](privacy.md) page.
 - Anyone who holds a listings file can see every trade of that item account.
 - The light server can see a lot of metadata unless you use Tor or your own server.

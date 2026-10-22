@@ -107,10 +107,23 @@ Use Tor or your own lightwalletd if the rest matters to you.
 The app links transactions to the ZecBlock explorer. Opening a link tells the explorer which
 transaction you look at.
 
+## The browser wallet
+
+The wallet at `/wallet/` keeps its phrase and database in the browser, encrypted. The server
+relays chain data for it and sees what a light server sees: the IP address, the block ranges
+the page asks for, the tree state it asks for when a wallet or a shop key starts (its birthday,
+rounded down to 1,000 blocks for a new wallet; a shop key's birthday is public in its
+listings), and each transaction it sends. The server passes these requests on to its light
+server (zec.rocks by default), which sees them coming from the server, not from you.
+
+The server also sends the page's code: a hostile server could send a page that leaks the
+phrase. See [Use the wallet in your browser](start/browser-wallet.md#what-the-server-can-and-cannot-do).
+
 ## The hosted demo
 
-The demo server holds every visitor's wallet and sees the passphrase while a wallet is
-unlocked. It is meant for free test coins only. For real ZEC, run zsettle yourself.
+The demo's main app holds every visitor's wallet and sees the passphrase while a wallet is
+unlocked. It is meant for free test coins only. For real ZEC, use the browser wallet or run
+zsettle yourself.
 
 For its limits (new wallets an hour, test coins a day) the server keeps each visitor's IP
 address in memory for at most a day, and nothing else about the visitor. It writes no access

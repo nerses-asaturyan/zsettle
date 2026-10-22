@@ -9,7 +9,8 @@
 set -euo pipefail
 
 DOMAIN=${1:?usage: setup.sh <domain> <binary directory>}
-BIN=${2:?usage: setup.sh <domain> <binary directory>}
+BIN=${2:?usage: setup.sh <domain> <binary directory> [browser wallet www directory]}
+WEB=${3:-}
 DATA=/var/lib/zsettle
 PORT=8080
 
@@ -33,6 +34,16 @@ chown zsettle:zsettle "$DATA/house.pass"; chmod 600 "$DATA/house.pass"
 echo "== binaries"
 systemctl stop zsettle-demo 2>/dev/null || true
 install -m 755 "$BIN/zsettle" "$BIN/zsettle-seller" "$BIN/zsettle-app" /usr/local/bin/
+WEB_FLAG=""
+if [ -n "$WEB" ]; then
+  [ -f "$WEB/index.html" ] && [ -f "$WEB/pkg/zsettle_web_bg.wasm" ] || { echo "$WEB is not a built browser wallet (run crates/zsettle-web/build.sh)"; exit 1; }
+  mkdir -p /usr/local/share/zsettle-web
+  rm -rf /usr/local/share/zsettle-web/www
+  cp -r "$WEB" /usr/local/share/zsettle-web/www
+  chown -R root:root /usr/local/share/zsettle-web
+  chmod -R a+rX,go-w /usr/local/share/zsettle-web
+  WEB_FLAG=" --web-wallet /usr/local/share/zsettle-web/www"
+fi
 
 echo "== service"
 cat > /etc/systemd/system/zsettle-demo.service <<UNIT
@@ -44,7 +55,7 @@ Wants=network-online.target
 [Service]
 User=zsettle
 Group=zsettle
-ExecStart=/usr/local/bin/zsettle-app --public https://$DOMAIN --port $PORT --network test --data-dir $DATA/data --house-passphrase-file $DATA/house.pass --bin-dir /usr/local/bin
+ExecStart=/usr/local/bin/zsettle-app --public https://$DOMAIN --port $PORT --network test --data-dir $DATA/data --house-passphrase-file $DATA/house.pass --bin-dir /usr/local/bin$WEB_FLAG
 Restart=always
 RestartSec=5
 NoNewPrivileges=true
@@ -98,7 +109,16 @@ cat > /etc/caddy/Caddyfile <<CADDY
 }
 
 $DOMAIN {
-	encode gzip
+	encode zstd gzip {
+		match {
+			header Content-Type text/*
+			header Content-Type application/json*
+			header Content-Type application/javascript*
+			header Content-Type application/wasm
+			header Content-Type application/manifest+json
+			header Content-Type image/svg+xml
+		}
+	}
 	request_body {
 		max_size 2MB
 	}
