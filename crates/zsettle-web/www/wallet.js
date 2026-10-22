@@ -430,7 +430,9 @@ function protectFlow(sh, phrase, network, birthday) {
       const { lock, key } = await getLock();
       sh.set(h('p', null, 'Creating the wallet…'), h('p', { class: 'muted small' }, 'This fetches the chain state for its first block.'));
       const name = 'w' + b64u(crypto.getRandomValues(new Uint8Array(6)));
+      if (!(await holdTab(network))) throw new Error(OTHER_TAB);
       await call('create', [name, network, phrase, birthday]);
+      keepStorage();
       const view = await call('view');
       S.key = key;
       S.record = { v: 1, name, network, birthday: view.birthday, lock, phrase: await seal(key, enc.encode(phrase)), db: null };
@@ -470,7 +472,14 @@ function lockScreen(record, all) {
       } catch {
         throw new Error(record.lock.kind === 'passkey' ? 'This passkey does not open this wallet.' : 'Wrong passphrase.');
       }
-      await call('open', [record.name, record.network, record.birthday, db]);
+      if (!(await holdTab(record.network))) throw new Error(OTHER_TAB);
+      try {
+        await call('open', [record.name, record.network, record.birthday, db]);
+      } catch (e) {
+        releaseTab();
+        throw e;
+      }
+      keepStorage();
       S.key = key;
       S.record = record;
       home();
@@ -656,8 +665,29 @@ async function refresh() {
   if (!document.querySelector('.scrim')) home();
 }
 
+// One tab at a time per wallet: two open copies would each save over the other, and a note
+// held for an offer could be forgotten.
+async function holdTab(network) {
+  if (!navigator.locks) return true;
+  return new Promise((resolve) => {
+    navigator.locks.request('zsettle-wallet-' + network, { ifAvailable: true }, (lock) => {
+      if (!lock) return resolve(false);
+      resolve(true);
+      return new Promise((release) => (S.releaseTab = release));
+    });
+  });
+}
+function releaseTab() {
+  if (S.releaseTab) S.releaseTab();
+  S.releaseTab = null;
+}
+const OTHER_TAB = 'This wallet is open in another tab of this browser. Use that tab, or close it and try again.';
+// Ask the browser to keep this site's storage rather than clear it when space runs low.
+const keepStorage = () => navigator.storage && navigator.storage.persist && navigator.storage.persist().catch(() => {});
+
 async function lockNow() {
   clearTimeout(syncTimer);
+  releaseTab();
   S.key = null;
   S.record = null;
   S.view = null;

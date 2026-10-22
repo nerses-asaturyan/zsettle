@@ -111,9 +111,9 @@ transaction you look at.
 
 The wallet at `/wallet/` keeps its phrase and database in the browser, encrypted. The server
 relays chain data for it and sees what a light server sees: the IP address, the block ranges
-the page asks for, the tree state it asks for when a wallet or a shop key starts (its birthday,
-rounded down to 1,000 blocks for a new wallet; a shop key's birthday is public in its
-listings), and each transaction it sends. The server passes these requests on to its light
+the page asks for, the tree state it asks for when a wallet or a shop key starts (rounded down
+to 1,000 blocks), the listed items whose blocks it looks up when you open a shop (which shows
+which shop you opened; the list is public), and each transaction it sends. The server passes these requests on to its light
 server (zec.rocks by default), which sees them coming from the server, not from you.
 
 The server also sends the page's code: a hostile server could send a page that leaks the

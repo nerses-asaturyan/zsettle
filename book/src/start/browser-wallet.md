@@ -33,7 +33,13 @@ without a touch or a key.
 block height it was made at (shown under **Show recovery phrase**). Without the height the
 wallet starts scanning at a recent block and misses older payments.
 
-The browser keeps one wallet per network. The lock screen offers the other one.
+The browser keeps one wallet per network. The lock screen offers the other one, and a way
+back for a forgotten passphrase or a lost passkey: restore from the recovery phrase. A wallet
+opens in one tab at a time.
+
+Add the page to the home screen to use it like an app; the page also asks the browser to keep
+its storage. Browsers can still clear site data (Safari does after weeks without a visit to a
+site that is not on the home screen), so keep the 24 words.
 
 ## Use it
 
@@ -42,6 +48,8 @@ The browser keeps one wallet per network. The lock screen offers the other one.
 - **Send** pays a unified address with an Orchard receiver.
 - **Shops** lists the open shops of this server. Opening a shop adds its item key to the
   wallet and scans for its items in the background, so a purchase does not wait for that scan.
+  The scan starts at the block of the oldest listed item (rounded down to 1,000 blocks), not at
+  the shop's own start. A purchase made before the scan ends says it is waiting for it.
 - **Buy** shows the price and the shop's payment address from its signed price list, which
   the wallet has checked. It then builds and proves the trade in the page, hands the shop its
   copy, waits for the shop's signature, signs the payment and sends the transaction. If the
