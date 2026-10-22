@@ -196,6 +196,13 @@ impl Wallet {
         .map_err(|e| anyhow!("opening wallet database: {e}"))
     }
 
+    /// A connection that keeps a wallet in memory alive: SQLite frees an in-memory database
+    /// when its last connection closes, so the owner holds this one for the wallet's life.
+    pub fn keep_alive(&self) -> Result<rusqlite::Connection> {
+        rusqlite::Connection::open(self.location())
+            .map_err(|e| anyhow!("opening wallet database: {e}"))
+    }
+
     /// The whole database of a wallet in memory, as SQLite file bytes.
     pub fn export(&self) -> Result<Vec<u8>> {
         let conn = self.connection(true)?;
@@ -206,7 +213,7 @@ impl Wallet {
     }
 
     /// Replace the database of a wallet in memory with SQLite file bytes saved by
-    /// [`Wallet::export`].
+    /// [`Wallet::export`]. The caller holds a [`Wallet::keep_alive`] connection first.
     pub fn import(&self, bytes: &[u8]) -> Result<()> {
         if !self.memory {
             return Err(anyhow!("only a wallet in memory is loaded from bytes"));
@@ -215,10 +222,7 @@ impl Wallet {
             .map_err(|e| anyhow!("loading the wallet database: {e}"))?;
         src.deserialize_read_exact(rusqlite::MAIN_DB, bytes, bytes.len(), true)
             .map_err(|e| anyhow!("loading the wallet database: {e}"))?;
-        let mut dst = self.connection(false).or_else(|_| {
-            rusqlite::Connection::open(self.location())
-                .map_err(|e| anyhow!("opening wallet database: {e}"))
-        })?;
+        let mut dst = self.keep_alive()?;
         rusqlite::backup::Backup::new(&src, &mut dst)
             .and_then(|b| b.run_to_completion(1000, std::time::Duration::ZERO, None))
             .map_err(|e| anyhow!("loading the wallet database: {e}"))

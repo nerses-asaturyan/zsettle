@@ -7,6 +7,17 @@ import init, * as zw from './pkg/zsettle_web.js';
 let wallet = null;
 let ready = null;
 
+// A Rust panic ends in a trap that no promise reports: tell the page, which fails the call
+// in flight instead of waiting for ever.
+const crash = (text) => self.postMessage({ type: 'crash', err: String(text).slice(0, 2000) });
+const consoleError = console.error;
+console.error = (...a) => {
+  crash(a.map(String).join(' '));
+  consoleError(...a);
+};
+self.addEventListener('error', (e) => crash(e.message || 'the wallet stopped'));
+self.addEventListener('unhandledrejection', (e) => crash((e.reason && e.reason.message) || e.reason || 'the wallet stopped'));
+
 const ops = {
   newMnemonic: () => zw.new_mnemonic(),
   checkMnemonic: (phrase) => zw.check_mnemonic(phrase),

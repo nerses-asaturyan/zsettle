@@ -263,6 +263,8 @@ impl Relay {
 #[wasm_bindgen]
 pub struct WebWallet {
     wallet: Wallet,
+    /// Keeps the in-memory database alive between calls.
+    _keep: rusqlite::Connection,
     relay: Relay,
     cache: MemBlockCache,
 }
@@ -312,6 +314,7 @@ impl WebWallet {
         let account_birthday =
             AccountBirthday::from_treestate(tree, None).map_err(|e| anyhow!("birthday: {e:?}"))?;
         let wallet = Wallet::in_memory(name, network, height);
+        let keep = wallet.keep_alive()?;
         let mut db = wallet.db()?;
         for (account, _) in [PAY_ACCOUNT, ITEM_ACCOUNT] {
             db.create_account(account, &seed, &account_birthday, None)
@@ -319,6 +322,7 @@ impl WebWallet {
         }
         Ok(WebWallet {
             wallet,
+            _keep: keep,
             relay,
             cache: MemBlockCache::default(),
         })
@@ -329,11 +333,13 @@ impl WebWallet {
         (|| {
             let network = network_of(&network)?;
             let wallet = Wallet::in_memory(&name, network, birthday);
+            let keep = wallet.keep_alive()?;
             wallet.import(bytes)?;
             // Brings the schema up to date with this build's wallet library.
             wallet.db()?;
             Ok(WebWallet {
                 wallet,
+                _keep: keep,
                 relay: Relay {
                     net: network_name(network),
                 },
@@ -362,6 +368,10 @@ impl WebWallet {
 
     async fn sync_inner(&mut self, cb: &Option<js_sys::Function>) -> Result<Value> {
         let mut db = self.wallet.db()?;
+        // Without an account the wallet would ask for the whole chain from its first block.
+        if list_accounts(&db)?.is_empty() {
+            return Err(anyhow!("the wallet has no accounts; restore it from its recovery phrase"));
+        }
         // The subtree roots let the wallet skip to the parts of the trees its notes are in.
         let sapling = self.relay.roots::<sapling_crypto::Node>("sapling").await?;
         db.put_sapling_subtree_roots(0, &sapling)

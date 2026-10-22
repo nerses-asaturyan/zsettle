@@ -1018,6 +1018,18 @@ fn public_route(hub: &Hub, req: &Request, mut stream: TcpStream, limit: impl Fn(
         }
         return None;
     }
+    // The open shops are public: their listings are, and a browser wallet has no session.
+    if req.method == "GET" && req.path == "/api/shops" {
+        if let Mode::Hosted(h) = &hub.mode {
+            let r = if limit() {
+                Ok(hub.open_shops(h))
+            } else {
+                Err(anyhow!("too many requests; wait a moment"))
+            };
+            json_answer(&mut stream, r, "");
+            return None;
+        }
+    }
     let Some(call) = req.path.strip_prefix("/api/chain/") else {
         return Some(stream);
     };

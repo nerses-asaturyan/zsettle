@@ -392,7 +392,15 @@ pub mod relay {
         BlockId, BlockRange, ChainSpec, GetSubtreeRootsArg, ShieldedProtocol,
     };
 
-    use super::{connect, runtime};
+    use super::connect;
+
+    /// One relay call: a single-threaded runtime is plenty and cheap to start.
+    fn runtime() -> Result<tokio::runtime::Runtime> {
+        super::install_crypto_provider();
+        Ok(tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?)
+    }
 
     /// Most blocks one request may ask for.
     pub const MAX_BLOCKS: u32 = 1_000;
@@ -447,7 +455,9 @@ pub mod relay {
 
     /// The commitment tree state after block `height`, as an encoded `TreeState`.
     pub fn tree_state(server: &str, height: u32) -> Result<Vec<u8>> {
-        Ok(super::fetch_tree_state_blocking(server, height)?.encode_to_vec())
+        Ok(runtime()?
+            .block_on(super::fetch_tree_state(server, height))?
+            .encode_to_vec())
     }
 
     /// Subtree roots of a shielded pool (`sapling`, `orchard` or `ironwood`), each

@@ -116,11 +116,28 @@ async function startEngine() {
   const exports = await init({ module_or_path: module });
   const threads = Math.max(2, Math.min(navigator.hardwareConcurrency || 4, 8));
   await initThreadPool(threads);
-  S.worker = new Worker('./worker.js', { type: 'module' });
-  await new Promise((resolve, reject) => {
-    S.worker.onmessage = ({ data }) => {
-      if (data.type === 'ready') return resolve();
+  // The wallet's worker, and a helper that builds the proving key in the background: they
+  // share the module and the memory, so the key the helper builds is the one trades use,
+  // and the wallet stays free for the visitor meanwhile.
+  S.worker = await spawn(module, exports.memory);
+  S.helper = await spawn(module, exports.memory);
+}
+
+function spawn(module, memory) {
+  const worker = new Worker('./worker.js', { type: 'module' });
+  return new Promise((resolve, reject) => {
+    worker.onmessage = ({ data }) => {
+      if (data.type === 'ready') return resolve(worker);
       if (data.type === 'failed') return reject(new Error(data.err));
+      if (data.type === 'crash') {
+        // The worker cannot go on after a panic: fail what is in flight and say so.
+        console.warn('wallet worker:', data.err);
+        for (const [id, p] of pending) {
+          pending.delete(id);
+          p.reject(new Error('The wallet stopped: ' + data.err.split('\n')[0] + ' Reload the page.'));
+        }
+        return;
+      }
       const p = pending.get(data.id);
       if (!p) return;
       if ('progress' in data) return p.onProgress && p.onProgress(data.progress);
@@ -128,9 +145,18 @@ async function startEngine() {
       if ('err' in data) p.reject(new Error(data.err));
       else p.resolve(data.ok);
     };
-    S.worker.onerror = (e) => reject(new Error(e.message || 'the wallet worker failed'));
-    S.worker.postMessage({ type: 'init', module, memory: exports.memory });
+    worker.onerror = (e) => reject(new Error(e.message || 'the wallet worker failed'));
+    worker.postMessage({ type: 'init', module, memory });
   });
+}
+
+// Build the proving key on the helper, once; nothing waits for it.
+function warmUp() {
+  if (S.warm) return;
+  S.warm = true;
+  const id = nextId++;
+  pending.set(id, { resolve() {}, reject() {} });
+  S.helper.postMessage({ id, op: 'warmUp', args: [] });
 }
 
 // ------------------------------------------------------------ storage and keys
@@ -532,10 +558,7 @@ async function sync() {
     });
     S.view = await call('view');
     await saveDb();
-    if (!S.warm) {
-      S.warm = true;
-      call('warmUp').catch(() => {});
-    }
+    warmUp();
   } catch (e) {
     S.syncError = e.message;
   } finally {
@@ -555,11 +578,12 @@ async function refresh() {
 
 async function lockNow() {
   clearTimeout(syncTimer);
-  await call('close').catch(() => {});
   S.key = null;
   S.record = null;
   S.view = null;
-  welcome();
+  await welcome();
+  // The wallet leaves the worker's memory after whatever call is running.
+  call('close').catch(() => {});
 }
 
 // Confirm a transaction. A passkey wallet asks for the passkey here.
@@ -641,12 +665,14 @@ async function shops() {
   const sh = sheet('Shops', [h('p', { class: 'muted' }, 'Loading…')]);
   try {
     const r = await fetch('/api/shops', { headers: { 'X-Zsettle': '1' } });
-    const list = (await r.json()) || [];
-    const open = (Array.isArray(list) ? list : list.shops || []).filter((s) => s.items > 0);
+    const list = r.ok ? await r.json() : null;
+    // A server without the shop list still has its house shop.
+    const all = Array.isArray(list) ? list : [{ code: 'house', name: 'House shop', house: true, items: 1 }];
+    const open = all.filter((s) => s.items > 0);
     sh.set(
       open.length
         ? h('ul', { class: 'list' }, open.map((s) =>
-            h('li', null, h('span', { class: 'icon' }, s.house ? '🏛️' : '🏪'), h('div', { class: 'grow' }, h('div', { class: 'name' }, s.name || s.code), h('div', { class: 'muted small' }, s.items + ' item' + (s.items === 1 ? '' : 's'))), h('button', { class: 'btn', onclick: () => (sh.close(), shop(s)) }, 'Open'))))
+            h('li', null, h('span', { class: 'icon' }, s.house ? '🏛️' : '🏪'), h('div', { class: 'grow' }, h('div', { class: 'name' }, s.name || s.code), Array.isArray(list) ? h('div', { class: 'muted small' }, s.items + ' item' + (s.items === 1 ? '' : 's')) : null), h('button', { class: 'btn', onclick: () => (sh.close(), shop(s)) }, 'Open'))))
         : h('p', { class: 'muted' }, 'No shop is open right now.'),
       S.record.network === 'main' ? h('p', { class: 'note' }, 'These shops sell on the testnet; a mainnet wallet cannot buy there.') : null,
     );
