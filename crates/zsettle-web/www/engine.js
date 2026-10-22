@@ -262,6 +262,8 @@ export const isOpen = () => !!E.record;
 export const current = () => (E.record ? { network: E.record.network, lock: E.record.lock.kind } : null);
 export const newMnemonic = () => call('newMnemonic');
 export const checkMnemonic = (p) => call('checkMnemonic', [p]);
+/** Whether this wallet can pay `address` (a shielded address of its network). */
+export const checkAddress = (address) => call('checkAddress', [E.record ? E.record.network : 'main', address]);
 
 /**
  * Create (or restore, with a birthday) the wallet of a network and open it. `lock` is
@@ -426,7 +428,27 @@ async function syncNow() {
   await saveDb();
   await saveCfg();
   warmUp();
+  await reconcileSales();
   return r;
+}
+
+// Items of the listings the wallet has seen spent: each sale goes into the activity once, and
+// the listings drop it (signed again now if the shop is open, else when it next opens).
+async function reconcileSales() {
+  if (!E.cfg.listings) return;
+  try {
+    const rec = await call('shopReconcile', [E.cfg.listings]);
+    E.cfg.sold = E.cfg.sold || [];
+    for (const s of rec.sold || []) {
+      if (E.cfg.sold.includes(s.note)) continue;
+      E.cfg.sold = [s.note, ...E.cfg.sold].slice(0, 500);
+      if (E.shop.open) shopEvent({ event: 'sold', name: s.name, txid: s.txid });
+      await addActivity({ kind: 'sale', txid: s.txid, price_zat: s.price_zat, text: 'Sold ' + (s.name || 'an item') });
+    }
+    if (rec.listings) await setListings(rec.listings);
+  } catch {
+    /* judged again after the next sync */
+  }
 }
 
 async function walletView() {
@@ -628,8 +650,12 @@ export async function api(path, body) {
       });
     case 'GET /api/shop':
       return { running: E.shop.open, listen: null, public: shopUrl(), events: E.shop.events };
-    case 'GET /api/listings':
-      return E.cfg.listings ? JSON.parse(E.cfg.listings) : { items: [] };
+    case 'GET /api/listings': {
+      // Sold items stay in the signed copy until the shop next opens; they are not shown.
+      const l = E.cfg.listings ? JSON.parse(E.cfg.listings) : { items: [] };
+      l.items = (l.items || []).filter((i) => !(E.cfg.sold || []).includes(i.note));
+      return l;
+    }
     case 'POST /api/mint':
       return job('mint', async (step) => {
         const phrase = await takePhrase();
@@ -708,7 +734,8 @@ const SHOP_SYNC_MS = 30000;
 
 function listedItems() {
   try {
-    return E.cfg && E.cfg.listings ? JSON.parse(E.cfg.listings).items || [] : [];
+    const sold = (E.cfg && E.cfg.sold) || [];
+    return E.cfg && E.cfg.listings ? (JSON.parse(E.cfg.listings).items || []).filter((i) => !sold.includes(i.note)) : [];
   } catch {
     return [];
   }
@@ -746,6 +773,12 @@ async function shopStart() {
   if (!E.cfg.listings) throw new Error('list an item first, then open the shop');
   const phrase = await takePhrase();
   await call('shopOpen', [phrase]);
+  // Items sold while the shop was closed leave the listings before it opens.
+  await reconcileSales();
+  if (!E.cfg.listings || !listedItems().length) {
+    await call('shopClose', []);
+    throw new Error('every listed item has sold; list an item, then open the shop');
+  }
   E.shop.code = await call('listingsCode', [E.cfg.listings]);
   try {
     await mailbox('listings', E.cfg.listings, { listings: E.cfg.listings });
@@ -781,12 +814,6 @@ async function shopPass() {
     if (Date.now() - E.shop.lastSync > SHOP_SYNC_MS) {
       E.shop.lastSync = Date.now();
       await syncNow();
-      const rec = await call('shopReconcile', [E.cfg.listings]);
-      for (const sold of rec.sold || []) {
-        shopEvent({ event: 'sold', name: sold.name, txid: sold.txid });
-        await addActivity({ kind: 'sale', txid: sold.txid, price_zat: sold.price_zat, text: 'Sold ' + (sold.name || 'an item') });
-      }
-      if (rec.listings) await setListings(rec.listings);
     }
     const { offers } = await mailbox('poll', '');
     for (const o of offers || []) {

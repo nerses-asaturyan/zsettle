@@ -939,7 +939,7 @@ function openSyncInfo() {
         rep.chain_tip ? h('div', { class: 'r' }, h('span', null, 'Block height'), h('span', { class: 'mono' }, String(rep.chain_tip))) : null,
         rep.server ? h('div', { class: 'r' }, h('span', null, 'Server'), h('span', { class: 'mono' }, String(rep.server).replace(/^https?:\/\//, ''))) : null,
       ),
-      h('p', { class: 'small muted' }, 'Syncing fetches new blocks from a lightwalletd server and scans them with your viewing keys. That is how the wallet learns which coins and items it holds and how many confirmations each has. It runs by itself every few seconds while this page is open; the dot is green when the last sync succeeded.'),
+      h('p', { class: 'small muted' }, (S.status.browser ? 'Syncing fetches new blocks through this site from a lightwalletd server and scans them in your browser with your viewing keys.' : 'Syncing fetches new blocks from a lightwalletd server and scans them with your viewing keys.') + ' That is how the wallet learns which coins and items it holds and how many confirmations each has. It runs by itself every few seconds while this page is open; the dot is green when the last sync succeeded.'),
     ],
     foot: [h('button', { class: 'btn primary', onclick: () => { sh.close(); backgroundSync(); } }, 'Sync now')],
   });
@@ -1005,8 +1005,12 @@ async function openBackup() {
     ],
     foot: [h('button', { class: 'btn primary', onclick: () => show() }, pk ? [icon('finger'), 'Confirm and show'] : 'Show words')],
   });
+  pass.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') show();
+  });
   async function show() {
     err.textContent = '';
+    if (!pk && !pass.value) return (err.textContent = 'Enter your passphrase.');
     try {
       const r = S.engine
         ? { words: await S.engine.words(pass.value) }
@@ -1439,7 +1443,7 @@ async function openReceive(given, first) {
     first ? h('p', { class: 'muted' }, 'Fund it by sending ZEC to this address.') : h('p', { class: 'muted' }, 'A fresh address each time: none of them can be linked to the others.'),
     qr,
     h('div', { class: 'addr mono' }, addr),
-    h('div', { class: 'callout info' }, icon('info'), h('span', null, S.status.network === 'test' ? 'Testnet coins are free: paste this address into a Zcash testnet faucet.' : 'Only shielded payments reach this address. Coins from another wallet can be spent after ' + CONFS.other + ' confirmations, about ' + minutesFor(CONFS.other) + ' minutes.')),
+    h('div', { class: 'callout info' }, icon('info'), h('span', null, S.status.network === 'test' ? (S.status.faucet ? 'Testnet coins are free: press Get coins on the Wallet tab, or paste this address into a Zcash testnet faucet.' : 'Testnet coins are free: paste this address into a Zcash testnet faucet.') : 'Only shielded payments reach this address. Coins from another wallet can be spent after ' + CONFS.other + ' confirmations, about ' + minutesFor(CONFS.other) + ' minutes.')),
   );
   sh.setFoot(
     navigator.share ? h('button', { class: 'btn', onclick: () => navigator.share({ text: addr }).catch(() => {}) }, icon('share'), 'Share') : null,
@@ -1465,7 +1469,7 @@ function openSend() {
     ],
     foot: [h('button', { class: 'btn primary lg', onclick: review }, 'Review')],
   });
-  function review() {
+  async function review() {
     err.textContent = '';
     const a = to.value.trim();
     const amt = amount.value.trim().replace(',', '.');
@@ -1473,6 +1477,7 @@ function openSend() {
     if (!a.startsWith(prefix)) return (err.textContent = 'This is not a ' + (S.status.network === 'main' ? 'mainnet' : 'testnet') + ' Zcash address. It should start with ' + prefix + '.');
     if (!/^\d*\.?\d{0,8}$/.test(amt) || !(zat > 0)) return (err.textContent = 'Enter an amount in ZEC, for example 0.001.');
     if (zat + FEE_ZAT > bal) return (err.textContent = 'Not enough ZEC for this amount plus the network fee.');
+    if (S.engine && !(await S.engine.checkAddress(a).catch(() => false))) return (err.textContent = 'This wallet cannot pay that address. Check it, or ask for a shielded address (a unified address with an Orchard part).');
     sh.setTitle('Confirm payment');
     sh.setBody(
       h('div', { class: 'summary' }, h('div', { class: 'r' }, h('span', null, 'To'), h('span', { class: 'mono' }, short(a, 10))), h('div', { class: 'r' }, h('span', null, 'Amount'), h('span', null, zec(zat))), h('div', { class: 'r' }, h('span', null, 'Network fee'), h('span', null, 'about ' + zec(FEE_ZAT))), memo.value.trim() ? h('div', { class: 'r' }, h('span', null, 'Message'), h('span', null, memo.value.trim())) : null, h('div', { class: 'r total' }, h('span', null, 'Total'), h('span', null, 'about ' + zec(zat + FEE_ZAT)))),
@@ -1641,6 +1646,8 @@ function buyReview(sh, it) {
           } catch {
             /* refreshed next time */
           }
+          // The shop drops the item when it next looks at the chain; until then it is gone here.
+          if (S.market && S.market.items) S.market.items = S.market.items.filter((x) => x.note !== it.note);
           if (S.view === 'market') loadView(true);
         }
       },
@@ -1721,7 +1728,7 @@ function viewSell() {
         { class: 'card stack' },
         h('b', null, 'Create items'),
         names,
-        h('button', { class: 'btn primary', onclick: () => mint(names.value) }, icon('spark'), 'Create'),
+        h('button', { class: 'btn primary', onclick: () => (names.value.trim() ? mint(names.value) : (names.focus(), toast('Write a name for each item, one per line', 'err'))) }, icon('spark'), 'Create'),
         h('div', { class: 'hint small muted' }, 'Each item is a shielded note of ' + zec(ITEM_ZAT) + ', named in its encrypted memo. Creating costs a network fee of about ' + zec(mintFee(1)) + ', a little more for several at once.'),
       ),
     ),
@@ -1846,7 +1853,7 @@ function mint(text) {
           const ok = await askConfirm();
           if (!ok) return;
           sh.setTitle('Creating ' + n + ' item' + (n > 1 ? 's' : ''));
-          await runInSheet(sh, '/api/mint', { names, ...ok }, { total: 2, doneTitle: 'New items', success: () => ({ title: 'Created', text: 'They can be listed once the block is mined, in about a minute.' }), failTitle: 'Not created' });
+          await runInSheet(sh, '/api/mint', { names, ...ok }, { total: 2, doneTitle: 'New items', success: (r) => ({ title: 'Created', text: 'They can be listed once the block is mined, in about a minute.', extra: r && r.txid ? txRow(r.txid) : null }), failTitle: 'Not created' });
           loadView(true);
         },
       }, confirmLabel('Confirm and create')),

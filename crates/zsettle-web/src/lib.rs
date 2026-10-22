@@ -104,6 +104,18 @@ pub fn check_mnemonic(phrase: &str) -> Result<(), JsError> {
         .map_err(|e| JsError::new(&format!("not a valid recovery phrase: {e}")))
 }
 
+/// Whether `address` is one this wallet pays on `network`: a unified address with an Orchard
+/// receiver (payments stay shielded).
+#[wasm_bindgen]
+pub fn check_address(network: &str, address: &str) -> bool {
+    network_of(network).is_ok_and(|n| {
+        matches!(
+            zcash_keys::address::Address::decode(&n, address.trim()),
+            Some(zcash_keys::address::Address::Unified(ua)) if ua.orchard().is_some()
+        )
+    })
+}
+
 fn seed_of(phrase: &str) -> Result<SecretVec<u8>> {
     let m = Mnemonic::<English>::from_phrase(phrase.trim())
         .map_err(|e| anyhow!("not a valid recovery phrase: {e}"))?;

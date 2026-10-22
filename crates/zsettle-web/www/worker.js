@@ -22,6 +22,7 @@ self.addEventListener('unhandledrejection', (e) => crash((e.reason && e.reason.m
 const ops = {
   newMnemonic: () => zw.new_mnemonic(),
   checkMnemonic: (phrase) => zw.check_mnemonic(phrase),
+  checkAddress: (network, address) => zw.check_address(network, address),
   warmUp: () => zw.warm_up(),
   async create(name, network, mnemonic, birthday) {
     if (wallet) wallet.free();

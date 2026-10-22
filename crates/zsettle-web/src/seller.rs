@@ -314,11 +314,11 @@ impl WebWallet {
     }
 
     /// Drop from the listings every item the wallet has seen spent (sold, or moved by a
-    /// cancel), and sign them again when that changed anything. Returns
-    /// `{ listings: <json or null>, sold: [{ note, name, price_zat, txid }] }`.
+    /// cancel), and sign them again when that changed anything and the shop is open (its key
+    /// is here). Returns `{ listings: <json or null>, sold: [{ note, name, price_zat, txid }] }`;
+    /// with the shop closed, `listings` stays null and the sales are still named.
     pub fn shop_reconcile(&self, listings: String) -> Result<JsValue, JsError> {
         (|| {
-            let ask = self.shop.ask.as_ref().ok_or_else(|| anyhow!("the shop is closed"))?;
             let db = self.wallet.db()?;
             let mut l = Listings::parse(&listings, "your listings")?;
             let mut sold = Vec::new();
@@ -331,9 +331,9 @@ impl WebWallet {
                 }
             }
             l.items = kept;
-            if sold.is_empty() {
-                return Ok(json!({ "listings": null, "sold": [] }));
-            }
+            let Some(ask) = self.shop.ask.as_ref().filter(|_| !sold.is_empty()) else {
+                return Ok(json!({ "listings": null, "sold": sold }));
+            };
             l.sign(ask, max_scanned_height(&db)?.unwrap_or(0))?;
             Ok(json!({ "listings": serde_json::to_string(&l)?, "sold": sold }))
         })()
