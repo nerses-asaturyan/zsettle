@@ -61,6 +61,8 @@ function human(msg) {
   if (/would be dust/i.test(m)) return 'This would leave too little change to ever spend. Pick a cheaper item, or add coins first.';
   if (/the shop refused the offer: (.*)/i.test(m)) return 'The shop refused the offer: ' + m.match(/refused the offer: (.*)/i)[1];
   if (/too many requests/i.test(m)) return 'The server is busy. Wait a minute and try again.';
+  if (/not a valid recovery phrase/i.test(m)) return 'That is not a valid recovery phrase. Check the words and their order: it has 24 words (12 for some other wallets).';
+  if (/is busy|try again in a moment/i.test(m)) return 'The server is busy. Try again in a moment.';
   return m.charAt(0).toUpperCase() + m.slice(1);
 }
 
@@ -103,7 +105,12 @@ function call(op, args = [], onProgress) {
     new Promise((resolve, reject) => {
       if (S.dead) return reject(new Error(S.dead));
       const id = nextId++;
-      pending.set(id, { resolve, reject, onProgress, worker: S.worker });
+      const t0 = performance.now();
+      const done = (f) => (v) => {
+        console.debug('wallet call', op, Math.round(performance.now() - t0) + ' ms');
+        f(v);
+      };
+      pending.set(id, { resolve: done(resolve), reject: done(reject), onProgress, worker: S.worker });
       S.worker.postMessage({ id, op, args });
     });
   const p = queue.then(run, run);
@@ -330,7 +337,7 @@ async function welcome() {
   const wallets = await storedWallets();
   if (wallets.length) return lockScreen(wallets[0], wallets);
   render(
-    h('div', { class: 'top' }, h('h1', { class: 'grow' }, 'zsettle wallet')),
+    h('div', { class: 'top' }, brand()),
     h('div', { class: 'card stack' },
       h('p', null, 'A Zcash wallet that runs in this page. Your recovery phrase is made here and never leaves this device; the server only passes public blocks along.'),
       h('p', { class: 'muted small' }, 'Buy items for ZEC in one shielded transaction: the item and the payment move together, or not at all.'),
@@ -339,12 +346,14 @@ async function welcome() {
       h('button', { class: 'btn primary block', onclick: () => createFlow() }, 'Create a wallet'),
       h('button', { class: 'btn block', onclick: () => restoreFlow() }, 'Restore from a recovery phrase'),
     ),
+    h('p', { class: 'muted small center' }, h('a', { href: '/' }, 'Back to the zsettle app'), ', where the server keeps a test wallet for you.'),
   );
 }
 
-function networkPicker() {
+function networkPicker(network) {
   const sel = h('select', { id: 'net' }, h('option', { value: 'test' }, 'Testnet (test coins, free)'), h('option', { value: 'main' }, 'Mainnet (real ZEC)'));
-  const warn = h('p', { class: 'note', hidden: true }, 'Mainnet uses real money. Write the recovery phrase on paper: if this browser loses its data, the phrase is the only way back.');
+  if (network) sel.value = network;
+  const warn = h('p', { class: 'note', hidden: network !== 'main' }, 'Mainnet uses real money. Write the recovery phrase on paper: if this browser loses its data, the phrase is the only way back.');
   sel.onchange = () => (warn.hidden = sel.value !== 'main');
   return { el: h('div', { class: 'stack' }, h('label', { for: 'net' }, 'Network'), sel, warn), get: () => sel.value };
 }
@@ -367,8 +376,8 @@ async function createFlow() {
   next.onclick = () => protectFlow(sh, phrase, net.get(), 0);
 }
 
-async function restoreFlow() {
-  const net = networkPicker();
+async function restoreFlow(network) {
+  const net = networkPicker(network);
   const text = h('textarea', { id: 'phrase', autocomplete: 'off', autocapitalize: 'none', spellcheck: 'false', placeholder: '24 words, separated by spaces' });
   const bday = h('input', { id: 'bday', inputmode: 'numeric', placeholder: 'optional' });
   const err = h('p', { class: 'note err', hidden: true });
@@ -473,7 +482,7 @@ function lockScreen(record, all) {
     }
   };
   render(
-    h('div', { class: 'top' }, h('h1', { class: 'grow' }, 'zsettle wallet'), netChip(record.network)),
+    h('div', { class: 'top' }, brand(), netChip(record.network)),
     h('div', { class: 'card stack' },
       h('p', null, 'This browser holds a ' + (record.network === 'main' ? 'mainnet' : 'testnet') + ' wallet.'),
       record.lock.kind === 'passphrase' ? [h('label', { for: 'pass' }, 'Passphrase'), pass] : null,
@@ -482,8 +491,18 @@ function lockScreen(record, all) {
     ),
     other.length ? h('button', { class: 'btn link', onclick: () => lockScreen(other[0], all) }, 'Open the ' + (other[0].network === 'main' ? 'mainnet' : 'testnet') + ' wallet instead') : null,
     all.length < 2 ? h('button', { class: 'btn link', onclick: () => newBesides(record) }, 'Add a ' + (record.network === 'main' ? 'testnet' : 'mainnet') + ' wallet') : null,
+    h('button', { class: 'btn link', onclick: () => forgotten(record) }, record.lock.kind === 'passkey' ? 'Lost the passkey?' : 'Forgot the passphrase?'),
   );
   if (record.lock.kind === 'passphrase') pass.onkeydown = (e) => e.key === 'Enter' && btn.click();
+}
+
+// Without its passkey or passphrase the stored wallet cannot be opened; the recovery phrase
+// brings the money back in a new one.
+function forgotten(record) {
+  const sh = sheet(record.lock.kind === 'passkey' ? 'Lost the passkey' : 'Forgot the passphrase', [
+    h('p', null, 'This browser cannot open the wallet without it. Your money is safe on chain: restore the wallet from its 24-word recovery phrase, with a new passkey or passphrase. That replaces the locked copy in this browser.'),
+    h('button', { class: 'btn primary block', onclick: () => (sh.close(), restoreFlow(record.network)) }, 'Restore from the recovery phrase'),
+  ]);
 }
 
 function newBesides(record) {
@@ -495,6 +514,7 @@ function newBesides(record) {
 }
 
 const netChip = (n) => h('span', { class: 'chip ' + n }, n === 'main' ? 'Mainnet' : 'Testnet');
+const brand = () => h('a', { class: 'brand grow', href: '/', title: 'Back to the zsettle app' }, h('img', { src: '/favicon.svg', alt: '', width: '28', height: '28' }), h('span', null, 'zsettle wallet'));
 
 // ------------------------------------------------------------ home
 
@@ -504,7 +524,7 @@ function home() {
   const bar = h('div', { class: 'progress', id: 'syncbar', hidden: !S.syncing }, h('div', { style: 'width:' + (S.syncing ? S.syncing.pct : 0) + '%' }));
   const items = v ? v.items : [];
   render(
-    h('div', { class: 'top' }, h('h1', { class: 'grow' }, 'zsettle wallet'), netChip(S.record.network), h('button', { class: 'btn link', onclick: lockNow }, 'Lock')),
+    h('div', { class: 'top' }, brand(), netChip(S.record.network), h('button', { class: 'btn link', onclick: lockNow }, 'Lock')),
     h('div', { class: 'card' },
       h('div', { class: 'muted small' }, 'Balance'),
       h('div', { class: 'balance' }, v ? zec(v.balance_zat) : '…'),
@@ -528,6 +548,7 @@ function home() {
             )))
         : h('p', { class: 'muted' }, 'No items yet. Buy one in a shop.'),
     ),
+    activityCard(),
     h('h3', null, 'This wallet'),
     h('div', { class: 'card stack' },
       h('p', { class: 'small muted' }, 'Keys stay in this browser, encrypted. The server relays public chain data only.'),
@@ -539,6 +560,9 @@ function home() {
 
 function pendingNote(v) {
   const waiting = v.notes.filter((n) => !n.mined || n.reserved);
+  // Test coins asked for in the last half hour, not seen yet.
+  if (!v.notes.length && S.record.faucetAt && Date.now() - S.record.faucetAt < 30 * 60 * 1000)
+    return h('div', { class: 'muted small' }, 'Free test coins are on their way; they show once a block includes them.');
   if (!waiting.length) return null;
   const sum = waiting.reduce((a, n) => a + n.value_zat, 0);
   return h('div', { class: 'muted small' }, zec(sum) + ' on its way or held for an offer');
@@ -592,6 +616,40 @@ async function sync() {
   }
 }
 
+// What this wallet did, newest first: kept in this browser, encrypted like the database.
+async function addActivity(entry) {
+  const list = await activity();
+  list.unshift({ at: Date.now(), ...entry });
+  S.record.activity = await seal(S.key, enc.encode(JSON.stringify(list.slice(0, 100))));
+  await idbPut(KEY(S.record.network), S.record);
+}
+async function activity() {
+  if (!S.record || !S.record.activity) return [];
+  try {
+    return JSON.parse(dec.decode(await open_(S.key, S.record.activity)));
+  } catch {
+    return [];
+  }
+}
+const EXPLORER = { main: 'https://zecblock.com/tx/', test: 'https://testnet.zecblock.com/tx/' };
+function activityCard() {
+  const box = h('div', { class: 'card' }, h('p', { class: 'muted' }, 'Nothing yet.'));
+  activity().then((list) => {
+    if (!list.length) return;
+    box.replaceChildren(
+      h('ul', { class: 'list' }, list.slice(0, 20).map((a) =>
+        h('li', null,
+          h('div', { class: 'grow' },
+            h('div', { class: 'name' }, a.text),
+            h('div', { class: 'muted small' }, new Date(a.at).toLocaleString(), a.txid ? ' · ' : '', a.txid ? h('a', { href: EXPLORER[S.record.network] + a.txid, target: '_blank', rel: 'noopener noreferrer' }, short(a.txid)) : null),
+          ),
+          a.zat ? h('span', { class: 'small' }, '−' + zec(a.zat)) : null,
+        ))),
+    );
+  });
+  return [h('h3', null, 'Activity'), box];
+}
+
 async function refresh() {
   S.view = await call('view');
   await saveDb();
@@ -638,7 +696,7 @@ async function receive() {
   await saveDb();
   const qr = h('div', { class: 'qr' });
   try {
-    qr.append(window.QR.svg(addr));
+    qr.append(QR.svg(addr));
   } catch {
     qr.hidden = true;
   }
@@ -662,6 +720,8 @@ function faucetButton(addr) {
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || 'the faucet did not answer');
       note.textContent = zec(j.amount_zat) + ' is on its way. It shows after the next sync and can be spent after 10 blocks.';
+      S.record.faucetAt = Date.now();
+      idbPut(KEY(S.record.network), S.record).catch(() => {});
     } catch (e) {
       note.textContent = human(e.message);
       b.disabled = false;
@@ -702,9 +762,10 @@ function send() {
     sh.set(h('p', null, 'Building and proving the payment…'), h('p', { class: 'muted small' }, 'This takes up to a minute on a phone. Keep this page open.'));
     try {
       const r = await call('pay', [phrase, to.value.trim(), zat, memo.value.trim()]);
+      await addActivity({ text: 'Sent ' + zec(zat), txid: r.txid, zat });
       await refresh();
       sh.lock(false);
-      sh.set(h('p', null, 'Sent. It arrives with the next block.'), h('p', { class: 'mono' }, r.txid), h('button', { class: 'btn block', onclick: () => sh.close() }, 'Done'));
+      sh.set(h('p', null, 'Sent. It arrives with the next block.'), h('p', { class: 'mono' }, r.txid), h('button', { class: 'btn block', onclick: () => (sh.close(), home()) }, 'Done'));
     } catch (e) {
       sh.lock(false);
       sh.set(h('p', { class: 'note err' }, human(e.message)), h('button', { class: 'btn block', onclick: () => sh.close() }, 'Close'));
@@ -738,13 +799,26 @@ async function shop(s) {
   const path = '/shop/' + s.code;
   const sh = sheet(s.name || s.code, [h('p', { class: 'muted' }, 'Loading…')]);
   try {
-    // The wallet fetches the listings, checks the shop's signature and takes its item key, so
-    // the next sync already looks for its items; what is shown here is what was checked, and a
-    // purchase is refused if the shop changes it before signing.
-    const l = await call('prepareShop', [path]);
-    sync();
+    // The list shows at once. Meanwhile the wallet checks the shop's signature and takes its
+    // item key, so the next sync already looks for its items; a purchase goes ahead only if the
+    // shop's signed list names the price and address shown here.
+    const r = await fetch(path + '/listings');
+    if (!r.ok) throw new Error('the shop is closed');
+    const l = await r.json();
+    if (l.network !== S.record.network) throw new Error('this shop sells on the ' + (l.network === 'main' ? 'mainnet' : 'testnet') + '; this wallet is on the other network');
+    const checked = h('p', { class: 'muted small' }, 'Checking the shop’s signature…');
+    call('prepareShop', [path])
+      .then(() => {
+        checked.textContent = 'Signed by the shop; your wallet checked it.';
+        sync();
+      })
+      .catch((e) => {
+        checked.className = 'note err';
+        checked.textContent = human(e.message);
+      });
     const items = (l.items || []).slice().sort((a, b) => a.price_zat - b.price_zat);
     sh.set(
+      checked,
       h('ul', { class: 'list' }, items.map((it) =>
         h('li', null,
           h('span', { class: 'icon' }, it.icon || '🎟️'),
@@ -791,7 +865,14 @@ async function buy(path, it, l) {
   sh.lock(true);
   const list = h('ul', { class: 'steps' }, STEPS.map(([k, t]) => h('li', { 'data-k': k }, t)));
   const note = h('p', { class: 'muted small' }, 'Keep this page open. Proving takes up to a minute or two on a phone.');
-  sh.set(list, note);
+  // Until the purchase starts, it waits for a sync in progress: say so.
+  const waiting = h('p', { class: 'note' }, 'Waiting for the wallet to finish syncing…');
+  let started = false;
+  const tick = setInterval(() => {
+    if (started) return;
+    waiting.textContent = 'First the wallet finishes syncing' + (S.syncing ? ': ' + S.syncing.text.replace(/^Syncing:? ?/, '') : '…');
+  }, 1000);
+  sh.set(waiting, list, note);
   let seen = [];
   const mark = (k) => {
     seen.push(k);
@@ -803,13 +884,20 @@ async function buy(path, it, l) {
   try {
     const syncLi = list.querySelector('[data-k="sync"]');
     const r = await call('buy', [phrase, path, it.note, it.price_zat, l.payout_address], (p) => {
+      if (!started) {
+        started = true;
+        waiting.remove();
+      }
       if (p && p.step) mark(p.step);
       else if (p && p.scanned && p.tip && syncLi) syncLi.textContent = 'Finding the item on chain: block ' + p.scanned.toLocaleString('en') + ' of ' + p.tip.toLocaleString('en');
     });
+    clearInterval(tick);
+    await addActivity({ text: 'Bought ' + (r.name || 'an item'), txid: r.txid, zat: r.price_zat + r.fee_zat });
     await refresh();
     sh.lock(false);
-    sh.set(h('p', null, 'Bought ' + (r.name || 'the item') + '. It arrives with the next block.'), h('p', { class: 'mono' }, r.txid), h('button', { class: 'btn primary block', onclick: () => sh.close() }, 'Done'));
+    sh.set(h('p', null, 'Bought ' + (r.name || 'the item') + '. It arrives with the next block.'), h('p', { class: 'mono' }, r.txid), h('button', { class: 'btn primary block', onclick: () => (sh.close(), home()) }, 'Done'));
   } catch (e) {
+    clearInterval(tick);
     sh.lock(false);
     sh.set(h('p', { class: 'note err' }, human(e.message)), h('button', { class: 'btn block', onclick: () => sh.close() }, 'Close'));
     refresh().catch(() => {});
@@ -840,7 +928,7 @@ function prove(it) {
       const proof = await call('prove', [phrase, it.note, label.value.trim(), challenge.value.trim()]);
       const qr = h('div', { class: 'qr' });
       try {
-        qr.append(window.QR.svg(proof, { ecl: 'L' }));
+        qr.append(QR.svg(proof, { ecl: 'L' }));
       } catch {
         qr.hidden = true;
       }

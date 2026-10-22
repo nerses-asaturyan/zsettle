@@ -1120,6 +1120,14 @@ fn public_route(
                     num("max")?,
                 )?,
             ),
+            ("GET", "tx") => {
+                let txid =
+                    zsettle_core::wallet::parse_txid(q.get("txid").copied().unwrap_or_default())?;
+                (
+                    "application/json",
+                    serde_json::to_vec(&json!({ "height": relay::tx_height(&server, &txid)? }))?,
+                )
+            }
             ("GET", "info") => (
                 "application/json",
                 serde_json::to_vec(&relay::server_info(&server)?)?,
@@ -1823,7 +1831,9 @@ impl Hub {
         let apps: Vec<Arc<App>> = h.apps.lock().unwrap().values().cloned().collect();
         let mut shops: Vec<Value> = apps
             .iter()
-            .filter(|a| a.shop_running())
+            // A shop paused for a moment (its wallet pays the faucet, say) stays listed: the
+            // relay serves its listings meanwhile and holds offers until it is back.
+            .filter(|a| a.shop_running() || a.paused.load(Ordering::SeqCst))
             .map(|a| {
                 let items = Listings::read(&a.listings_path())
                     .map(|l| l.items.len())
@@ -1995,8 +2005,12 @@ impl Hub {
                     "you got test coins for several wallets today; try again tomorrow"
                 ));
             }
-            if !h.index.lock().unwrap().funded.insert(key.clone()) {
-                return Err(anyhow!("this address already got its test coins"));
+            {
+                let mut idx = h.index.lock().unwrap();
+                if !idx.funded.insert(key.clone()) {
+                    return Err(anyhow!("this address already got its test coins"));
+                }
+                idx.faucet_pending.insert(key.clone());
             }
             times.push(stamp);
             all.push(stamp);
@@ -2030,6 +2044,7 @@ impl Hub {
                     house.push_event(json!({ "event": "log", "text": format!("faucet for a browser wallet: {e:#}") }));
                 }
             }
+            hub.faucet_settled(&key);
         });
         Ok(json!({ "state": "sending", "amount_zat": FAUCET_ZAT }))
     }
@@ -2055,6 +2070,16 @@ impl Hub {
             .cloned()
             .collect();
         for profile in pending {
+            // A browser wallet's payment cut short by the restart: the address gets its chance
+            // back (its wallet cannot be looked at from here).
+            if profile.starts_with("web:") {
+                let mut idx = h.index.lock().unwrap();
+                idx.faucet_pending.remove(&profile);
+                idx.funded.remove(&profile);
+                drop(idx);
+                let _ = self.save_index(h);
+                continue;
+            }
             let app = h.apps.lock().unwrap().get(&profile).cloned();
             let Some(a) = app else {
                 h.index.lock().unwrap().faucet_pending.remove(&profile);

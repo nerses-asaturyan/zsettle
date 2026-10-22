@@ -405,8 +405,9 @@ pub mod relay {
     use anyhow::{anyhow, Result};
     use prost::Message;
     use zcash_client_backend::proto::service::{
-        BlockId, BlockRange, ChainSpec, GetSubtreeRootsArg, ShieldedProtocol,
+        BlockId, BlockRange, ChainSpec, GetSubtreeRootsArg, ShieldedProtocol, TxFilter,
     };
+    use zcash_protocol::TxId;
 
     use std::collections::HashMap;
     use std::future::Future;
@@ -486,6 +487,32 @@ pub mod relay {
             })
             .await
             .map_err(|_| anyhow!("the light server did not answer in time"))?
+        })
+    }
+
+    /// The height a transaction was mined at; `None` while it is unmined or unknown.
+    pub fn tx_height(server: &str, txid: &TxId) -> Result<Option<u32>> {
+        let hash = txid.as_ref().to_vec();
+        call(server, |mut c| {
+            let hash = hash.clone();
+            async move {
+                match c
+                    .get_transaction(TxFilter {
+                        block: None,
+                        index: 0,
+                        hash,
+                    })
+                    .await
+                {
+                    Ok(r) => Ok(u32::try_from(r.into_inner().height).ok().filter(|h| *h > 0)),
+                    Err(s)
+                        if s.code() == tonic::Code::NotFound || s.message().contains("No such") =>
+                    {
+                        Ok(None)
+                    }
+                    Err(s) => Err(anyhow!("get_transaction: {s}")),
+                }
+            }
         })
     }
 

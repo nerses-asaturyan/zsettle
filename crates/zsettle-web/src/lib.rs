@@ -226,6 +226,13 @@ impl Relay {
         Ok(out)
     }
 
+    /// The height a transaction was mined at, if it was.
+    async fn tx_height(&self, txid: &zcash_protocol::TxId) -> Result<Option<u32>> {
+        let b = fetch_ok(&self.url("tx", &format!("&txid={txid}")), None).await?;
+        let v: Value = serde_json::from_slice(&b).context("the relay's answer")?;
+        Ok(v["height"].as_u64().and_then(|h| u32::try_from(h).ok()))
+    }
+
     async fn info(&self) -> Result<Value> {
         let b = fetch_ok(&self.url("info", ""), None).await?;
         serde_json::from_slice(&b).context("the relay's server info")
@@ -694,10 +701,23 @@ impl WebWallet {
             Some(a) => a,
             None => {
                 progress(cb, json!({ "step": "import" }));
-                let tree = self
-                    .relay
-                    .tree_state(listings.item_birthday.saturating_sub(1))
-                    .await?;
+                // The key is scanned from the block of the oldest listed item, rounded down
+                // like a birthday, rather than from the shop's own start: a shop open for
+                // weeks would otherwise cost every new buyer a scan of all those weeks.
+                let mut oldest: Option<u32> = None;
+                for it in &listings.items {
+                    if let Ok(n) = NoteRef::from_str(&it.note) {
+                        if let Some(h) = self.relay.tx_height(&n.txid).await? {
+                            oldest = Some(oldest.map_or(h, |o| o.min(h)));
+                        }
+                    }
+                }
+                let start = match oldest {
+                    Some(h) => ((h.saturating_sub(1) / BIRTHDAY_ROUNDING) * BIRTHDAY_ROUNDING)
+                        .max(listings.item_birthday),
+                    None => listings.item_birthday,
+                };
+                let tree = self.relay.tree_state(start.saturating_sub(1)).await?;
                 let name = format!("shop {}", listings.key_fingerprint());
                 import_viewing_key_at(&mut db, network, &name, &listings.item_ufvk, tree)?
             }

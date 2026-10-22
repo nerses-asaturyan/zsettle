@@ -64,7 +64,8 @@ p { margin: 0 0 10px; }
 .btn { appearance: none; border: 1px solid var(--line-strong); background: var(--surface-2); color: var(--text); font: inherit; font-weight: 600; padding: 12px 14px; border-radius: 12px; cursor: pointer; min-height: 46px; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .btn.danger { color: var(--err); }
-.btn.link { background: none; border: none; color: var(--accent-text); padding: 8px 0; min-height: 0; font-weight: 500; }
+.btn.link { display: block; background: none; border: none; color: var(--accent-text); padding: 8px 0; min-height: 0; font-weight: 500; text-align: left; }
+.top .btn.link { display: inline-block; }
 .btn:disabled { opacity: 0.5; cursor: default; }
 .btn.block { width: 100%; }
 label { display: block; font-size: 14px; color: var(--text-2); margin-bottom: 4px; }
@@ -99,3 +100,7 @@ textarea { min-height: 96px; resize: vertical; }
 #toasts { position: fixed; left: 0; right: 0; bottom: 16px; display: flex; flex-direction: column; align-items: center; gap: 8px; z-index: 20; pointer-events: none; }
 .toast { background: var(--surface-2); border: 1px solid var(--line-strong); padding: 10px 14px; border-radius: 10px; max-width: 90vw; }
 .toast.err { border-color: var(--err); }
+.brand { display: flex; align-items: center; gap: 10px; color: var(--text); text-decoration: none; font-weight: 700; font-size: 19px; }
+.brand img { display: block; border-radius: 8px; }
+.center { text-align: center; }
+a { color: var(--accent-text); }
