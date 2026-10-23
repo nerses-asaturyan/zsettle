@@ -277,12 +277,18 @@ impl WebWallet {
             account: item_account,
             value: item_value,
             internal: false,
+            // The name goes into the new note's memo too, so a restored wallet still has it.
+            memo: meta["name"]
+                .as_str()
+                .filter(|n| !n.is_empty())
+                .map(|n| format!("zsettle item: {n}")),
         }];
         if pay_value > fee {
             outputs.push(Output {
                 account: pay_account,
                 value: pay_value - fee,
                 internal: true,
+                memo: None,
             });
         }
         let next = max_scanned_height(&db)?.unwrap_or(0) + 1;

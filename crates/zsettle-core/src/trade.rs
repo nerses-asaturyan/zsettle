@@ -308,7 +308,7 @@ pub type Input = (AccountUuid, NoteRef);
 /// the wallet treats as its own (spendable after the confirmations it asks of change); an
 /// external one goes to a fresh diversified address and is visible to whoever holds the
 /// account's viewing key, as an item note must be.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Output {
     /// The receiving account.
     pub account: AccountUuid,
@@ -316,6 +316,8 @@ pub struct Output {
     pub value: u64,
     /// Change address (internal scope) rather than a fresh external address.
     pub internal: bool,
+    /// Memo of the new note (an item note keeps its name here, so a restored wallet has it).
+    pub memo: Option<String>,
 }
 
 /// A proven transfer between accounts of one wallet. Every input is spent, every output goes
@@ -372,7 +374,12 @@ pub fn build_transfer(
                 fvk.to_ovk(Scope::External),
             )
         };
-        outs.push((ovk, to, o.value));
+        outs.push((
+            ovk,
+            to,
+            o.value,
+            memo_bytes(o.memo.as_deref().unwrap_or(""))?,
+        ));
     }
     let (anchor, paths) = db
         .with_ironwood_tree_mut::<_, _, anyhow::Error>(|tree| {
@@ -413,13 +420,13 @@ pub fn build_transfer(
                 .add_ironwood_spend::<FeeError>(fvk.clone(), n.note, path.clone())
                 .map_err(|e| anyhow!("adding spend: {e:?}"))?;
         }
-        for (ovk, to, value) in &outs {
+        for (ovk, to, value, memo) in &outs {
             builder
                 .add_ironwood_output::<FeeError>(
                     Some(ovk.clone()),
                     *to,
                     Zatoshis::from_u64(*value).map_err(|_| anyhow!("value"))?,
-                    MemoBytes::empty(),
+                    memo.clone(),
                 )
                 .map_err(|e| anyhow!("adding output: {e:?}"))?;
         }
@@ -489,6 +496,7 @@ pub fn build_self_spend(
             account,
             value: value - fee,
             internal: true,
+            memo: None,
         }],
         min_confirmations,
         false,

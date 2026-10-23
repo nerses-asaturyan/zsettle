@@ -845,16 +845,24 @@ fn main() -> Result<()> {
                     fee + ZIP317_MARGINAL_FEE
                 ));
             };
+            // The item's name stays in the new note's memo, as in the note it leaves.
+            let item_memo = zsettle_core::mint::unspent_notes(&wallet, &db, item_account)?
+                .into_iter()
+                .find(|n| n.note == item_note)
+                .and_then(|n| n.memo)
+                .filter(|m| m.starts_with("zsettle item: "));
             let mut outputs = vec![zsettle_core::trade::Output {
                 account: item_account,
                 value: item_value,
                 internal: false,
+                memo: item_memo,
             }];
             if payout_value > fee {
                 outputs.push(zsettle_core::trade::Output {
                     account: payout_account,
                     value: payout_value - fee,
                     internal: true,
+                    memo: None,
                 });
             }
             let seed = wallet.seed(identity.as_deref())?;

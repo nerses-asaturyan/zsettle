@@ -1291,6 +1291,7 @@ fn main() -> Result<()> {
                     account,
                     value: total - fee,
                     internal: true,
+                    memo: None,
                 }],
                 min_confirmations,
                 false,
