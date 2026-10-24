@@ -41,7 +41,7 @@ use zsettle_core::{
     trade::{build_self_spend, build_trade, TradeRequest},
     wallet::{
         account_birthday, account_orchard_fvk, find_account_by_ufvk, heights,
-        import_viewing_key_at, largest_spendable_note, list_accounts, max_scanned_height,
+        import_viewing_key_at, largest_confirmed_note, list_accounts, max_scanned_height,
         parse_account, record_transaction, release_note, reservations, reserve_note,
         reserved_notes, scanned_tip, MemBlockCache, NoteRef, Wallet, WalletAccount,
         BIRTHDAY_ROUNDING,
@@ -741,6 +741,7 @@ impl WebWallet {
                 to: to.trim().to_string(),
                 value_zat: amount_zat,
                 memo: memo.filter(|m| !m.is_empty()),
+                min_confirmations: Some(1),
             },
         )?;
         self.relay.send(&bytes).await?;
@@ -958,12 +959,23 @@ impl WebWallet {
         if expiry == 0 {
             return Err(anyhow!("the shop allows no expiry"));
         }
-        let (target, _) = heights(&db, MIN_CONFIRMATIONS)?;
+        let (target, _) = heights(&db, ANCHOR_CONFIRMATIONS)?;
         let target_height = u32::from(BlockHeight::from(target));
         self.relay.check_consensus(network, target_height).await?;
         let reserved = reserved_notes(&self.wallet, target_height)?;
-        let paying = largest_spendable_note(&db, buyer, target, &reserved)?.ok_or_else(|| {
-            anyhow!("no note can pay yet: money received needs 10 confirmations and change 3; notes held for an earlier offer are skipped")
+        // Coins can pay from their first confirmation. A note a few blocks deep is taken when
+        // there is one: the trade's anchor is then a block every shop has already scanned. A
+        // note from the latest block needs the anchor at the tip, and a shop that has not seen
+        // that block yet answers after its next sync.
+        let mut paying = None;
+        for confirmations in [ANCHOR_CONFIRMATIONS, 1] {
+            if let Some(n) = largest_confirmed_note(&db, buyer, target, &reserved, confirmations)? {
+                paying = Some((n, confirmations));
+                break;
+            }
+        }
+        let (paying, confirmations) = paying.ok_or_else(|| {
+            anyhow!("no coins can pay yet: coins can be spent once they are in a block; coins held for an earlier offer are skipped")
         })?;
         let req = TradeRequest {
             buyer_account: buyer,
@@ -973,7 +985,7 @@ impl WebWallet {
             seller_address: listings.payout_address.clone(),
             price_zat: listed.price_zat,
             expiry_delta: expiry,
-            min_confirmations: MIN_CONFIRMATIONS,
+            min_confirmations: confirmations,
             memo: String::new(),
             item_memo: if listed.name.is_empty() {
                 String::new()
@@ -1141,7 +1153,8 @@ impl WebWallet {
 }
 
 /// Confirmations a buyer's paying note needs, as the command-line `buy` asks by default.
-const MIN_CONFIRMATIONS: u32 = 3;
+/// How deep a trade's anchor sits when the paying note allows it: a block every shop has seen.
+const ANCHOR_CONFIRMATIONS: u32 = 3;
 
 const ITEM_META_TABLE: &str =
     "CREATE TABLE IF NOT EXISTS zsettle_item_meta (note TEXT PRIMARY KEY, meta TEXT NOT NULL)";

@@ -253,6 +253,9 @@ pub struct PayRequest {
     pub value_zat: u64,
     /// Optional text memo.
     pub memo: Option<String>,
+    /// Confirmations every spent note needs; `None` is ZIP 315's (3 for change, 10 for money
+    /// from others).
+    pub min_confirmations: Option<u32>,
 }
 
 /// Mint items: one note per name, each at a fresh address of the item account with the name
@@ -300,7 +303,8 @@ pub fn mint(
         );
     }
     let request = TransactionRequest::new(payments).map_err(|e| anyhow!("payment request: {e}"))?;
-    let (bytes, txid) = pay_request(wallet, db, seed, from_account, from_account_index, request)?;
+    let (bytes, txid) =
+        pay_request(wallet, db, seed, from_account, from_account_index, request, None)?;
     let indices = item_output_indices(wallet, db, &bytes, item_account, &names)?;
     Ok((bytes, txid, indices))
 }
@@ -367,6 +371,7 @@ pub fn pay(
         to,
         value_zat,
         memo,
+        min_confirmations,
     } = req.clone();
     let memo = memo
         .map(|m| Memo::from_str(&m).map_err(|e| anyhow!("memo: {e}")))
@@ -392,7 +397,15 @@ pub fn pay(
     .map_err(|e| anyhow!("invalid payment: {e:?}"))?;
     let request =
         TransactionRequest::new(vec![payment]).map_err(|e| anyhow!("payment request: {e}"))?;
-    pay_request(wallet, db, seed, from_account, from_account_index, request)
+    pay_request(
+        wallet,
+        db,
+        seed,
+        from_account,
+        from_account_index,
+        request,
+        min_confirmations,
+    )
 }
 
 /// Pay a whole request from an account of this wallet (the library proposes, proves and
@@ -404,6 +417,7 @@ fn pay_request(
     from_account: AccountUuid,
     from_account_index: u32,
     request: TransactionRequest,
+    min_confirmations: Option<u32>,
 ) -> Result<(Vec<u8>, String)> {
     #[cfg(feature = "native")]
     let prover = LocalTxProver::bundled();
@@ -428,7 +442,10 @@ fn pay_request(
             &input_selector,
             &change_strategy,
             request,
-            ConfirmationsPolicy::default(),
+            min_confirmations.map_or_else(
+                ConfirmationsPolicy::default,
+                crate::wallet::confirmations_policy,
+            ),
             &SpendPolicy::default(),
             None,
             None,

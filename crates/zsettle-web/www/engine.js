@@ -18,6 +18,11 @@ const E = {
   nextJob: 1,
   dead: null,
   warm: false,
+  started: null, // the engine starting: calls wait for it
+  syncs: 0, // syncs running now
+  syncProgress: null, // the running sync's { scanned, tip }
+  pendingPasskey: null, // a passkey made but not yet read: { network, lock }
+  locks: {}, // how each stored wallet is locked, read with the list of wallets
   shop: { open: false, code: null, timer: null, events: [], busy: false, lastSync: 0 },
 };
 
@@ -29,27 +34,40 @@ let queue = Promise.resolve();
 
 // Calls run one after another: the wallet database has one writer.
 function call(op, args = [], onProgress) {
-  const run = () =>
-    new Promise((resolve, reject) => {
+  const run = async () => {
+    await E.started;
+    return new Promise((resolve, reject) => {
       if (E.dead) return reject(new Error(E.dead));
       const id = nextId++;
       pending.set(id, { resolve, reject, onProgress, worker: E.worker });
       E.worker.postMessage({ id, op, args });
     });
+  };
   const p = queue.then(run, run);
   queue = p.catch(() => {});
   return p;
 }
 
-export async function start() {
-  if (!self.crossOriginIsolated) throw new Error('This browser cannot run the wallet here (the page is not isolated). Try a current Chrome, Safari, Firefox or Edge.');
-  const module = await WebAssembly.compileStreaming(fetch('/pkg/zsettle_web_bg.wasm'));
-  const exports = await init({ module_or_path: module });
-  await initThreadPool(Math.max(2, Math.min(navigator.hardwareConcurrency || 4, 8)));
-  // The wallet's worker, and a helper that builds the proving key in the background: they
-  // share the module and the memory, so the key the helper builds is the one trades use.
-  E.worker = await spawn(module, exports.memory);
-  E.helper = await spawn(module, exports.memory);
+/**
+ * Start the engine: download and compile the module, start its threads and workers. The page
+ * can show the unlock screen meanwhile (stored wallets are read without the engine); every
+ * call into the wallet waits for this.
+ */
+export function start() {
+  if (!E.started) {
+    E.started = (async () => {
+      if (!self.crossOriginIsolated) throw new Error('This browser cannot run the wallet here (the page is not isolated). Try a current Chrome, Safari, Firefox or Edge.');
+      const module = await WebAssembly.compileStreaming(fetch('/pkg/zsettle_web_bg.wasm'));
+      const exports = await init({ module_or_path: module });
+      await initThreadPool(Math.max(2, Math.min(navigator.hardwareConcurrency || 4, 8)));
+      // The wallet's worker, and a helper that builds the proving key in the background:
+      // they share the module and the memory, so the key the helper builds is the one
+      // trades use.
+      E.worker = await spawn(module, exports.memory);
+      E.helper = await spawn(module, exports.memory);
+    })();
+  }
+  return E.started;
 }
 
 function spawn(module, memory) {
@@ -86,8 +104,12 @@ function spawn(module, memory) {
   });
 }
 
+// The proving key takes a while to build and competes with every other wallet call for the
+// same memory, so it is built only once a shop is open, the wallet is idle and the page is
+// in front (a page in the background gets little time, and the build would hold up the
+// wallet for minutes).
 function warmUp() {
-  if (E.warm) return;
+  if (E.warm || !document.hasFocus() || E.syncs || pending.size) return;
   E.warm = true;
   const id = nextId++;
   pending.set(id, { resolve() {}, reject() {} });
@@ -160,7 +182,7 @@ async function unseal(key, box) {
 }
 
 // Passkeys: the PRF output, never stored, is the key's secret.
-const NO_PRF = 'This passkey cannot derive a key. Use a passphrase, or a passkey saved in Chrome, Edge, Safari or a recent Firefox.';
+const NO_PRF = 'This passkey cannot make a key for the wallet. Save the passkey in Google Password Manager (Android) or iCloud Keychain (iPhone), or use a passphrase.';
 
 async function passkeyCreate(network) {
   const salt = crypto.getRandomValues(new Uint8Array(32));
@@ -173,7 +195,9 @@ async function passkeyCreate(network) {
         { type: 'public-key', alg: -7 },
         { type: 'public-key', alg: -257 },
       ],
-      authenticatorSelection: { residentKey: 'discouraged', userVerification: 'required' },
+      // A discoverable passkey: on Android only those are kept by the password manager,
+      // which is what derives a key (PRF); others go to a module that cannot.
+      authenticatorSelection: { residentKey: 'required', requireResidentKey: true, userVerification: 'required' },
       extensions: { prf: { eval: { first: salt } } },
     },
   });
@@ -182,9 +206,26 @@ async function passkeyCreate(network) {
   let secret = ext.results && ext.results.first;
   if (!secret) {
     if (ext.enabled === false) throw new Error(NO_PRF);
-    secret = await passkeySecret(lock);
+    // Some browsers derive the key only when the passkey is used, and Safari lets a page
+    // use it only right after a tap: keep it, and read it on the next tap.
+    E.pendingPasskey = { network, lock };
+    try {
+      secret = await passkeySecret(lock);
+    } catch (e) {
+      if (e.name === 'NotAllowedError') throw new Error(PASSKEY_AGAIN);
+      throw e;
+    }
   }
+  E.pendingPasskey = null;
   return { lock, key: await keyFromSecret(secret) };
+}
+const PASSKEY_AGAIN = 'Your passkey is saved. Tap “Lock with a passkey” once more to finish.';
+// The passkey made by a first tap whose key could not be read then.
+async function passkeyAgain(network) {
+  const { lock } = E.pendingPasskey;
+  const key = await keyFromSecret(await passkeySecret(lock));
+  E.pendingPasskey = null;
+  return { lock, key };
 }
 async function passkeySecret(lock) {
   const a = await navigator.credentials.get({
@@ -254,7 +295,10 @@ export async function wallets() {
   const out = [];
   for (const n of ['test', 'main']) {
     const r = await idbGet(KEY(n));
-    if (r) out.push({ network: r.network, lock: r.lock.kind, opened: r.opened || 0, birthday: r.birthday });
+    if (r) {
+      E.locks[n] = r.lock;
+      out.push({ network: r.network, lock: r.lock.kind, opened: r.opened || 0, birthday: r.birthday });
+    }
   }
   return out.sort((a, b) => b.opened - a.opened);
 }
@@ -271,7 +315,7 @@ export const checkAddress = (address) => call('checkAddress', [E.record ? E.reco
  */
 export async function create({ network, phrase, birthday = 0, lock, passphrase }) {
   let made;
-  if (lock === 'passkey') made = await passkeyCreate(network);
+  if (lock === 'passkey') made = E.pendingPasskey && E.pendingPasskey.network === network ? await passkeyAgain(network) : await passkeyCreate(network);
   else {
     if (!passphrase || passphrase.length < 12) throw new Error('use a passphrase of 12 characters or more');
     const salt = crypto.getRandomValues(new Uint8Array(16));
@@ -296,9 +340,13 @@ export async function create({ network, phrase, birthday = 0, lock, passphrase }
 }
 
 export async function unlock(network, passphrase) {
+  // The passkey prompt comes first, straight from the tap: Safari shows it only then. The
+  // lock was read with the list of wallets.
+  const lock = E.locks[network] || ((await idbGet(KEY(network))) || {}).lock;
+  if (!lock) throw new Error('this browser holds no wallet for that network');
+  const key = await keyOf({ lock }, passphrase);
   const record = await idbGet(KEY(network));
   if (!record) throw new Error('this browser holds no wallet for that network');
-  const key = await keyOf(record, passphrase);
   let db;
   try {
     db = await unseal(key, record.db);
@@ -408,26 +456,38 @@ function shopPath(url) {
   return u.pathname.replace(/\/$/, '');
 }
 
+const blocks = (p) => 'block ' + p.scanned.toLocaleString('en') + ' of ' + p.tip.toLocaleString('en');
+const CATCHING_UP = 'Catching up with the chain';
+
+// What the buyer sees of a purchase: five steps, some made of several of the wallet's.
 const BUY_STEPS = {
-  listings: 'Checking the shop’s signed price list',
-  import: 'Adding the shop’s item key',
-  sync: 'Finding the item on chain',
-  prove: 'Building and proving the trade in your browser',
-  offer: 'Handing the shop its copy',
-  wait: 'Waiting for the shop’s signature',
-  sign: 'Signing your payment',
-  send: 'Sending the transaction',
+  listings: 'Checking the shop',
+  import: 'Checking the shop',
+  sync: CATCHING_UP,
+  prove: 'Building the trade on your device',
+  offer: 'Waiting for the shop to sign',
+  wait: 'Waiting for the shop to sign',
+  sign: 'Sending',
+  send: 'Sending',
 };
 
-async function syncNow() {
-  const r = await call('sync', [], (p) => {
-    if (p && p.scanned && p.tip) E.syncProgress = p;
-  });
-  E.syncProgress = null;
+async function syncNow(onProgress) {
+  E.syncs++;
+  let r;
+  try {
+    r = await call('sync', [], (p) => {
+      if (p && p.scanned && p.tip) {
+        E.syncProgress = p;
+        if (onProgress) onProgress(p);
+      }
+    });
+  } finally {
+    E.syncs--;
+    if (!E.syncs) E.syncProgress = null;
+  }
   E.cfg.last_sync = { report: r, at: now() };
   await saveDb();
   await saveCfg();
-  warmUp();
   await reconcileSales();
   return r;
 }
@@ -479,6 +539,9 @@ function status() {
     shop: { running: E.shop.open, listen: null, public: shopUrl() },
     public_shop: shopUrl(),
     last_sync: E.cfg.last_sync,
+    // A sync running now, the page's own or one started here (a shop's key to scan).
+    syncing: E.syncs > 0,
+    sync_progress: E.syncProgress,
     has_listings: !!E.cfg.listings,
     faucet: E.record.network === 'test' && !E.cfg.faucetAt,
   };
@@ -494,23 +557,27 @@ async function market(url) {
     await saveCfg();
   }
   syncInBackground();
+  // The visitor may buy here: build the proving key once the shop's items are found.
+  bgSync.then(warmUp);
   return { base, network: l.network, fingerprint: l.item_ufvk.slice(-24), payout_address: l.payout_address, issued_at: l.issued_at, items: l.items, own: false };
 }
 
 // A call that needs the wallet waits for a sync in progress; say so, with the blocks left.
+// Returns whether it waited.
 async function afterSync(step) {
-  if (!bgSync) return;
-  step('First the wallet finishes syncing');
+  if (!bgSync) return false;
+  step(CATCHING_UP);
   const t = setInterval(() => {
     const p = E.syncProgress;
-    if (p) step.update('First the wallet finishes syncing: block ' + p.scanned.toLocaleString('en') + ' of ' + p.tip.toLocaleString('en'));
+    if (p) step.update(CATCHING_UP + ': ' + blocks(p));
   }, 1000);
   try {
     await bgSync;
   } finally {
     clearInterval(t);
-    step.update('The wallet is in sync');
+    step.update(CATCHING_UP);
   }
+  return true;
 }
 
 // A sync after a shop's key was added scans for its items while the visitor looks around.
@@ -553,7 +620,7 @@ export async function api(path, body) {
     case 'POST /api/sync':
       return job('sync', async (step) => {
         step('Syncing with the network');
-        return syncNow();
+        return syncNow((p) => step.update('Syncing with the network: ' + blocks(p)));
       });
     case 'POST /api/faucet':
       return job('faucet', async (step) => {
@@ -585,20 +652,23 @@ export async function api(path, body) {
     case 'POST /api/buy':
       return job('buy', async (step) => {
         const phrase = await takePhrase();
-        await afterSync(step);
+        let last = (await afterSync(step)) ? CATCHING_UP : null;
         const path = shopPath(body.url);
         // The price and address the buyer confirmed: the purchase stops if the shop's signed
         // list says otherwise by the time the trade is built.
         const l = await call('prepareShop', [path]);
         const it = (l.items || []).find((i) => i.note === body.item);
         if (!it) throw new Error('the shop no longer lists this item');
-        let last = null;
         let r;
         try {
           r = await call('buy', [phrase, path, body.item, it.price_zat, l.payout_address], (p) => {
-            if (p && p.step && p.step !== last && BUY_STEPS[p.step]) {
-              last = p.step;
-              step(BUY_STEPS[p.step]);
+            if (!p) return;
+            const label = BUY_STEPS[p.step];
+            if (label && label !== last) {
+              last = label;
+              step(label);
+            } else if (p.scanned && p.tip && last === CATCHING_UP) {
+              step.update(CATCHING_UP + ': ' + blocks(p));
             }
           });
         } catch (e) {

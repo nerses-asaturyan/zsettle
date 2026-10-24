@@ -741,6 +741,7 @@ fn main() -> Result<()> {
                 to,
                 value_zat: amount,
                 memo,
+                min_confirmations: None,
             };
             let (bytes, txid) = zsettle_core::mint::pay(&w, &mut db, &seed, &req)?;
             let response = zsettle_core::broadcast::send_raw_transaction_blocking(&server, bytes)?;

@@ -21,6 +21,7 @@ use rand::rngs::ThreadRng;
 use secrecy::Zeroize;
 use secrecy::{ExposeSecret, SecretVec};
 use serde::{Deserialize, Serialize};
+use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 #[cfg(feature = "native")]
 use zcash_client_backend::data_api::{chain::BlockCache, scanning::ScanRange};
 use zcash_client_backend::data_api::{
@@ -944,21 +945,49 @@ pub fn find_account_by_ufvk(
     Ok(None)
 }
 
-/// The largest spendable Ironwood note of an account that is not in `exclude`, if any.
+/// The largest spendable Ironwood note of an account that is not in `exclude`, if any, under
+/// ZIP 315's confirmations (3 for the wallet's own change, 10 for money from others).
 pub fn largest_spendable_note(
     db: &Db,
     account: AccountUuid,
     target_height: TargetHeight,
     exclude: &[NoteRef],
 ) -> Result<Option<NoteRef>> {
-    use zcash_client_backend::data_api::{wallet::ConfirmationsPolicy, MaxSpendMode, TargetValue};
+    largest_note_under(db, account, target_height, exclude, ConfirmationsPolicy::default())
+}
+
+/// [`largest_spendable_note`] for notes with at least `confirmations`, whoever sent them.
+pub fn largest_confirmed_note(
+    db: &Db,
+    account: AccountUuid,
+    target_height: TargetHeight,
+    exclude: &[NoteRef],
+    confirmations: u32,
+) -> Result<Option<NoteRef>> {
+    largest_note_under(db, account, target_height, exclude, confirmations_policy(confirmations))
+}
+
+/// The same number of confirmations for every note, whoever sent it.
+pub fn confirmations_policy(confirmations: u32) -> ConfirmationsPolicy {
+    let min = NonZeroU32::new(confirmations.max(1)).expect("non-zero");
+    ConfirmationsPolicy::new_symmetrical(min, false)
+}
+
+fn largest_note_under(
+    db: &Db,
+    account: AccountUuid,
+    target_height: TargetHeight,
+    exclude: &[NoteRef],
+    policy: ConfirmationsPolicy,
+) -> Result<Option<NoteRef>> {
+    use zcash_client_backend::data_api::{MaxSpendMode, TargetValue};
     let notes = db
         .select_spendable_notes(
             account,
             TargetValue::AllFunds(MaxSpendMode::MaxSpendable),
             &[ShieldedPool::Ironwood],
             target_height,
-            ConfirmationsPolicy::default(),
+            policy,
             &[],
             LockFilter::Unfiltered,
         )

@@ -618,6 +618,7 @@ fn main() -> Result<()> {
                 to,
                 value_zat: amount,
                 memo,
+                min_confirmations: None,
             };
             let (bytes, txid) = zsettle_core::mint::pay(&wallet, &mut db, &seed, &req)?;
             if let Some(p) = &tx_out {

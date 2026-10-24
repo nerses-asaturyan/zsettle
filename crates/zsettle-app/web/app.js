@@ -11,11 +11,18 @@ const LINKS = {
 const EXPLORER = { main: 'https://zecblock.com/tx/', test: 'https://testnet.zecblock.com/tx/' };
 const FEE_ZAT = 15000; // a three-action trade or payment under ZIP 317
 const ITEM_ZAT = 1000; // the value of an item note
-// Confirmations the wallet asks for before it spends a note: 10 for a note from another
-// wallet, 3 for the wallet's own change. This is ZIP 315's recommended policy, the wallet
-// library's default, not a network rule: the wait guards against a chain reorganisation
-// undoing the transaction that paid you.
-const CONFS = { other: 10, change: 3 };
+// Confirmations the wallet asks for before it spends a note. The wallet in the browser spends
+// from the first: a trade is one transaction, so a chain reorganisation that undid the coins
+// paying for it would undo the trade with them. The wallet zsettle-app runs keeps ZIP 315's
+// policy, the wallet library's default: 10 for a note from another wallet, 3 for its own
+// change.
+const confs = () => (S.engine ? { other: 1, change: 1 } : { other: 10, change: 3 });
+// When received coins can be spent, in words.
+function spendAfter() {
+  const c = confs();
+  if (c.other === 1) return 'Coins can be spent once they are in a block, about a minute after they are sent.';
+  return 'Coins from another wallet can be spent after ' + c.other + ' confirmations, about ' + minutesFor(c.other) + ' minutes.';
+}
 const BLOCK_SECS = { main: 75, test: 25 };
 // An ownership proof is accepted for about this many minutes after the block it names
 // (40 blocks before NU7, 120 from NU7).
@@ -217,7 +224,7 @@ function maturity(w) {
   const rows = ((w && w.notes) || [])
     .filter((n) => n.mined && tip)
     .map((n) => {
-      const need = n.change ? CONFS.change : CONFS.other;
+      const need = n.change ? confs().change : confs().other;
       const have = Math.max(0, tip - n.mined + 1);
       return { value: n.value_zat, need, have, left: Math.max(0, need - have) };
     })
@@ -245,7 +252,9 @@ function spendWarning(zat) {
 function confirmingNote() {
   const m = maturity(S.wallet);
   if (m.zat) return zec(m.zat) + ' is still confirming (' + m.have + ' of ' + m.need + ' confirmations); it can be spent in about ' + m.minutes + ' min.';
-  return 'A note from another wallet is spendable after ' + CONFS.other + ' confirmations, your own change after ' + CONFS.change + '.';
+  const c = confs();
+  if (c.other === 1) return 'Coins can be spent once they are in a block.';
+  return 'A note from another wallet is spendable after ' + c.other + ' confirmations, your own change after ' + c.change + '.';
 }
 
 async function api(path, body) {
@@ -538,12 +547,15 @@ async function boot() {
       // The wallet runs in this page: keys, proofs and signatures stay on this device.
       S.hosted = hello;
       render(h('div', { class: 'boot' }, h('div', { class: 'spinner', 'aria-label': 'Starting the wallet' }), h('p', { class: 'small muted' }, 'Starting the wallet in your browser…')));
+      const cannotRun = (e) => render(h('div', { class: 'onboard' }, h('div', { class: 'panel card stack' }, h('div', { class: 'hero' }, logo(), h('h1', null, 'This browser cannot run the wallet')), h('p', { class: 'err' }, human(e.message)), h('p', { class: 'small muted' }, 'Use a current Chrome, Safari, Firefox or Edge, outside other apps.'), linksRow())));
       try {
         S.engine = await import('/engine.js');
-        await S.engine.start();
       } catch (e) {
-        return render(h('div', { class: 'onboard' }, h('div', { class: 'panel card stack' }, h('div', { class: 'hero' }, logo(), h('h1', null, 'This browser cannot run the wallet')), h('p', { class: 'err' }, human(e.message)), h('p', { class: 'small muted' }, 'Use a current Chrome, Safari, Firefox or Edge, outside other apps.'), linksRow())));
+        return cannotRun(e);
       }
+      // The engine downloads and starts while the visitor looks at the unlock screen; the
+      // first call into the wallet waits for it.
+      S.engine.start().catch(cannotRun);
       return refresh();
     }
   } catch {
@@ -583,16 +595,46 @@ async function refresh() {
 function startTimers() {
   S.timers.forEach(clearInterval);
   S.timers = [setInterval(backgroundSync, SYNC_EVERY_MS), setInterval(pollShop, 3000)];
+  if (S.engine) S.timers.push(setInterval(watchSync, 2000));
   backgroundSync();
 }
 
+// A page in the background gets little time on a phone or laptop, so it syncs only while it
+// is in front; coming back starts a sync at once if the last one is old.
+function syncOnReturn() {
+  if (document.hidden || !document.hasFocus()) return;
+  const at = S.status && S.status.last_sync && S.status.last_sync.at;
+  if (!at || Date.now() / 1000 - at > 20) backgroundSync();
+}
+window.addEventListener('focus', syncOnReturn);
+document.addEventListener('visibilitychange', syncOnReturn);
+
+// The wallet in the browser may sync by itself (a shop's key to scan): follow it in the chip
+// and in the wallet's catching-up line.
+async function watchSync() {
+  if (!S.status || !S.status.unlocked || document.hidden) return;
+  try {
+    S.status = await api('/api/status');
+  } catch {
+    return;
+  }
+  updateSyncChip();
+  const line = document.getElementById('catchup');
+  if (line) line.textContent = catchUpText();
+}
+function catchUpText() {
+  const p = S.status && S.status.sync_progress;
+  if (!(S.syncing || (S.status && S.status.syncing))) return '';
+  return p && p.tip > p.scanned ? 'Catching up with the chain: ' + (p.tip - p.scanned).toLocaleString('en') + ' blocks left' : 'Catching up with the chain…';
+}
+
 async function backgroundSync() {
-  if (S.syncing || S.busy || document.hidden || !S.status || !S.status.unlocked) return;
+  if (S.syncing || S.busy || document.hidden || !document.hasFocus() || !S.status || !S.status.unlocked) return;
   S.syncing = true;
   updateSyncChip();
   try {
     const { job } = await api('/api/sync', {});
-    await follow(job);
+    await follow(job, S.engine ? watchSync : null);
     S.status = await api('/api/status');
     if (!document.querySelector('#layer .scrim') && !isTyping()) loadView(true);
   } catch {
@@ -933,12 +975,16 @@ const VIEWS = [
 function syncChip() {
   const st = S.status || {};
   const at = st.last_sync && st.last_sync.at;
-  const label = S.syncing ? 'Syncing…' : at ? 'Synced ' + ago(at) : 'Not synced';
-  return h('button', { class: 'chip sync ' + (S.syncing ? 'info' : at ? 'ok' : 'warn'), id: 'syncchip', onclick: openSyncInfo, title: label + ' · tap for details', 'aria-label': label + '. Network details' }, S.syncing ? h('span', { class: 'spinner sm' }) : h('span', { class: 'dot' }), h('span', { class: 'lbl' }, label));
+  const busy = S.syncing || st.syncing;
+  const p = st.sync_progress;
+  const left = busy && p && p.tip > p.scanned ? p.tip - p.scanned : 0;
+  const label = busy ? (left ? 'Syncing · ' + left.toLocaleString('en') + ' left' : 'Syncing…') : at ? 'Synced ' + ago(at) : 'Not synced';
+  return h('button', { class: 'chip sync ' + (busy ? 'info' : at ? 'ok' : 'warn'), id: 'syncchip', onclick: openSyncInfo, title: label + (left ? ' blocks' : '') + ' · tap for details', 'aria-label': label + (left ? ' blocks' : '') + '. Network details' }, busy ? h('span', { class: 'spinner sm' }) : h('span', { class: 'dot' }), h('span', { class: 'lbl' }, label));
 }
 function updateSyncChip() {
   const old = document.getElementById('syncchip');
-  if (old) old.replaceWith(syncChip());
+  const chip = syncChip();
+  if (old && old.title !== chip.title) old.replaceWith(chip);
 }
 
 // What the dot in the top bar means: the wallet's view of the chain, and how fresh it is.
@@ -953,11 +999,11 @@ function openSyncInfo() {
         'div',
         { class: 'summary' },
         h('div', { class: 'r' }, h('span', null, 'Chain'), h('span', null, st.network === 'main' ? 'Zcash mainnet' : 'Zcash testnet')),
-        h('div', { class: 'r' }, h('span', null, 'Last synced'), h('span', null, S.syncing ? 'Syncing now…' : at ? ago(at) : 'Not yet')),
+        h('div', { class: 'r' }, h('span', null, 'Last synced'), h('span', null, S.syncing || st.syncing ? 'Syncing now…' : at ? ago(at) : 'Not yet')),
         rep.chain_tip ? h('div', { class: 'r' }, h('span', null, 'Block height'), h('span', { class: 'mono' }, String(rep.chain_tip))) : null,
         rep.server ? h('div', { class: 'r' }, h('span', null, 'Server'), h('span', { class: 'mono' }, String(rep.server).replace(/^https?:\/\//, ''))) : null,
       ),
-      h('p', { class: 'small muted' }, (S.status.browser ? 'Syncing fetches new blocks through this site from a lightwalletd server and scans them in your browser with your viewing keys.' : 'Syncing fetches new blocks from a lightwalletd server and scans them with your viewing keys.') + ' That is how the wallet learns which coins and items it holds and how many confirmations each has. It runs by itself every few seconds while this page is open; the dot is green when the last sync succeeded.'),
+      h('p', { class: 'small muted' }, (S.status.browser ? 'Syncing fetches new blocks through this site from a lightwalletd server and scans them in your browser with your viewing keys.' : 'Syncing fetches new blocks from a lightwalletd server and scans them with your viewing keys.') + ' That is how the wallet learns which coins and items it holds and how many confirmations each has. It runs by itself every minute while this page is in front, and as soon as you come back to it; the dot is green when the last sync succeeded.'),
     ],
     foot: [h('button', { class: 'btn primary', onclick: () => { sh.close(); backgroundSync(); } }, 'Sync now')],
   });
@@ -1049,10 +1095,13 @@ function go(view, push = true) {
   document.querySelectorAll('.sidenav, .navbtn').forEach((b, i) => {
     if (VIEWS[i % 4][0] === view) b.setAttribute('aria-current', 'page');
   });
+  // What the page last knew draws at once; the wallet's answer redraws it. A wallet busy with
+  // a long sync can take a while to answer.
+  const known = { wallet: S.wallet && S.activity, sell: S.wallet && S.shop, activity: S.activity, market: S.shops }[view];
   const c = document.getElementById('content');
-  if (c) c.replaceChildren(skeleton());
+  if (c) c.replaceChildren(known ? { wallet: viewWallet, market: viewMarket, sell: viewSell, activity: viewActivity }[view]() : skeleton());
   window.scrollTo({ top: 0 });
-  loadView();
+  loadView(!!known);
 }
 
 async function lock() {
@@ -1085,6 +1134,11 @@ function skeleton() {
 
 async function loadView(quiet) {
   const view = S.view;
+  // An empty page that stays empty: say why.
+  const slow = setTimeout(() => {
+    const c = document.getElementById('content');
+    if (S.view === view && c && c.querySelector('.sk') && !c.querySelector('.busy-note')) c.prepend(h('p', { class: 'small muted busy-note' }, 'The wallet is busy catching up with the chain. This page fills in when it is done.'));
+  }, 2500);
   try {
     if (view === 'wallet') {
       const [w, a] = await Promise.all([api('/api/wallet'), api('/api/activity')]);
@@ -1102,6 +1156,8 @@ async function loadView(quiet) {
     }
   } catch (e) {
     if (!quiet) toast(human(e.message), 'err');
+  } finally {
+    clearTimeout(slow);
   }
   if (S.view !== view) return;
   const c = document.getElementById('content');
@@ -1160,6 +1216,7 @@ function viewWallet() {
       { class: 'balance-card', 'aria-label': 'Balance' },
       h('div', { class: 'label' }, 'Balance'),
       h('div', { class: 'amount' }, zec(w.balance_zat, { bare: true }), h('small', null, 'ZEC')),
+      S.engine ? h('div', { class: 'small muted', id: 'catchup', 'aria-live': 'polite' }, catchUpText()) : null,
       h(
         'div',
         { class: 'small muted' },
@@ -1189,7 +1246,7 @@ function viewWallet() {
             { class: 'empty' },
             h('div', { class: 'ico' }, icon('wallet')),
             h('h3', null, 'Fund your wallet'),
-            h('p', null, (S.status.network === 'test' ? 'Press Receive, then paste the address into a Zcash testnet faucet.' : 'Press Receive and send ZEC from any shielded Zcash wallet.') + ' Coins from another wallet can be spent after ' + CONFS.other + ' confirmations, about ' + minutesFor(CONFS.other) + ' minutes.'),
+            h('p', null, (S.status.network === 'test' ? 'Press Receive, then paste the address into a Zcash testnet faucet.' : 'Press Receive and send ZEC from any shielded Zcash wallet.') + ' ' + spendAfter()),
             h('button', { class: 'btn primary', onclick: () => openReceive() }, icon('down'), 'Show my address'),
           ),
         )
@@ -1232,7 +1289,7 @@ async function watchFaucet(f) {
 
 async function getCoins() {
   const sh = sheet({ title: 'Free test coins', body: [] });
-  await runInSheet(sh, '/api/faucet', {}, { total: 1, success: (r) => ({ title: 'On their way', text: zec(r.amount_zat) + ' arrives in about a minute and can be spent after ' + CONFS.other + ' confirmations, about ' + minutesFor(CONFS.other) + ' minutes later.', extra: txRow(r.txid) }), failTitle: 'No coins this time' });
+  await runInSheet(sh, '/api/faucet', {}, { total: 1, success: (r) => ({ title: 'On their way', text: zec(r.amount_zat) + (confs().other === 1 ? ' arrives with the next block, in about a minute, and can be spent then.' : ' arrives in about a minute and can be spent after ' + confs().other + ' confirmations, about ' + minutesFor(confs().other) + ' minutes later.'), extra: txRow(r.txid) }), failTitle: 'No coins this time' });
   S.status = await api('/api/status');
   loadView(true);
 }
@@ -1475,7 +1532,7 @@ async function openReceive(given, first) {
     first ? h('p', { class: 'muted' }, 'Fund it by sending ZEC to this address.') : h('p', { class: 'muted' }, 'A fresh address each time: none of them can be linked to the others.'),
     qr,
     h('div', { class: 'addr mono' }, addr),
-    h('div', { class: 'callout info' }, icon('info'), h('span', null, S.status.network === 'test' ? (S.status.faucet ? 'Testnet coins are free: press Get coins on the Wallet tab, or paste this address into a Zcash testnet faucet.' : 'Testnet coins are free: paste this address into a Zcash testnet faucet.') : 'Only shielded payments reach this address. Coins from another wallet can be spent after ' + CONFS.other + ' confirmations, about ' + minutesFor(CONFS.other) + ' minutes.')),
+    h('div', { class: 'callout info' }, icon('info'), h('span', null, S.status.network === 'test' ? (S.status.faucet ? 'Testnet coins are free: press Get coins on the Wallet tab, or paste this address into a Zcash testnet faucet.' : 'Testnet coins are free: paste this address into a Zcash testnet faucet.') : 'Only shielded payments reach this address. ' + spendAfter())),
   );
   sh.setFoot(
     navigator.share ? h('button', { class: 'btn', onclick: () => navigator.share({ text: addr }).catch(() => {}) }, icon('share'), 'Share') : null,
