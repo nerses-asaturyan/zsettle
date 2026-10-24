@@ -1423,7 +1423,7 @@ function openCheckProof() {
     title: 'Check that someone owns an item',
     body: [
       h('p', { class: 'small muted' }, 'Paste or scan the proof they shared. It counts if it was made in about the last ' + PROOF_LIFE_MIN + ' minutes and the item is still theirs.'),
-      h('div', { class: 'field' }, h('label', { for: 'proof' }, 'Their proof'), proof, 'BarcodeDetector' in window ? h('div', { class: 'row', style: null }, h('button', { class: 'btn sm', type: 'button', onclick: () => scanProof(proof) }, icon('camera'), 'Scan their QR code')) : null),
+      h('div', { class: 'field' }, h('label', { for: 'proof' }, 'Their proof'), proof, canScan() ? h('div', { class: 'row', style: null }, h('button', { class: 'btn sm', type: 'button', onclick: () => scanProof(proof) }, icon('camera'), 'Scan their QR code')) : null),
       h(
         'details',
         null,
@@ -1483,8 +1483,56 @@ function openCheckProof() {
   });
 }
 
-// Read a proof's QR code with the camera (browsers with a barcode detector: Chrome, Edge,
-// Samsung Internet). The result goes into the proof field.
+// Read a proof's QR code with the camera. The result goes into the proof field.
+const canScan = () => !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+
+// A reader of the QR code in a video frame: the browser's barcode detector where it has one
+// (Chrome, Edge, Samsung Internet on Android), else jsQR, loaded on first use (Safari, Firefox).
+async function qrReader() {
+  if ('BarcodeDetector' in window) {
+    try {
+      if ((await BarcodeDetector.getSupportedFormats()).includes('qr_code')) {
+        const det = new BarcodeDetector({ formats: ['qr_code'] });
+        return async (video) => {
+          const codes = await det.detect(video);
+          return codes.length ? codes[0].rawValue : null;
+        };
+      }
+    } catch {
+      /* jsQR below */
+    }
+  }
+  await loadScript('/jsqr.js');
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  return async (video) => {
+    const w = video.videoWidth;
+    const hgt = video.videoHeight;
+    if (!w || !hgt) return null;
+    // The middle square of the picture, where the code is held: fewer pixels to search.
+    const side = Math.min(w, hgt);
+    canvas.width = side;
+    canvas.height = side;
+    ctx.drawImage(video, (w - side) / 2, (hgt - side) / 2, side, side, 0, 0, side, side);
+    // Codes here are dark on light: no inverted tries.
+    const code = window.jsQR(ctx.getImageData(0, 0, side, side).data, side, side, { inversionAttempts: 'dontInvert' });
+    return code ? code.data : null;
+  };
+}
+const scripts = {};
+function loadScript(src) {
+  scripts[src] ||= new Promise((resolve, reject) => {
+    const s = h('script', { src });
+    s.onload = resolve;
+    s.onerror = () => {
+      delete scripts[src];
+      reject(new Error('the QR reader did not load; paste the proof instead'));
+    };
+    document.head.append(s);
+  });
+  return scripts[src];
+}
+
 async function scanProof(into) {
   const video = h('video', { class: 'scanvid', autoplay: '', playsinline: '', muted: '' });
   video.muted = true;
@@ -1493,21 +1541,23 @@ async function scanProof(into) {
     if (stream) stream.getTracks().forEach((t) => t.stop());
     stream = null;
   };
-  const sh = sheet({ title: 'Scan the proof', body: [video, h('p', { class: 'small muted' }, 'Point the camera at the code on the holder’s screen.')], onClose: stop });
+  const sh = sheet({ title: 'Scan the proof', body: [video, h('p', { class: 'small muted' }, 'Point the camera at the code on the holder’s screen, close enough that it fills the middle of the picture.')], onClose: stop });
+  let read;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+    [stream, read] = await Promise.all([navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } }), qrReader()]);
     video.srcObject = stream;
-  } catch {
+    video.play().catch(() => {});
+  } catch (e) {
+    stop();
     sh.close();
-    return toast('The camera is not available; paste the proof instead', 'err');
+    return toast(e && /QR reader/.test(e.message) ? human(e.message) : 'The camera is not available; paste the proof instead', 'err');
   }
-  const det = new BarcodeDetector({ formats: ['qr_code'] });
   const tick = async () => {
     if (!stream) return;
     try {
-      const codes = await det.detect(video);
-      if (codes.length && codes[0].rawValue) {
-        into.value = codes[0].rawValue;
+      const text = await read(video);
+      if (text) {
+        into.value = text;
         sh.close();
         toast('Proof scanned');
         return;

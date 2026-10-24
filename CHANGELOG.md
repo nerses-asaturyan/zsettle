@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- App: a proof's QR code can be scanned in every browser with a camera: the browser's barcode detector where it has one (Chrome, Edge, Samsung Internet on Android), else jsQR 1.4.0 (Apache-2.0, served as `/jsqr.js` and loaded on first use), so on an iPhone too.
+- Wallet in the browser, after a phone test: the unlock screen shows while the engine loads; the wallet syncs while the page is in front, and the sync chip and the buy steps show the blocks left; a purchase shows five steps; coins can be spent from their first confirmation (a trade is one transaction: a reorganisation that undid the paying coins would undo the trade too); passkeys are discoverable (Android keeps only those in Google Password Manager, which derives the key) and the unlock asks for the passkey straight from the tap (Safari); a page update held back by an open sheet happens when it closes.
+- House shop: an item listed for over 2,000 blocks moves to a fresh note, one per round, so a new buyer's first scan of the shop's item key stays short; a moved item keeps its name; the shop opens before old items move after a restart.
+- App: a button inside a field (the shop address's Open) no longer covers the field's edge.
+
 - One app: on a hosted server the app at `/` is the wallet, and it runs in the browser. The separate `/wallet/` page is gone (`/wallet` and `/wallet/...` answer `301` to `/`). The page loads the wallet engine (`/engine.js`, `/worker.js`, `/pkg/`); the 24 words and the wallet database stay in the browser's IndexedDB, encrypted under a passkey (WebAuthn PRF) or a passphrase (PBKDF2, 600,000 rounds, then AES-GCM), one wallet per network. Proofs and signatures are made in the page, on the testnet or mainnet.
 - Selling from the browser: minting, listing, delisting and cancelling run in the page, and a shop is open while its page is open. The page holds the item key in the wallet's worker, checks each offer with the seller service's checks and signs its half. The server keeps a mailbox per browser shop (`/api/mailbox/<code>/...`, every request signed with the item key) and buyers use the usual `/shop/<code>/...` requests.
 - Item histories and ownership-proof checks run in the browser too, with the same tracer as `zsettle verify` and `zsettle check-proof`, fed with blocks through the relay.

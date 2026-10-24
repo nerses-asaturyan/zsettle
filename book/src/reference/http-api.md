@@ -163,7 +163,7 @@ the bundled page, not as a stable interface. Code: `handle_local` and `api` in
 `/api/hello` and `/api/shops` (see above): there the page's wallet engine answers the same
 calls inside the browser.
 
-Static files: `GET /`, `/index.html`, `/app.js`, `/qr.js`, `/style.css`, `/favicon.svg`,
+Static files: `GET /`, `/index.html`, `/app.js`, `/qr.js`, `/jsqr.js`, `/style.css`, `/favicon.svg`,
 `/manifest.webmanifest`, `/icon-192.png`, `/icon-512.png`.
 
 API calls (JSON bodies; errors answer `400` with `{"error": "..."}`):

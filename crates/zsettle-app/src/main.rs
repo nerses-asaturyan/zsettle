@@ -33,6 +33,7 @@ const INDEX_HTML: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
 const STYLE_CSS: &str = include_str!("../web/style.css");
 const QR_JS: &str = include_str!("../web/qr.js");
+const JSQR_JS: &str = include_str!("../web/jsqr.js");
 const FAVICON_SVG: &str = include_str!("../web/favicon.svg");
 const MANIFEST: &str = include_str!("../web/manifest.webmanifest");
 const ICON_192: &[u8] = include_bytes!("../web/icon-192.png");
@@ -894,6 +895,7 @@ fn static_file(path: &str) -> Option<(&'static str, &'static [u8])> {
         "/" | "/index.html" => ("text/html; charset=utf-8", INDEX_HTML.as_bytes()),
         "/app.js" => ("text/javascript; charset=utf-8", APP_JS.as_bytes()),
         "/qr.js" => ("text/javascript; charset=utf-8", QR_JS.as_bytes()),
+        "/jsqr.js" => ("text/javascript; charset=utf-8", JSQR_JS.as_bytes()),
         "/style.css" => ("text/css; charset=utf-8", STYLE_CSS.as_bytes()),
         "/favicon.svg" => ("image/svg+xml", FAVICON_SVG.as_bytes()),
         // The page can be added to a phone's home screen and opens like an app.

@@ -112,8 +112,9 @@ with status 1. `name` is read from the note's transaction memo and may be `null`
 
 In the app, "Prove I own it" makes a shared proof by default, with an optional name and an
 optional live-check code, and shows it as text, as a QR code and with a Share button. The
-checker's sheet takes pasted text everywhere and reads the QR code with the camera in browsers
-that have a barcode detector (Chrome, Edge, Samsung Internet).
+checker's sheet takes pasted text everywhere and reads the QR code with the camera: with the
+browser's barcode detector where it has one (Chrome, Edge, Samsung Internet on Android), and
+with jsQR, loaded on first use, elsewhere (Safari on iPhone, Firefox).
 
 ## What it reveals
 
