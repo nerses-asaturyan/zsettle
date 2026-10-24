@@ -953,7 +953,13 @@ pub fn largest_spendable_note(
     target_height: TargetHeight,
     exclude: &[NoteRef],
 ) -> Result<Option<NoteRef>> {
-    largest_note_under(db, account, target_height, exclude, ConfirmationsPolicy::default())
+    largest_note_under(
+        db,
+        account,
+        target_height,
+        exclude,
+        ConfirmationsPolicy::default(),
+    )
 }
 
 /// [`largest_spendable_note`] for notes with at least `confirmations`, whoever sent them.
@@ -964,7 +970,13 @@ pub fn largest_confirmed_note(
     exclude: &[NoteRef],
     confirmations: u32,
 ) -> Result<Option<NoteRef>> {
-    largest_note_under(db, account, target_height, exclude, confirmations_policy(confirmations))
+    largest_note_under(
+        db,
+        account,
+        target_height,
+        exclude,
+        confirmations_policy(confirmations),
+    )
 }
 
 /// The same number of confirmations for every note, whoever sent it.

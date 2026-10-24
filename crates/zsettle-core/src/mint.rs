@@ -303,8 +303,15 @@ pub fn mint(
         );
     }
     let request = TransactionRequest::new(payments).map_err(|e| anyhow!("payment request: {e}"))?;
-    let (bytes, txid) =
-        pay_request(wallet, db, seed, from_account, from_account_index, request, None)?;
+    let (bytes, txid) = pay_request(
+        wallet,
+        db,
+        seed,
+        from_account,
+        from_account_index,
+        request,
+        None,
+    )?;
     let indices = item_output_indices(wallet, db, &bytes, item_account, &names)?;
     Ok((bytes, txid, indices))
 }

@@ -2812,22 +2812,6 @@ impl App {
             .filter(|i| i["listed_zat"].is_null() && !i["mined"].is_null())
             .collect();
         let pending = items.iter().filter(|i| i["mined"].is_null()).count();
-        // One old listed item at a time moves to a fresh note; once mined it comes back as a
-        // ready item and is listed again below, under the same name.
-        if let Some(note) = self.stale_listing(&items) {
-            let name = self.item_names().get(&note).cloned();
-            let mut args = vec!["cancel".to_string()];
-            args.extend(self.wallet_args()?);
-            args.push(format!("--item-note={note}"));
-            args.extend([
-                "--listings".into(),
-                self.listings_path().display().to_string(),
-            ]);
-            let r = self.exclusive(|| self.run(&self.seller_bin, &args))?;
-            self.keep_name(name.as_ref(), &r)?;
-            self.push_event(json!({ "event": "log", "text": format!("moved the old item {note} to a fresh note: {}", r["txid"]) }));
-            return Ok(());
-        }
         // All new listings in one pause of the shop, not one pause each. Items listed before
         // the catalogue existed (no icon yet), or listed without the name the shop knows for
         // them, are listed again with their details.
@@ -2846,7 +2830,10 @@ impl App {
             for i in &l.items {
                 let known = names.get(&i.note).filter(|n| !n.is_empty());
                 if i.icon.is_none() || (i.name.is_empty() && known.is_some()) {
-                    batch.push((i.note.clone(), known.cloned().unwrap_or_else(|| i.name.clone())));
+                    batch.push((
+                        i.note.clone(),
+                        known.cloned().unwrap_or_else(|| i.name.clone()),
+                    ));
                 }
             }
         }
@@ -2874,7 +2861,33 @@ impl App {
                 })
                 .collect();
             self.mint_now(None, &names)?;
+            return Ok(());
         }
+        // Once the shop is open, and not in a round that made items (both spend the house's
+        // coins), one old listed item moves to a fresh note; once mined it comes back as a
+        // ready item and is listed again above, under the same name. A move that cannot pay
+        // its fee yet waits for a later round.
+        if let Some(note) = self.stale_listing(&items) {
+            if let Err(e) = self.move_item(&note) {
+                self.push_event(json!({ "event": "log", "text": format!("moving the old item {note} waits: {e:#}") }));
+            }
+        }
+        Ok(())
+    }
+
+    /// Move a listed item to a fresh note (a cancel), keeping its name.
+    fn move_item(&self, note: &str) -> Result<()> {
+        let name = self.item_names().get(note).cloned();
+        let mut args = vec!["cancel".to_string()];
+        args.extend(self.wallet_args()?);
+        args.push(format!("--item-note={note}"));
+        args.extend([
+            "--listings".into(),
+            self.listings_path().display().to_string(),
+        ]);
+        let r = self.exclusive(|| self.run(&self.seller_bin, &args))?;
+        self.keep_name(name.as_ref(), &r)?;
+        self.push_event(json!({ "event": "log", "text": format!("moved the old item {note} to a fresh note: {}", r["txid"]) }));
         Ok(())
     }
 
