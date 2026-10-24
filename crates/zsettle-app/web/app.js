@@ -344,6 +344,7 @@ function sheet({ title, body, foot, dismissable = true, onClose }) {
       document.removeEventListener('keydown', onKey);
       if (onClose) onClose();
       if (lastFocus && lastFocus.focus) lastFocus.focus();
+      if (S.redraw && !document.querySelector('#layer .scrim')) redrawWhenFree();
     },
     setTitle(t) {
       titleEl.textContent = t;
@@ -636,7 +637,7 @@ async function backgroundSync() {
     const { job } = await api('/api/sync', {});
     await follow(job, S.engine ? watchSync : null);
     S.status = await api('/api/status');
-    if (!document.querySelector('#layer .scrim') && !isTyping()) loadView(true);
+    redrawWhenFree();
   } catch {
     /* the next tick tries again */
   } finally {
@@ -645,6 +646,12 @@ async function backgroundSync() {
   }
 }
 const isTyping = () => document.activeElement && /INPUT|TEXTAREA/.test(document.activeElement.tagName);
+// Redraw the page with what the wallet knows now; under an open sheet, or while the visitor
+// types, once the sheet closes (coins that arrived while the faucet's sheet was open).
+function redrawWhenFree() {
+  S.redraw = !!document.querySelector('#layer .scrim') || isTyping();
+  if (!S.redraw) loadView(true);
+}
 
 // ------------------------------------------------------------ create and unlock
 
@@ -1998,7 +2005,7 @@ async function pollShop() {
     if (!changed) return;
     const feed = document.getElementById('feed');
     if (feed) feed.replaceChildren(feedList(shop.events));
-    if (shop.events.some((e) => e.event === 'sold') && !document.querySelector('#layer .scrim') && !isTyping()) loadView(true);
+    if (shop.events.some((e) => e.event === 'sold')) redrawWhenFree();
   } catch {
     /* next tick */
   }
