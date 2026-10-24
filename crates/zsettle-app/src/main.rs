@@ -2677,6 +2677,7 @@ impl App {
         let note = note_field(body, "note")?;
         let wa = self.wallet_args()?;
         let listings = self.listings_path();
+        let name = self.item_names().get(&note).cloned();
         Ok(self.job("cancel", move |app, id| {
             app.exclusive(|| {
                 app.step(id, "Moving the item to a fresh note, so no signed offer can settle");
@@ -2687,6 +2688,7 @@ impl App {
                     args.extend(["--listings".into(), listings.display().to_string()]);
                 }
                 let r = app.run(&app.seller_bin, &args)?;
+                app.keep_name(name.as_ref(), &r)?;
                 app.add_activity(json!({ "kind": "cancel", "txid": r["txid"], "text": format!("Cancelled the offers on {note}") }));
                 Ok(r)
             })
@@ -2813,6 +2815,7 @@ impl App {
         // One old listed item at a time moves to a fresh note; once mined it comes back as a
         // ready item and is listed again below, under the same name.
         if let Some(note) = self.stale_listing(&items) {
+            let name = self.item_names().get(&note).cloned();
             let mut args = vec!["cancel".to_string()];
             args.extend(self.wallet_args()?);
             args.push(format!("--item-note={note}"));
@@ -2821,11 +2824,13 @@ impl App {
                 self.listings_path().display().to_string(),
             ]);
             let r = self.exclusive(|| self.run(&self.seller_bin, &args))?;
+            self.keep_name(name.as_ref(), &r)?;
             self.push_event(json!({ "event": "log", "text": format!("moved the old item {note} to a fresh note: {}", r["txid"]) }));
             return Ok(());
         }
         // All new listings in one pause of the shop, not one pause each. Items listed before
-        // the catalogue existed (no icon yet) are listed again with their details.
+        // the catalogue existed (no icon yet), or listed without the name the shop knows for
+        // them, are listed again with their details.
         let mut batch: Vec<(String, String)> = ready
             .iter()
             .take(HOUSE_STOCK.saturating_sub(listed))
@@ -2837,8 +2842,12 @@ impl App {
             })
             .collect();
         if let Ok(l) = Listings::read(&self.listings_path()) {
-            for i in l.items.iter().filter(|i| i.icon.is_none()) {
-                batch.push((i.note.clone(), i.name.clone()));
+            let names = self.item_names();
+            for i in &l.items {
+                let known = names.get(&i.note).filter(|n| !n.is_empty());
+                if i.icon.is_none() || (i.name.is_empty() && known.is_some()) {
+                    batch.push((i.note.clone(), known.cloned().unwrap_or_else(|| i.name.clone())));
+                }
             }
         }
         if !batch.is_empty() {
@@ -2867,6 +2876,22 @@ impl App {
             self.mint_now(None, &names)?;
         }
         Ok(())
+    }
+
+    /// A cancel moves an item to a fresh note, which keeps the item's name. The cancel's
+    /// transaction has two actions and the item is in one of them, so both note ids get the
+    /// name (the other holds the fee's change, in the payout account, or nothing).
+    fn keep_name(&self, name: Option<&String>, cancel: &Value) -> Result<()> {
+        let (Some(name), Some(txid)) = (name, cancel["txid"].as_str()) else {
+            return Ok(());
+        };
+        {
+            let mut cfg = self.cfg.lock().unwrap();
+            for action in 0..2 {
+                cfg.names.insert(format!("{txid}:{action}"), name.clone());
+            }
+        }
+        self.save_cfg()
     }
 
     /// A listed item mined more than [`HOUSE_REFRESH_BLOCKS`] below the chain tip, if any.

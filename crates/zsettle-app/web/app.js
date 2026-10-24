@@ -456,7 +456,7 @@ function inAppBrowser(ua = navigator.userAgent || '') {
 const passkeyCancelled = () =>
   inAppBrowser()
     ? 'The passkey prompt did not open. Browsers inside apps often block passkeys: open this page in Chrome or Safari, or use a passphrase instead.'
-    : 'The passkey prompt was cancelled. Try again, or use a passphrase instead.';
+    : 'The passkey prompt was cancelled or blocked. Try again. If this page opened inside another app, open it in Safari or Chrome first (on an iPhone, the compass button). Or use a passphrase.';
 
 // The passkey's PRF output, never stored, is the wallet's passphrase.
 async function passkeyCreate() {
