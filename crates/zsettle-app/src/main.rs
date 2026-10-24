@@ -143,6 +143,10 @@ fn scrypt_slot() -> Result<Slot> {
 /// to each new wallet.
 const HOUSE: &str = "house";
 const HOUSE_STOCK: usize = 8;
+/// A house item listed longer than this many blocks moves to a fresh note: a buyer's wallet
+/// scans the shop's item key from the oldest listed item, so old items make every new buyer
+/// wait (2,000 blocks: about 14 hours on testnet, 42 on mainnet).
+const HOUSE_REFRESH_BLOCKS: u64 = 2_000;
 /// What the house sells: a small catalogue, so the market looks like a market. Items are
 /// minted as "<name> #<number>" and listed with the entry's icon, description and price.
 struct HouseItem {
@@ -2806,6 +2810,20 @@ impl App {
             .filter(|i| i["listed_zat"].is_null() && !i["mined"].is_null())
             .collect();
         let pending = items.iter().filter(|i| i["mined"].is_null()).count();
+        // One old listed item at a time moves to a fresh note; once mined it comes back as a
+        // ready item and is listed again below, under the same name.
+        if let Some(note) = self.stale_listing(&items) {
+            let mut args = vec!["cancel".to_string()];
+            args.extend(self.wallet_args()?);
+            args.push(format!("--item-note={note}"));
+            args.extend([
+                "--listings".into(),
+                self.listings_path().display().to_string(),
+            ]);
+            let r = self.exclusive(|| self.run(&self.seller_bin, &args))?;
+            self.push_event(json!({ "event": "log", "text": format!("moved the old item {note} to a fresh note: {}", r["txid"]) }));
+            return Ok(());
+        }
         // All new listings in one pause of the shop, not one pause each. Items listed before
         // the catalogue existed (no icon yet) are listed again with their details.
         let mut batch: Vec<(String, String)> = ready
@@ -2849,6 +2867,30 @@ impl App {
             self.mint_now(None, &names)?;
         }
         Ok(())
+    }
+
+    /// A listed item mined more than [`HOUSE_REFRESH_BLOCKS`] below the chain tip, if any.
+    fn stale_listing(&self, items: &[Value]) -> Option<String> {
+        let network = match self.cfg.lock().unwrap().network.as_deref() {
+            Some("main") => zcash_protocol::consensus::Network::MainNetwork,
+            _ => zcash_protocol::consensus::Network::TestNetwork,
+        };
+        let server = zsettle_core::broadcast::pick_server(None, network);
+        let tip = u64::from(
+            zsettle_core::broadcast::server_info_blocking(&server)
+                .ok()?
+                .block_height,
+        );
+        items
+            .iter()
+            .filter(|i| !i["listed_zat"].is_null())
+            .filter(|i| {
+                i["mined"]
+                    .as_u64()
+                    .is_some_and(|m| m + HOUSE_REFRESH_BLOCKS < tip)
+            })
+            .min_by_key(|i| i["mined"].as_u64())
+            .and_then(|i| i["note"].as_str().map(str::to_string))
     }
 
     // ------------------------------------------------------------ shop
