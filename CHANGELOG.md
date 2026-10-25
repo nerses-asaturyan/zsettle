@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0 (26 October 2026)
 
 - Docs match the code: a browser shop whose page is open reopens by itself after a server restart; Buy shows the price, fee and total (the payment goes to the signed payout address); the faucet's Get coins button stays only when the server refuses; `pay` needs an Orchard receiver; the buyer's `env.sh` does not set `--listings`; `tx` and `upgrade` in the command tables; the seller service's deferral limits, reason files and events; note reservations last until `rotate`; the compact QR form's network field; HTTP status codes of the hosted server. The page's 20-second sync is named on the Privacy page.
 - App: the faucet toast says the coins are on their way (the server has only accepted the request), and a listed item's sheet says signed offers stay valid for up to about 50 minutes (it said 40 blocks; from NU7 that is 120).
