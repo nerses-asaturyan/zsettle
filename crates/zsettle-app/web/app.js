@@ -205,7 +205,8 @@ function human(msg) {
   if (/; your coins were freed for the next purchase$/i.test(m)) return human(m.replace(/; your coins were freed for the next purchase$/i, '')) + ' Your coins were freed for the next purchase.';
   if (/would be dust/i.test(m)) return 'This would leave less than 0.00005 ZEC of change, too little to ever spend. Pick a cheaper item, or add coins first.';
   if (/already spent some of its inputs|another transaction in the mempool|double-spend|duplicate nullifier/i.test(m)) return 'Someone else bought this item first. Your ZEC did not move.' + (/moved to a fresh note/.test(m) ? ' The coins held for it moved to a fresh note.' : '');
-  if (/insufficient|not enough|no spendable|no note can pay|InsufficientFunds/i.test(m)) return 'Not enough spendable ZEC. ' + confirmingNote();
+  if (/in one note/i.test(m)) return 'A purchase is paid from one note, and none of your notes covers the price and the fee: your balance is split over several. Pick a cheaper item, or receive one bigger payment first.';
+  if (/insufficient|not enough|no spendable|no note can pay|no coins can pay|InsufficientFunds/i.test(m)) return 'Not enough spendable ZEC. ' + confirmingNote();
   if (/Connection (Failed|refused)|fetching http|could not be reached|timed out/i.test(m)) return 'Could not reach the shop. Check the address and that the shop is open.';
   if (/seller refused the offer/i.test(m)) return m.replace(/^.*?seller refused the offer:\s*/i, 'The seller refused the offer: ');
   if (/no answer from the seller/i.test(m)) return 'The seller did not answer in time. Your ZEC did not move; try again later.';
@@ -267,6 +268,7 @@ async function api(path, body) {
         document.getElementById('layer').replaceChildren();
         render(await viewWelcomeBrowser());
       }
+      if (/^The wallet stopped/.test(e.message)) walletStopped(e.message);
       throw e;
     }
   }
@@ -309,6 +311,32 @@ function sessionExpired() {
         { class: 'panel' },
         h('div', { class: 'hero' }, logo(), h('h1', null, 'Open the new link'), h('p', { class: 'lede' }, 'This tab’s page key no longer works: the app was started with a new one. Open the link it printed in its terminal, here or in a new tab. Nothing in your wallet changed.')),
         linksRow(),
+      ),
+    ),
+  );
+}
+
+// The wallet's engine in this browser stopped and takes no more calls until the page reloads:
+// say so, instead of drawing a wallet it can no longer read as an empty one.
+function walletStopped(msg) {
+  if (S.stopped) return;
+  S.stopped = true;
+  S.timers.forEach(clearInterval);
+  document.getElementById('layer').replaceChildren();
+  render(
+    h(
+      'main',
+      { class: 'onboard' },
+      h(
+        'div',
+        { class: 'panel' },
+        h('div', { class: 'hero' }, logo(), h('h1', null, 'Reload the page'), h('p', { class: 'lede' }, 'The wallet in this browser hit an error and stopped. Your keys and your coins are not affected: reload the page and unlock it again.')),
+        h(
+          'div',
+          { class: 'card stack' },
+          h('button', { class: 'btn primary lg block', onclick: () => location.reload() }, 'Reload'),
+          h('p', { class: 'small muted mono' }, msg.replace(/^The wallet stopped:\s*/, '').replace(/\s*Reload the page\.$/, '')),
+        ),
       ),
     ),
   );
@@ -1537,21 +1565,33 @@ async function scanProof(into) {
   const video = h('video', { class: 'scanvid', autoplay: '', playsinline: '', muted: '' });
   video.muted = true;
   let stream = null;
+  let closed = false;
   const stop = () => {
+    closed = true;
     if (stream) stream.getTracks().forEach((t) => t.stop());
     stream = null;
   };
   const sh = sheet({ title: 'Scan the proof', body: [video, h('p', { class: 'small muted' }, 'Point the camera at the code on the holder’s screen, close enough that it fills the middle of the picture.')], onClose: stop });
+  // The camera and the reader start together. A camera that starts after the sheet closed, or
+  // next to a reader that did not load, is stopped at once: it never stays on behind the page.
+  const camera = navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } });
   let read;
   try {
-    [stream, read] = await Promise.all([navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } }), qrReader()]);
-    video.srcObject = stream;
-    video.play().catch(() => {});
+    [stream, read] = await Promise.all([camera, qrReader()]);
   } catch (e) {
+    camera.then((s) => s.getTracks().forEach((t) => t.stop()), () => {});
+    if (closed) return;
     stop();
     sh.close();
     return toast(e && /QR reader/.test(e.message) ? human(e.message) : 'The camera is not available; paste the proof instead', 'err');
   }
+  if (closed) {
+    stream.getTracks().forEach((t) => t.stop());
+    stream = null;
+    return;
+  }
+  video.srcObject = stream;
+  video.play().catch(() => {});
   const tick = async () => {
     if (!stream) return;
     try {

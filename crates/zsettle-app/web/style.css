@@ -282,6 +282,8 @@ button.li:hover { background: var(--surface-2); }
 .art { aspect-ratio: 4 / 3; display: grid; place-items: center; font-weight: 800; color: rgba(255, 255, 255, 0.96); font-size: 28px; letter-spacing: -0.02em; text-shadow: 0 2px 14px rgba(0, 0, 0, 0.3); position: relative; overflow: hidden; }
 .art::after { content: ""; position: absolute; inset: 0; background: radial-gradient(80% 60% at 30% 20%, rgba(255, 255, 255, 0.2), transparent 60%); }
 .art.big { aspect-ratio: 16 / 9; border-radius: 18px; font-size: 44px; }
+/* Safari sizes an aspect-ratio box in a column flexbox from its content unless it has a width. */
+.item > .art, .art.big { width: 100%; }
 .item .body { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .item .name { font-weight: 700; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .item .meta { font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
