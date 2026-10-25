@@ -116,6 +116,13 @@ checker's sheet takes pasted text everywhere and reads the QR code with the came
 browser's barcode detector where it has one (Chrome, Edge, Samsung Internet on Android), and
 with jsQR, loaded on first use, elsewhere (Safari on iPhone, Firefox).
 
+The QR code carries the same fields in a compact form that QR codes pack tighter
+(alphanumeric mode): `ZSP2.TEST.<key>.<birthday>.<txid>.<index>.<height>.<block hash>.<signature>.<label>.<code>`,
+in capitals, with the label and the live-check code in base32. A proof's code is 65 squares
+wide instead of 81 to 85, so a phone reads it from further away. The app's checker turns it
+back into the usual text, which is what `check-proof` reads; shared and copied proofs are the
+usual text.
+
 ## What it reveals
 
 The proof carries the **item account's viewing key**. With it the checker can see every item

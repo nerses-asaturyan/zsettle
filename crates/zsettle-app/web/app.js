@@ -27,7 +27,7 @@ const BLOCK_SECS = { main: 75, test: 25 };
 // An ownership proof is accepted for about this many minutes after the block it names
 // (40 blocks before NU7, 120 from NU7).
 const PROOF_LIFE_MIN = 50;
-const SYNC_EVERY_MS = 60000;
+const SYNC_EVERY_MS = 20000;
 
 const S = {
   token: null,
@@ -629,9 +629,10 @@ function startTimers() {
 }
 
 // A page in the background gets little time on a phone or laptop, so it syncs only while it
-// is in front; coming back starts a sync at once if the last one is old.
+// is on screen (another window may have the focus); coming back starts a sync at once if the
+// last one is old.
 function syncOnReturn() {
-  if (document.hidden || !document.hasFocus()) return;
+  if (document.hidden) return;
   const at = S.status && S.status.last_sync && S.status.last_sync.at;
   if (!at || Date.now() / 1000 - at > 20) backgroundSync();
 }
@@ -656,7 +657,7 @@ function catchUpText() {
 }
 
 async function backgroundSync() {
-  if (S.syncing || S.busy || document.hidden || !document.hasFocus() || !S.status || !S.status.unlocked) return;
+  if (S.syncing || S.busy || document.hidden || !S.status || !S.status.unlocked) return;
   S.syncing = true;
   updateSyncChip();
   try {
@@ -792,7 +793,7 @@ async function viewWelcomeBrowser() {
     btn.onclick = () => act(btn, async () => {
       if (w.lock !== 'passkey' && !pass.value) throw new Error('Enter your passphrase.');
       note.textContent = w.lock === 'passkey' ? 'Confirm with your device.' : 'Opening your wallet…';
-      await S.engine.unlock(w.network, pass.value);
+      await S.engine.unlock(w.network, pass.value, () => (note.textContent = 'Opening your wallet…'));
       await opened(false);
     });
     pass.addEventListener('keydown', (e) => e.key === 'Enter' && btn.click());
@@ -1036,7 +1037,7 @@ function openSyncInfo() {
         rep.chain_tip ? h('div', { class: 'r' }, h('span', null, 'Block height'), h('span', { class: 'mono' }, String(rep.chain_tip))) : null,
         rep.server ? h('div', { class: 'r' }, h('span', null, 'Server'), h('span', { class: 'mono' }, String(rep.server).replace(/^https?:\/\//, ''))) : null,
       ),
-      h('p', { class: 'small muted' }, (S.status.browser ? 'Syncing fetches new blocks through this site from a lightwalletd server and scans them in your browser with your viewing keys.' : 'Syncing fetches new blocks from a lightwalletd server and scans them with your viewing keys.') + ' That is how the wallet learns which coins and items it holds and how many confirmations each has. It runs by itself every minute while this page is in front, and as soon as you come back to it; the dot is green when the last sync succeeded.'),
+      h('p', { class: 'small muted' }, (S.status.browser ? 'Syncing fetches new blocks through this site from a lightwalletd server and scans them in your browser with your viewing keys.' : 'Syncing fetches new blocks from a lightwalletd server and scans them with your viewing keys.') + ' That is how the wallet learns which coins and items it holds and how many confirmations each has. It runs by itself every 20 seconds while this page is on screen, and as soon as you come back to it; the dot is green when the last sync succeeded.'),
     ],
     foot: [h('button', { class: 'btn primary', onclick: () => { sh.close(); backgroundSync(); } }, 'Sync now')],
   });
@@ -1484,7 +1485,7 @@ function openProve(it) {
               // The same proof as a QR code, for a checker standing next to you.
               const qr = h('div', { class: 'qr big' });
               try {
-                qr.append(QR.svg(JSON.stringify(r.proof), { ecl: 'L' }));
+                qr.append(QR.svg(proofCode(r.proof), { ecl: 'L' }));
                 qr.querySelector('svg').setAttribute('aria-label', 'QR code of the proof');
               } catch {
                 qr.remove();
@@ -1543,7 +1544,7 @@ function openCheckProof() {
       h('button', {
         class: 'btn primary lg',
         onclick: async () => {
-          const text = proof.value.trim();
+          const text = proofText(proof.value);
           if (!text) return (err.textContent = 'Paste the proof, or scan it.');
           // A proof made for a live check carries a code: it is checked against ours. A shared
           // proof carries none and is checked without one.
@@ -1592,6 +1593,60 @@ function openCheckProof() {
 // Read a proof's QR code with the camera. The result goes into the proof field.
 const canScan = () => !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
 
+// A proof's QR code carries its fields in capitals, digits and dots, which a QR code packs in
+// 5.5 bits a character instead of 8: a smaller code, which a phone reads from further away.
+// Small letters come back as small letters, and the label and the live-check code travel in
+// base32. Shared and copied proofs stay the usual text.
+const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+function b32(text) {
+  let bits = '';
+  for (const b of new TextEncoder().encode(text)) bits += b.toString(2).padStart(8, '0');
+  bits += '0'.repeat((5 - (bits.length % 5)) % 5);
+  return bits.replace(/.{5}/g, (x) => B32[parseInt(x, 2)]);
+}
+function unb32(code) {
+  let bits = '';
+  for (const c of code) {
+    const v = B32.indexOf(c);
+    if (v < 0) throw new Error('not base32');
+    bits += v.toString(2).padStart(5, '0');
+  }
+  const bytes = (bits.match(/.{8}/g) || []).map((x) => parseInt(x, 2));
+  return new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array(bytes));
+}
+function proofFromCode(code) {
+  const f = code.split('.');
+  if (f.length !== 11 || !/^ZSP\d+$/.test(f[0])) return null;
+  const lo = (x) => x.toLowerCase();
+  const p = { version: Number(f[0].slice(3)), network: lo(f[1]), item_ufvk: lo(f[2]), item_birthday: Number(f[3]), note: lo(f[4]) + ':' + f[5], height: Number(f[6]), block_hash: lo(f[7]) };
+  if (f[9]) p.label = unb32(f[9]);
+  if (f[10]) p.challenge = unb32(f[10]);
+  if (f[8]) p.signature = lo(f[8]);
+  return p;
+}
+// The QR code's text for a proof: the compact form when it turns back into exactly this proof.
+function proofCode(p) {
+  const [txid, index] = String(p.note).split(':');
+  const code = ['ZSP' + p.version, p.network, p.item_ufvk, p.item_birthday, txid, index, p.height, p.block_hash, p.signature || '', p.label ? b32(p.label) : '', p.challenge ? b32(p.challenge) : ''].join('.').toUpperCase();
+  try {
+    if (JSON.stringify(proofFromCode(code)) === JSON.stringify(p)) return code;
+  } catch {
+    /* the usual text below */
+  }
+  return JSON.stringify(p);
+}
+// A proof as the checker sends it: a scanned or pasted compact code becomes the usual text.
+function proofText(text) {
+  const t = String(text || '').trim();
+  try {
+    const p = proofFromCode(t);
+    if (p) return JSON.stringify(p, null, 2);
+  } catch {
+    /* not a proof's code: checked as it is */
+  }
+  return t;
+}
+
 // A reader of the QR code in a video frame: the browser's barcode detector where it has one
 // (Chrome, Edge, Samsung Internet on Android), else jsQR, loaded on first use (Safari, Firefox).
 async function qrReader() {
@@ -1611,18 +1666,32 @@ async function qrReader() {
   await loadScript('/jsqr.js');
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  // jsQR misses a slightly blurred code at some sizes of its squares, so each frame is tried
+  // as a few crops of its middle square (a share of the shorter side) at a few scales, the
+  // likeliest first, until one reads.
+  const TRIES = [
+    [2 / 3, 1],
+    [1, 1],
+    [2 / 3, 0.75],
+    [1, 0.75],
+    [1, 0.6],
+  ];
   return async (video) => {
     const w = video.videoWidth;
     const hgt = video.videoHeight;
     if (!w || !hgt) return null;
-    // The middle square of the picture, where the code is held: fewer pixels to search.
-    const side = Math.min(w, hgt);
-    canvas.width = side;
-    canvas.height = side;
-    ctx.drawImage(video, (w - side) / 2, (hgt - side) / 2, side, side, 0, 0, side, side);
-    // Codes here are dark on light: no inverted tries.
-    const code = window.jsQR(ctx.getImageData(0, 0, side, side).data, side, side, { inversionAttempts: 'dontInvert' });
-    return code ? code.data : null;
+    for (const [share, scale] of TRIES) {
+      const side = Math.round(Math.min(w, hgt) * share);
+      const out = Math.round(side * scale);
+      canvas.width = out;
+      canvas.height = out;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(video, (w - side) / 2, (hgt - side) / 2, side, side, 0, 0, out, out);
+      // Codes here are dark on light: no inverted tries.
+      const code = window.jsQR(ctx.getImageData(0, 0, out, out).data, out, out, { inversionAttempts: 'dontInvert' });
+      if (code) return code.data;
+    }
+    return null;
   };
 }
 const scripts = {};
@@ -1649,10 +1718,11 @@ async function scanProof(into) {
     if (stream) stream.getTracks().forEach((t) => t.stop());
     stream = null;
   };
-  const sh = sheet({ title: 'Scan the proof', body: [video, h('p', { class: 'small muted' }, 'Point the camera at the code on the holder’s screen, close enough that it fills the middle of the picture.')], onClose: stop });
+  const sh = sheet({ title: 'Scan the proof', body: [video, h('p', { class: 'small muted' }, 'Point the camera at the code on the holder’s screen, about 20 cm away, with the code in the middle of the picture. If it looks blurry, move the phone back a little.')], onClose: stop });
   // The camera and the reader start together. A camera that starts after the sheet closed, or
   // next to a reader that did not load, is stopped at once: it never stays on behind the page.
-  const camera = navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } });
+  // A sharp picture: a proof's code has many small squares.
+  const camera = navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } } });
   let read;
   try {
     [stream, read] = await Promise.all([camera, qrReader()]);
@@ -1675,7 +1745,7 @@ async function scanProof(into) {
     try {
       const text = await read(video);
       if (text) {
-        into.value = text;
+        into.value = proofText(text);
         sh.close();
         toast('Proof scanned');
         return;
@@ -1685,7 +1755,8 @@ async function scanProof(into) {
     }
     setTimeout(tick, 250);
   };
-  video.addEventListener('loadeddata', () => setTimeout(tick, 300), { once: true });
+  // The reader waits for the first picture by itself; Safari may not say when it comes.
+  setTimeout(tick, 300);
 }
 
 async function openReceive(given, first) {

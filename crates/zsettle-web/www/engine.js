@@ -344,12 +344,13 @@ async function makeRecord(network, phrase, birthday, lock, key, text) {
   }
 }
 
-export async function unlock(network, passphrase) {
+export async function unlock(network, passphrase, onOpening) {
   // The passkey prompt comes first, straight from the tap: Safari shows it only then. The
   // lock was read with the list of wallets.
   const lock = E.locks[network] || ((await idbGet(KEY(network))) || {}).lock;
   if (!lock) throw new Error('this browser holds no wallet for that network');
   const key = await keyOf({ lock }, passphrase);
+  if (onOpening) onOpening();
   const record = await idbGet(KEY(network));
   if (!record) throw new Error('this browser holds no wallet for that network');
   await openRecord(record, key);

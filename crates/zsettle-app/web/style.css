@@ -370,6 +370,8 @@ ol.steps li.failed .mark { background: var(--err); border-color: var(--err); }
 .qr { width: min(232px, 66vw); margin: 2px auto 4px; border-radius: 16px; overflow: hidden; background: #fff; padding: 6px; }
 .qr svg { display: block; width: 100%; height: auto; }
 .qr.big { width: min(320px, 86vw); }
+/* A proof's code on a computer, for a phone to read: as big as the sheet allows. */
+@media (min-width: 720px) { .qr.big { width: min(440px, 100%); } }
 .scanvid { display: block; width: 100%; aspect-ratio: 3 / 4; object-fit: cover; border-radius: 14px; background: #000; }
 .addr { padding: 12px 14px; border-radius: 12px; background: var(--bg-2); border: 1px solid var(--line); }
 

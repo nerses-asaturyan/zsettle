@@ -1,6 +1,6 @@
 'use strict';
-// A small QR code encoder (byte mode, versions 1-40, error correction M by default),
-// following the ISO/IEC 18004 construction. No dependencies; checked against a reference
+// A small QR code encoder (byte or alphanumeric mode, versions 1-40, error correction M by
+// default), following the ISO/IEC 18004 construction. No dependencies; checked against a reference
 // encoder module by module. QR.matrix(text, { ecl, mask }) returns rows of booleans;
 // QR.svg(text) returns an <svg> element.
 const QR = (() => {
@@ -64,11 +64,40 @@ const QR = (() => {
     return r;
   }
 
-  function encode(bytes, e, forceVersion) {
+  // Text made only of capitals, digits and these nine marks goes in alphanumeric mode, two
+  // characters in 11 bits; any other text in byte mode, a byte in 8 bits.
+  const ALNUM = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:';
+  function segment(text) {
+    if (/^[0-9A-Z $%*+\-./:]*$/.test(text)) {
+      const n = text.length;
+      return {
+        mode: 2,
+        count: n,
+        countBits: (ver) => (ver < 10 ? 9 : ver < 27 ? 11 : 13),
+        bits: 11 * Math.floor(n / 2) + 6 * (n % 2),
+        write(put) {
+          for (let i = 0; i + 1 < n; i += 2) put(ALNUM.indexOf(text[i]) * 45 + ALNUM.indexOf(text[i + 1]), 11);
+          if (n % 2) put(ALNUM.indexOf(text[n - 1]), 6);
+        },
+      };
+    }
+    const bytes = Array.from(new TextEncoder().encode(text));
+    return {
+      mode: 4,
+      count: bytes.length,
+      countBits: (ver) => (ver < 10 ? 8 : 16),
+      bits: 8 * bytes.length,
+      write(put) {
+        for (const b of bytes) put(b, 8);
+      },
+    };
+  }
+
+  function encode(seg, e, forceVersion) {
     let ver = forceVersion || 1;
     for (; ; ver++) {
       if (ver > 40) throw new Error('too much data for a QR code');
-      const bits = 4 + (ver < 10 ? 8 : 16) + 8 * bytes.length;
+      const bits = 4 + seg.countBits(ver) + seg.bits;
       if (bits <= dataCodewords(ver, e) * 8) break;
       if (forceVersion) throw new Error('data does not fit the requested version');
     }
@@ -76,9 +105,9 @@ const QR = (() => {
     const put = (val, len) => {
       for (let i = len - 1; i >= 0; i--) bb.push((val >>> i) & 1);
     };
-    put(4, 4);
-    put(bytes.length, ver < 10 ? 8 : 16);
-    for (const b of bytes) put(b, 8);
+    put(seg.mode, 4);
+    put(seg.count, seg.countBits(ver));
+    seg.write(put);
     const cap = dataCodewords(ver, e) * 8;
     put(0, Math.min(4, cap - bb.length));
     put(0, (8 - (bb.length % 8)) % 8);
@@ -255,8 +284,7 @@ const QR = (() => {
 
   function matrix(text, opts = {}) {
     const e = ECL[opts.ecl || 'M'];
-    const bytes = Array.from(new TextEncoder().encode(text));
-    const { ver, codewords } = encode(bytes, e, opts.version);
+    const { ver, codewords } = encode(segment(text), e, opts.version);
     return build(ver, e, codewords, opts.mask);
   }
 
