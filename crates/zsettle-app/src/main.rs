@@ -3147,6 +3147,24 @@ impl App {
             return Err(anyhow!("this is your own shop"));
         }
         let item = note_field(body, "item")?;
+        // The price shown when the buyer confirmed: a shop that changed it since then is not
+        // paid the new price unseen, and the trade pays exactly the confirmed one.
+        let confirmed = body.get("price_zat").and_then(Value::as_u64);
+        if let Some(p) = confirmed {
+            let l = Listings::parse(&http_get(&url)?, &url)?;
+            l.verify_signature()?;
+            let listed = l.items.iter().find(|i| i.note == item);
+            match listed {
+                None => return Err(anyhow!("the shop no longer lists this item")),
+                Some(i) if i.price_zat != p => {
+                    return Err(anyhow!(
+                        "the seller changed the price to {} ZEC since you opened the shop; open it again to see the new price",
+                        i.price_zat as f64 / 1e8
+                    ))
+                }
+                Some(_) => {}
+            }
+        }
         let name = body
             .get("name")
             .and_then(Value::as_str)
@@ -3173,10 +3191,15 @@ impl App {
                 app.sync()?;
                 app.step(id, "Building and proving the trade (both sides, one transaction)");
                 let (item_a, seller_a) = (format!("--item={item}"), format!("--seller-url={base}"));
-                app.buyer(&[
+                let mut args = vec![
                     "buy", "--wallet", &w, "--buyer-account", &payout, &listings_a, &item_a,
                     "--out", &full, &seller_a,
-                ])
+                ];
+                let price_a = confirmed.map(|p| format!("--price={p}"));
+                if let Some(p) = &price_a {
+                    args.push(p);
+                }
+                app.buyer(&args)
             })?;
             let note = built["buyer_note"].as_str().unwrap_or_default().to_string();
             if built["reply_url"].is_null() {

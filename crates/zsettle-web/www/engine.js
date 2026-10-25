@@ -659,6 +659,12 @@ export async function api(path, body) {
         const l = await call('prepareShop', [path]);
         const it = (l.items || []).find((i) => i.note === body.item);
         if (!it) throw new Error('the shop no longer lists this item');
+        // The price shown when the buyer confirmed: a shop that changed it since then is not paid
+        // the new price unseen.
+        if (body.price_zat != null && it.price_zat !== Number(body.price_zat)) {
+          const now = (it.price_zat / 1e8).toFixed(8).replace(/\.?0+$/, '');
+          throw new Error('the seller changed the price to ' + now + ' ZEC since you opened the shop; open it again to see the new price');
+        }
         let r;
         try {
           r = await call('buy', [phrase, path, body.item, it.price_zat, l.payout_address], (p) => {

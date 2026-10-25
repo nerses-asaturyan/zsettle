@@ -1776,7 +1776,7 @@ function buyReview(sh, it) {
         const ok = await askConfirm();
         if (!ok) return;
         sh.setTitle('Buying ' + (it.name || 'item'));
-        const r = await runInSheet(sh, '/api/buy', { url: S.market.base, item: it.note, name: it.name, description: it.description, icon: it.icon, ...ok }, {
+        const r = await runInSheet(sh, '/api/buy', { url: S.market.base, item: it.note, price_zat: it.price_zat, name: it.name, description: it.description, icon: it.icon, ...ok }, {
           total: 5,
           success: (r) => ({
             title: (it.name || 'The item') + ' is yours',
