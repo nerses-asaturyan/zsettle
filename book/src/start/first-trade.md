@@ -20,7 +20,8 @@ Fund both wallets at the `fund` address that `init` printed:
 - the buyer needs the price plus 0.00015 ZEC per trade.
 
 A note received from another wallet is spendable after ten confirmations (about 13 minutes
-on mainnet); the wallet's own change after three. See the [FAQ](../faq.md) for why.
+on mainnet before NU7, about 4 minutes from NU7 and on the testnet); the wallet's own change
+after three. See the [FAQ](../faq.md) for why.
 
 ## Seller terminal
 
@@ -28,7 +29,7 @@ on mainnet); the wallet's own change after three. See the [FAQ](../faq.md) for w
 source S/env.sh                                          # PowerShell: . S\env.ps1
 zsettle-seller sync
 zsettle-seller mint --name "Item #1" --name "Item #2"    # one transaction; prints each note as <txid>:<idx>
-# wait for that block (about 75 seconds), then
+# wait for that block (75 seconds on mainnet before NU7, 25 seconds from NU7), then
 zsettle-seller sync
 zsettle-seller publish --item-note <txid>:<idx> --name "Item #1" --price 0.001   # writes S/listings.json; one call per item
 zsettle-seller serve --inbox inbox --outbox outbox --listen 0.0.0.0:8900         # serves the file at http://seller:8900/listings

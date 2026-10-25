@@ -1,13 +1,14 @@
 # CLI commands
 
-This page lists the commands and flags of the `main` branch, taken from the clap definitions
+This page lists the commands and flags of this version, taken from the clap definitions
 in `crates/zsettle/src/main.rs`, `crates/zsettle-seller/src/main.rs` and
 `crates/zsettle-app/src/main.rs`. An environment variable in brackets fills the flag when it is
 not given.
 
 Common values:
 
-- `--server <url>`: lightwalletd server. Default `https://zec.rocks:443`.
+- `--server <url>`: lightwalletd server. Default: the zec.rocks server of the wallet's network
+  (`https://zec.rocks:443` on mainnet, `https://testnet.zec.rocks:443` on the testnet).
 - `--identity <file>`: age identity file that decrypts the mnemonic. Leave it out for a
   passphrase-protected wallet; the passphrase is asked for, or read from `ZSETTLE_PASSPHRASE`.
 - Amounts: zatoshis, or ZEC with a decimal point (`0.001`, `0.001 ZEC`).
@@ -81,7 +82,7 @@ Common values:
 | `--buyer-note <note>` | largest unreserved spendable note | Note that pays. |
 | `--seller <address>` | from the listings | Seller's unified address. |
 | `--price <amount>` | from the listings | Price to pay. |
-| `--expiry-delta <blocks>` | from the listings, at most 40 | Blocks until expiry; 1 to 40. |
+| `--expiry-delta <blocks>` | the standard expiry, or the listing's shorter limit | Blocks until expiry: 1 up to the standard expiry (40 blocks before NU7, 120 from NU7) or the listing's limit. |
 | `--min-confirmations <n>` | `3` | Confirmations required on the inputs. |
 | `--memo <text>` | empty | Memo of the payment output. |
 | `--server <url>` | default server | Asked which consensus branch is live. |
@@ -147,6 +148,8 @@ The exit status is 0 only when the proof is valid and the note is held; otherwis
 | `--server <url>` | default server | |
 | `--dry-run` | off | Report only. |
 | `--no-sync` | off | Skip the sync first. |
+| `--abandon <note>` | | Treat this note's offer as given up, whatever its expiry: the note is retired now (or released, if already spent). |
+| `--release <note>` | | Only drop this note's reservation, with no transaction: for an offer the seller never received. |
 
 ### zsettle consolidate
 
@@ -165,6 +168,17 @@ Same flags as `rotate`: `--wallet`, `--account`, `--account-index`, `--identity`
 | `--amount <amount>` | required | |
 | `--memo <text>` | | Optional memo. |
 | `--server <url>` | default server | |
+
+### zsettle upgrade
+
+Brings the wallet database schema up to date. Flags: `--wallet <dir>` (required),
+`--identity <file>`.
+
+### zsettle tx
+
+Asks the light server where a transaction is: mined (at which height), in the mempool, or
+unknown. Flags: `--txid <id>` (required), `--network main|test` (default `main`),
+`--server <url>` (default: the zec.rocks server of that network).
 
 ### zsettle notes
 
@@ -221,7 +235,13 @@ Same flags as `zsettle init`: `--wallet`, `--identity` [`ZSETTLE_IDENTITY`], `--
 | `--to <address>` | required | |
 | `--amount <amount>` | required | |
 | `--memo <text>` | | |
+| `--tx-out <file>` | | Write the raw transaction there (and its id to `<file>.txid`) before broadcasting, so a caller can tell whether the payment was made. |
 | `--server <url>` | default server | |
+
+### zsettle-seller upgrade
+
+Brings the wallet database schema up to date. Flags: `--wallet <dir>` (required),
+`--identity <file>`.
 
 ### zsettle-seller sync
 

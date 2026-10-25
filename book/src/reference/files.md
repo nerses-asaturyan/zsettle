@@ -52,7 +52,8 @@ a rename, so a reader never sees half a file.
   page.token      the page key (32 hex characters), owner-only
   wallet/         the wallet directory (see above), made by zsettle-seller init
   listings.json   this profile's listings file
-  trades/         trade-<unix time>.pczt and related files of each purchase
+  trades/         trade-<unix time>-<8 hex>.pczt and .tx of each purchase; proof-*.json and
+                  faucet-*.tx, removed after an hour
   inbox/ outbox/  the shop's directories
 ```
 

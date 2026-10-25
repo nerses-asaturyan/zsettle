@@ -43,14 +43,15 @@ A hosted server keeps no visitor wallets: the wallet runs in the visitor's page.
 | `GET /wallet`, `/wallet/...` | `301` to `/`. The separate wallet page is gone. |
 | `/api/chain/...` | The chain relay, below. |
 | `GET /api/hello` | `{ "mode": "hosted", "network", "has_house", "browser": true }`. `network` is the house shop's network. |
-| `GET /api/shops` | The open shops: the house shop and the browser shops, each `{ base, code, name, items, house }`. |
+| `GET /api/shops` | The open shops: the house shop and the browser shops, each `{ base, code, name, items, house, network }`. |
 | `POST /api/wallet-faucet` | `{ "address": "utest1..." }`: test coins from the house shop to that address. See below. |
 | `POST /api/mailbox/<code>/<action>` | A browser shop's owner: `listings`, `poll`, `reply` or `close`. See below. |
 | `/shop/<code>/...` | A shop, for buyers. See below. |
 | any other `/api/` call | `404` with `{"error":"this server keeps no wallets: the wallet runs in your browser"}`. |
 
 Every POST under `/api/` needs the header `X-Zsettle: 1`. Errors answer `400` with
-`{"error": "..."}`, and `429` when a limit is reached.
+`{"error": "..."}`. The relay, offer and API-call limits answer `429`; the mailbox, shop-list
+and faucet limits answer `400` with the reason.
 
 ### Shops, for buyers
 
@@ -182,14 +183,14 @@ API calls (JSON bodies; errors answer `400` with `{"error": "..."}`):
 | `POST /api/pay` | Start a payment job (`to`, `amount`, optional `memo`). |
 | `POST /api/mint` | Start a mint job (`names`, one to twenty, each at most 80 characters). |
 | `GET /api/listings` | This profile's listings file. |
-| `POST /api/publish` | List an item (`note`, `price`, optional `name`). |
+| `POST /api/publish` | List an item (`note`, `price`, optional `name`, `description` and `icon`). |
 | `POST /api/delist` | Delist an item (`note`). |
 | `POST /api/cancel` | Cancel an item (`note`). |
 | `GET /api/shop` | Shop state and its recent events. |
 | `POST /api/shop/start` | Open the shop. Local mode takes `listen` (default `127.0.0.1:8900`). |
 | `POST /api/shop/stop` | Close the shop. |
 | `POST /api/market` | Fetch and check a shop's listings (`url`). |
-| `POST /api/buy` | Start a buy job (`url`, `item`, optional `name`). |
+| `POST /api/buy` | Start a buy job (`url`, `item`, optional `price_zat`, `name`, `description` and `icon`). `price_zat` is the price the buyer confirmed: the job stops if the shop's signed list says otherwise, and the trade pays exactly that price. The wallet keeps the name, description and icon for the item. |
 | `POST /api/verify` | Start a history job (`item`, optional `url`). |
 | `POST /api/prove` | Start an ownership-proof job (`note`, optional `label`, optional `challenge`). |
 | `POST /api/check-proof` | Start a job that checks an ownership proof (`proof`, optional `challenge`). |
@@ -198,5 +199,10 @@ API calls (JSON bodies; errors answer `400` with `{"error": "..."}`):
 
 Long actions return `{"job": <id>}` at once; the page polls `/api/jobs/<id>`.
 
-Every `/api/` call except `/api/hello` needs the page key in `X-Zsettle-Token`. See
-[Security model and limits](../security.md#local-mode).
+A wallet opened with a passkey confirms each transaction with it: `/api/pay`, `/api/mint`,
+`/api/cancel` and `/api/buy` also take `confirm`, the secret the passkey gives again, and refuse
+the call without it.
+
+Every `/api/` call except `/api/hello` needs the page key in `X-Zsettle-Token`. With
+`--web-wallet`, the `/api/chain/*` relay is answered before that check, as on a hosted server.
+See [Security model and limits](../security.md#local-mode).

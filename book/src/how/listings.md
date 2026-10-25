@@ -13,7 +13,8 @@ A listings file is a JSON file a seller publishes anywhere. Code:
   "item_birthday": 3514000,
   "payout_address": "u1...",
   "items": [
-    { "note": "<txid>:<index>", "name": "Item #1", "price_zat": 100000, "max_expiry_delta": 40 }
+    { "note": "<txid>:<index>", "name": "Item #1", "price_zat": 100000, "max_expiry_delta": 40,
+      "description": "One seat, Saturday night.", "icon": "🎟️" }
   ],
   "issued_at": 3514600,
   "signature": "<128 hex characters>"
@@ -27,7 +28,7 @@ A listings file is a JSON file a seller publishes anywhere. Code:
 | `item_ufvk` | Unified full viewing key of the item account, with the **Orchard component only**. |
 | `item_birthday` | Height to scan from to see the item notes. Current builds round account birthdays down to a multiple of 1,000 blocks. |
 | `payout_address` | Unified address that receives payments. Derived for the market, never the account's default address. |
-| `items` | One entry per item: note reference, display name, price in zatoshis (above 5,000), and the most blocks a signed offer may stay valid. |
+| `items` | One entry per item: note reference, display name, price in zatoshis (above 5,000), and the most blocks a signed offer may stay valid. Optional, and signed like the rest: `description` (one line of plain text, at most 280 characters) and `icon` (one emoji). |
 | `issued_at` | Chain height at which this version was signed. |
 | `signature` | Hex RedPallas signature over all other fields. |
 

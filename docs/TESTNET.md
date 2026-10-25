@@ -7,16 +7,11 @@ Keep testnet and mainnet wallets in separate directories.
 ## Wallets
 
 ```
-D=~/code/tools/zcash-devtool/target/release/zcash-devtool
-$D wallet -w ~/.zsettle-testnet/seller init --name seller -i ~/.zsettle-testnet/seller/key.txt -n test -s zecrocks
-$D wallet -w ~/.zsettle-testnet/seller generate-account --name item -i ~/.zsettle-testnet/seller/key.txt -s zecrocks
-$D wallet -w ~/.zsettle-testnet/buyer  init --name buyer  -i ~/.zsettle-testnet/buyer/key.txt  -n test -s zecrocks
-$D wallet -w ~/.zsettle-testnet/buyer  generate-account --name item -i ~/.zsettle-testnet/buyer/key.txt -s zecrocks
-zsettle sync --wallet ~/.zsettle-testnet/buyer
-zsettle-seller sync --wallet ~/.zsettle-testnet/seller
+zsettle-seller init --network test --wallet ~/.zsettle-testnet/seller --identity ~/.zsettle-testnet/seller.key
+zsettle        init --network test --wallet ~/.zsettle-testnet/buyer  --identity ~/.zsettle-testnet/buyer.key
 ```
 
-Devtool only creates the wallet files, which needs no NU7 support. The first `sync` with this build migrates the database and scans from the birthday; a migration that needs the seed is applied with `zsettle upgrade --wallet <dir> --identity <key>`.
+`init` makes the same two accounts as on mainnet (see [SETUP.md](SETUP.md)) and prints an address to fund. A wallet made by an older build is brought up to date by its first `sync`; a migration that needs the seed is applied with `zsettle upgrade --wallet <dir> --identity <key>`.
 
 ## Funds
 
@@ -26,7 +21,7 @@ Testnet coins (TAZ) are free and worthless. Since the NU7 activation the one fau
 curl -H 'Content-Type: application/json' -d '{"address":"utest1…"}' https://faucet.testnet.valargroup.dev/api/claim
 ```
 
-Take the buyer account's default address from `$D wallet -w ~/.zsettle-testnet/buyer list-addresses`. One claim (12,500,000 zat) funds both wallets: the buyer pays the seller with `zsettle pay --wallet ~/.zsettle-testnet/buyer --account <BUYER_UUID> --identity ~/.zsettle-testnet/buyer/key.txt --to <SELLER_ADDRESS> --amount 4000000`. A note received from another party is spendable after 10 confirmations (about four minutes on testnet), the wallet's own change after 3.
+Take the address `init` printed, or a fresh one from `zsettle address --wallet ~/.zsettle-testnet/buyer --account <BUYER_UUID>`. One claim (12,500,000 zat) funds both wallets: the buyer pays the seller with `zsettle pay --wallet ~/.zsettle-testnet/buyer --account <BUYER_UUID> --identity ~/.zsettle-testnet/buyer.key --to <SELLER_ADDRESS> --amount 4000000`. A note received from another party is spendable after 10 confirmations (about four minutes on testnet), the wallet's own change after 3.
 
 `zsettle tx --network test --txid <id>` asks the light server whether a transaction is mined, in the mempool or unknown.
 

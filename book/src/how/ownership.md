@@ -124,7 +124,8 @@ account (`new-item-account`), that is the history of this one item.
 
 It reveals nothing about your ZEC: payments and change live in the payout account, whose key
 is not in the proof. The proof carries no payout address. This holds when the item account is
-separate from your payout account, which is the default (`new-item-account`); a proof made from
+separate from your payout account, which is the default (the `item` account that `init`
+makes); a proof made from
 your payout account would expose that account's history.
 
 The block it names is the last one your wallet scanned, about the current tip, which shows

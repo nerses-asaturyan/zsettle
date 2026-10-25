@@ -60,8 +60,9 @@ to run zsettle on your own computer. See [The app in your browser](start/browser
 
 ## Why does my buy say there is no spendable note?
 
-A note received from another wallet needs ten confirmations, change from your own wallet
-needs three. These are the numbers [ZIP 315](https://zips.z.cash/zip-0315) recommends and the
+With the command-line tools and the local app, a note received from another wallet needs
+ten confirmations, change from your own wallet needs three. (The wallet in the browser spends
+coins once they are in a block.) These are the numbers [ZIP 315](https://zips.z.cash/zip-0315) recommends and the
 wallet library's default policy, not a network rule: the wait guards against a chain
 reorganisation undoing the transaction that paid you. The app's balance card counts them down
 per note. Notes reserved for earlier offers are skipped until `rotate` retires them. A trade

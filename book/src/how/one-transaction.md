@@ -38,7 +38,8 @@ action: the one that spends the listed item.
 ## What the transaction looks like
 
 A trade has two or three actions, the ecosystem's default expiry, the conventional ZIP 317 fee
-and a normal anchor depth, like an ordinary wallet transaction. To someone without the
+and a normal anchor depth, like an ordinary wallet transaction. (The one exception: the wallet in
+the browser, paying with coins less than three blocks old, anchors at the newest block.) To someone without the
 listings file it is not marked as a trade. See [Privacy](../privacy.md) for what a listings
 holder can tell.
 

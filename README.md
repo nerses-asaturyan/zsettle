@@ -25,7 +25,7 @@ hosted server the wallet runs inside the page, compiled to WebAssembly.
 
 | A shop | Review before buying | An item's history | On a phone |
 |---|---|---|---|
-| ![A shop's items](docs/img/app-shop.jpg) | ![Review purchase](docs/img/app-buy.jpg) | ![Item history](docs/img/app-history.jpg) | ![Wallet on a phone](docs/img/app-phone.jpg) |
+| ![A shop's items](docs/img/app-shop.jpg) | ![Confirm purchase](docs/img/app-buy.jpg) | ![Item history](docs/img/app-history.jpg) | ![Wallet on a phone](docs/img/app-phone.jpg) |
 
 ## Links
 

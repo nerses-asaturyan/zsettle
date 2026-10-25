@@ -45,8 +45,11 @@ site that is not on the home screen), so keep the 24 words.
 
 ## Use it
 
-- **Receive** shows a fresh address each time. Money from another wallet can be spent after
-  10 blocks, change after 3.
+- **Receive** shows a fresh address each time. Coins can be spent once they are in a block:
+  Send, Buy, Create items and Cancel all take them from the first confirmation. Notes three
+  blocks deep are used first when they can pay, so the transaction anchors where ZIP 315
+  wallets anchor theirs; coins from the newest blocks anchor at the tip, which shows on chain
+  (see [Privacy](../privacy.md#on-chain)).
 - **Send** pays a unified address with an Orchard receiver.
 - On the testnet, a new wallet asks the server's faucet for free test coins at once, if the
   server runs a house shop. Each address gets them once. If it fails, a **Get coins** button
@@ -114,7 +117,8 @@ first visit downloads about 4.5 MB.
 ## Limits
 
 - The first purchase of a visit builds the proving key (seconds on a computer, longer on a
-  phone); the page starts it in the background after the first sync.
+  phone). The page starts it in the background once a shop opened in the Market has been
+  scanned, if the page is in front and the wallet is idle; otherwise the purchase builds it.
 - A payment (Send) builds its own proving key each time, so it takes longer than a purchase.
 - The page buys from shops on its own server only.
 - A shop sells only while its page is open.

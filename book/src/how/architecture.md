@@ -136,7 +136,10 @@ Caddy --> zsettle-app (127.0.0.1:8080)
   missing, unlocked at start, and checked every 45 seconds: it keeps up to eight items listed
   from a small catalogue (0.0002 to 0.0015 ZEC) and mints a new batch when four or fewer are
   left. On the testnet it also pays 300,000 zatoshis of test coins once to each address that
-  asks (`/api/wallet-faucet`). It is the only wallet the server holds.
+  asks (`/api/wallet-faucet`). An item listed for over 2,000 blocks moves to a fresh note (one
+  per round, only when a coin can pay the fee) and is listed again under its name, so a new
+  buyer's first scan of the shop's item key stays short; offers signed for the old note fail.
+  It is the only wallet the server holds.
 
 Limits and protections of hosted mode are in
 [Security model and limits](../security.md#hosted-mode).

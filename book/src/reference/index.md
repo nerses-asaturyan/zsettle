@@ -1,7 +1,7 @@
 # Reference
 
 - [CLI commands](cli.md): every command and flag of `zsettle`, `zsettle-seller` and
-  `zsettle-app`, on the `main` branch.
+  `zsettle-app`, in this version.
 - [HTTP API](http-api.md): the seller service endpoints, the hosted relay, and the app's own
   API.
 - [Files and data directories](files.md): wallet directory, PCZT files, inbox and outbox, app

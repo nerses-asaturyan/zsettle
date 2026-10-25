@@ -84,7 +84,8 @@ It speaks plain HTTP. Put a TLS proxy or a Tor onion service in front of it for 
   DNS rebinding;
 - refuses a request whose `Origin` is not the page's own;
 - requires the page key in the `X-Zsettle-Token` header for every `/api/` call except
-  `/api/hello`. The key is 16 random bytes, saved owner-only as `page.token` in the profile
+  `/api/hello` (and the `/api/chain/*` relay when it runs with `--web-wallet`; the Host and
+  Origin checks still apply to it). The key is 16 random bytes, saved owner-only as `page.token` in the profile
   directory. It reaches the page in the link's `#token=` fragment, which the browser does not
   send to the server; the page keeps it in session storage;
 - sends a strict content security policy and `X-Frame-Options: DENY`, `nosniff`,

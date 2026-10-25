@@ -38,7 +38,7 @@ the seller's published viewing key can follow the item's history on the chain.
 
 If the seller spends the item somewhere else first, the trade becomes invalid (the item's
 nullifier is already used) and the buyer's ZEC never moves. If the buyer never broadcasts,
-the seller's signature expires after a few blocks.
+the seller's signature expires at the trade's expiry height, about 50 minutes later.
 
 ## What is public and what is not
 

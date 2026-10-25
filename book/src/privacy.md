@@ -58,9 +58,12 @@ This page says what each party can see, and where the limits are. The threat mod
 A trade uses the standard expiry delta (40 blocks before NU7, 120 from NU7), standard ZIP 317 fees and the standard
 anchor depth, and has two or three actions like any wallet transaction. Without the listings
 file it is not marked. **Limit:** whoever holds the listings file can derive the listed items'
-nullifiers, and so spot every trade of that account. **Limit:** a non-default confirmation count
-(`--min-confirmations`, default 3) changes the anchor depth and would make a trade stand out, so
-the default is kept.
+nullifiers, and so spot every trade of that account. **Limit:** the anchor shows how deep the
+spent notes had to be. The command-line tools and the local app keep the default of 3
+confirmations (`--min-confirmations`), as ZIP 315 wallets do. The wallet in the browser also
+anchors 3 blocks deep whenever notes that deep can pay. Only when they cannot does it spend
+coins from their first block, and that transaction anchors at the newest block, which ZIP 315
+wallets do not do.
 
 ## The light server
 

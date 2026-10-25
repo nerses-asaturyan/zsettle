@@ -27,8 +27,10 @@ in time are counted in 75-second *reference blocks* and converted at the current
   sides of the activation, and a trade carries no distinguishing expiry.
 - An ownership proof is accepted for about 50 minutes by default: 40 blocks before NU7, 120
   from NU7.
-- Confirmations are counted in blocks and do not scale: 10 for a note from another wallet, 3
-  for the wallet's own change. On a 25-second chain that is about four minutes and 75 seconds.
+- Confirmations are counted in blocks and do not scale. The command-line tools and the local
+  app want 10 for a note from another wallet and 3 for the wallet's own change: on a 25-second
+  chain about four minutes and 75 seconds. The wallet in the browser spends from the first
+  block.
 
 ## Wallet databases
 

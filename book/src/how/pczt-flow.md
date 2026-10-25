@@ -36,7 +36,8 @@ In the Code column, `trade::build_trade` means the function `build_trade` in
    at the next block, and stops if this build does not sign for it.
 4. **The buyer builds and proves.** Both notes are witnessed at one anchor. The bundle has
    the item spend and item output in one action, the payment output, and change if needed.
-   The expiry is the next block plus the listing's limit (never more than 40). The proof is
+   The expiry is the next block plus the listing's limit, never more than the standard expiry
+   (40 blocks before NU7, 120 from NU7). The proof is
    made with the two full viewing keys; no spending key is needed.
 5. **The buyer redacts the seller copy.** The seller copy keeps what fixes the sighash, the
    proof, and the item action's own spend data, which the seller's signer needs. Removed: the
@@ -64,8 +65,9 @@ actions. The service finds which listed item it spends by comparing nullifiers.
 **Stage one, public data only** (`check_public`):
 
 - the envelope's consensus branch is the one live at the next block;
-- an expiry is set, it is after the chain tip, and it is at most `max_expiry_delta` + 1 blocks
-  past the tip (one block of slack, because the buyer counts from the next block);
+- an expiry is set, it is after the chain tip, and it is at most the listing's limit,
+  converted to blocks at the tip, plus 1 (one block of slack, because the buyer counts from the
+  next block);
 - the bundle's anchor is a tree root the seller's own wallet has for one of the last 100
   blocks;
 - exactly one action spends the listed item note, and it has a non-zero spend randomizer.

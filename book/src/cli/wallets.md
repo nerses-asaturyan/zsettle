@@ -74,7 +74,8 @@ The seller service runs the same sync before every pass.
 Send ZEC to the address `init` printed, or to a fresh one from `address`.
 
 - A note received from another wallet becomes spendable after ten confirmations (about 13
-  minutes on mainnet). The wallet's own change needs three.
+  minutes on mainnet before NU7, about 4 minutes from NU7 and on the testnet). The wallet's
+  own change needs three.
 - `mint` and `buy` say so when you ask too early.
 
 What things cost (ZIP 317 fees, 5,000 zatoshis per logical action, at least two):
