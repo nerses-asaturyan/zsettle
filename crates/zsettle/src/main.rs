@@ -107,16 +107,16 @@ enum Cmd {
     /// Pay a unified address from an account of this wallet (for example to fund a second wallet).
     Pay {
         /// Wallet directory.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_WALLET")]
         wallet: PathBuf,
         /// UUID of the paying account.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_BUYER_ACCOUNT")]
         account: String,
         /// ZIP 32 account index of the paying account.
         #[arg(long, default_value_t = 0)]
         account_index: u32,
         /// age identity file that decrypts the wallet's mnemonic.
-        #[arg(long)]
+        #[arg(long, env = "ZSETTLE_IDENTITY")]
         identity: Option<PathBuf>,
         /// Recipient unified address.
         #[arg(long)]
