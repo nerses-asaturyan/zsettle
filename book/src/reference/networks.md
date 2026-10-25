@@ -13,8 +13,8 @@ The light server follows the wallet's network; `--server` overrides it. The buil
 whichever consensus branch is live at the next block, so a mainnet wallet keeps working across
 the NU7 activation without a new build.
 
-The `nu7-testnet` branch is kept identical to `main`. Before the release, it carried the NU7
-pre-release crates for the testnet while `main` stayed on the NU6.3 line.
+Before the NU7 crates were released, a separate branch carried the pre-release crates for the
+testnet while `main` stayed on the NU6.3 line. Both networks now build from `main`.
 
 ## Block spacing and expiry
 
