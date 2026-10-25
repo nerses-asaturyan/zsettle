@@ -2445,6 +2445,15 @@ impl App {
     fn faucet_pay(&self, to: &str, zat: u64) -> Result<Value> {
         self.require_unlocked()?;
         let (payout, _) = self.accounts()?;
+        // Paying pauses the house's shop: try only when its coins can pay now, so a faucet
+        // waiting for coins does not stop and restart the shop at every try.
+        if let Some((_, values)) = self.spendable_values(&self.wallet_view()?) {
+            if values.iter().sum::<u64>() < zat + zsettle_core::zip317_fee(2) {
+                return Err(anyhow!(
+                    "the house has no spendable coins for the faucet yet"
+                ));
+            }
+        }
         self.exclusive(|| {
             let w = self.w();
             if !self.shop_running() {
@@ -2867,9 +2876,9 @@ impl App {
         }
         // Once the shop is open, and not in a round that made items (both spend the house's
         // coins), one old listed item moves to a fresh note; once mined it comes back as a
-        // ready item and is listed again above, under the same name. A move that cannot pay
-        // its fee yet waits for a later round.
-        if let Some(note) = self.stale_listing(&items) {
+        // ready item and is listed again above, under the same name. A move pauses the shop,
+        // so it waits for a round where a coin can pay its fee.
+        if let Some(note) = self.stale_listing(&items, &w) {
             if let Err(e) = self.move_item(&note) {
                 self.push_event(json!({ "event": "log", "text": format!("moving the old item {note} waits: {e:#}") }));
             }
@@ -2909,8 +2918,10 @@ impl App {
         self.save_cfg()
     }
 
-    /// A listed item mined more than [`HOUSE_REFRESH_BLOCKS`] below the chain tip, if any.
-    fn stale_listing(&self, items: &[Value]) -> Option<String> {
+    /// The chain tip, and the values of the payout notes the house can spend there: ZIP 315's
+    /// 3 confirmations for change and 10 for coins from others, as the command-line tools
+    /// spend them. None when the tip cannot be read.
+    fn spendable_values(&self, wallet: &Value) -> Option<(u64, Vec<u64>)> {
         let network = match self.cfg.lock().unwrap().network.as_deref() {
             Some("main") => zcash_protocol::consensus::Network::MainNetwork,
             _ => zcash_protocol::consensus::Network::TestNetwork,
@@ -2921,6 +2932,37 @@ impl App {
                 .ok()?
                 .block_height,
         );
+        let notes = wallet["notes"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let values = notes
+            .iter()
+            .filter(|n| {
+                let need = if n["change"].as_bool() == Some(true) {
+                    3
+                } else {
+                    10
+                };
+                n["mined"].as_u64().is_some_and(|m| m + need <= tip + 1)
+            })
+            .filter_map(|n| n["value_zat"].as_u64())
+            .collect();
+        Some((tip, values))
+    }
+
+    /// A listed item mined more than [`HOUSE_REFRESH_BLOCKS`] below the chain tip, if any, and
+    /// only while a payout note can pay the move's fee (the seller's cancel takes one note of
+    /// at least the fee).
+    fn stale_listing(&self, items: &[Value], wallet: &Value) -> Option<String> {
+        let (tip, values) = self.spendable_values(wallet)?;
+        let fee = zsettle_core::zip317_fee(2);
+        if !values
+            .iter()
+            .any(|&v| v == fee || v > fee + zsettle_core::ZIP317_MARGINAL_FEE)
+        {
+            return None;
+        }
         items
             .iter()
             .filter(|i| !i["listed_zat"].is_null())
