@@ -220,6 +220,15 @@ textarea.input { min-height: 110px; resize: vertical; }
 .chip.info { background: var(--info-soft); color: var(--info); border-color: transparent; }
 .chip.accent { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
 button.chip { cursor: pointer; }
+.chip.net { flex: none; }
+.chip.net svg.i { width: 14px; height: 14px; transform: rotate(90deg); }
+/* Mainnet: a notice under the top bar on every page. */
+.netbar { display: flex; gap: 10px; align-items: flex-start; padding: 10px 16px; background: var(--warn-soft); font-size: 14px; line-height: 1.4; border-bottom: 1px solid var(--line); }
+.netbar svg.i { color: var(--warn); flex: none; margin-top: 1px; }
+button.li.netopt { border-radius: 12px; padding-left: 8px; padding-right: 8px; }
+button.li.netopt[aria-pressed="true"] { background: var(--surface-2); }
+.netopt .tick { color: var(--accent); visibility: hidden; }
+.netopt[aria-pressed="true"] .tick { visibility: visible; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
 
 .callout { display: flex; gap: 10px; padding: 12px 14px; border-radius: var(--r); background: var(--accent-soft); color: var(--text-2); font-size: 14px; }

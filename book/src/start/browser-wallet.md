@@ -27,7 +27,7 @@ wallet asks for the passphrase again before showing the backup words.
 ## Create or restore
 
 1. Open the app and choose **Create a wallet**. Pick the network: testnet (free test coins)
-   or mainnet (real ZEC).
+   or mainnet (real ZEC). You can switch later.
 2. Write the 24 words down. They are the only way back if the browser loses its data.
 3. Lock it with a passkey, or with a passphrase of 12 characters or more.
 
@@ -35,9 +35,26 @@ wallet asks for the passphrase again before showing the backup words.
 block height it was made at. Without the height the wallet starts scanning at a recent block
 and misses older payments.
 
-The browser keeps one wallet per network. The welcome screen offers the other one ("Open the
-mainnet wallet instead", or the testnet one), and a way back for a forgotten passphrase or a
-lost passkey: restore from the recovery phrase. A wallet opens in one tab at a time.
+The welcome screen also has a way back for a forgotten passphrase or a lost passkey: restore
+from the recovery phrase. A wallet opens in one tab at a time.
+
+## Testnet and mainnet
+
+The same wallet works on both networks. The **Testnet** or **Mainnet** label in the top bar
+(and **Network** in the menu) opens the network switch; switching needs no second unlock.
+
+- Each network has its own coins, items, shops and history. The 24 words give each network
+  its own keys (ZIP 32), so nothing on chain links the two.
+- The first switch to a network starts it at a recent block. Payments these words got on that
+  network before then do not show; restore from the 24 words with the block height to find
+  them.
+- On mainnet a notice under the top bar, on every page, says the coins are real and the
+  software is not audited. The house shop and free test coins are on the testnet only.
+- A switch waits for a running sync or task to finish, and closes your shop if it is open.
+- If this browser already holds a wallet for that network under another lock (other words,
+  or the same words restored with a new passphrase), the switch leaves it alone and goes back
+  to the start page, where it unlocks with its own lock.
+- The app opens on the network used last; the start page can open the other one instead.
 
 Add the page to the home screen to use it like an app; the page also asks the browser to keep
 its storage. Browsers can still clear site data (Safari does after weeks without a visit to a

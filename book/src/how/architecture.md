@@ -107,7 +107,8 @@ Caddy --> zsettle-app (127.0.0.1:8080)
   `/engine.js`, and from then on the engine answers the page's wallet calls inside the
   browser, in place of the local app's API. The engine keeps the 24 words and the
   wallet database in IndexedDB, encrypted under a key from a passkey (PRF) or a passphrase
-  (PBKDF2), one wallet per network. The WebAssembly wallet runs in a worker; proofs use a
+  (PBKDF2), with a copy per network: the same words and lock, that network's own keys and
+  data. The WebAssembly wallet runs in a worker; proofs use a
   thread pool.
 - **Chain relay.** The page fetches compact blocks, tree states and transactions through
   `/api/chain/...` and sends its transactions there. The server passes each call to its light

@@ -648,8 +648,6 @@ async function watchSync() {
     return;
   }
   updateSyncChip();
-  const line = document.getElementById('catchup');
-  if (line) line.textContent = catchUpText();
 }
 function catchUpText() {
   const p = S.status && S.status.sync_progress;
@@ -799,14 +797,13 @@ async function viewWelcomeBrowser() {
     });
     pass.addEventListener('keydown', (e) => e.key === 'Enter' && btn.click());
     const other = held[1];
-    const otherNet = w.network === 'main' ? 'test' : 'main';
     return h(
       'main',
       { class: 'onboard' },
       h(
         'div',
         { class: 'panel' },
-        hero('Welcome back', 'Your ' + (w.network === 'main' ? 'mainnet' : 'testnet') + ' wallet is in this browser.'),
+        hero('Welcome back', 'Your wallet is in this browser. It opens on ' + (w.network === 'main' ? 'mainnet' : 'testnet') + ', and you can switch the network inside.'),
         h(
           'div',
           { class: 'card stack lg' },
@@ -814,9 +811,7 @@ async function viewWelcomeBrowser() {
           btn,
           note,
           err,
-          other
-            ? h('button', { class: 'linkbtn', onclick: async () => { S.preferNet = other.network; render(await viewWelcomeBrowser()); } }, 'Open the ' + (other.network === 'main' ? 'mainnet' : 'testnet') + ' wallet instead')
-            : h('button', { class: 'linkbtn', onclick: () => createSheet(otherNet) }, 'Add a ' + (otherNet === 'main' ? 'mainnet' : 'testnet') + ' wallet'),
+          other ? h('button', { class: 'linkbtn', onclick: async () => { S.preferNet = other.network; render(await viewWelcomeBrowser()); } }, 'Open on ' + (other.network === 'main' ? 'mainnet' : 'testnet') + ' instead') : null,
           h('button', { class: 'linkbtn', onclick: () => restoreSheet(w.network, true) }, w.lock === 'passkey' ? 'Lost the passkey? Restore from the 24 words' : 'Forgot the passphrase? Restore from the 24 words'),
         ),
         linksRow(),
@@ -1020,6 +1015,9 @@ function updateSyncChip() {
   const old = document.getElementById('syncchip');
   const chip = syncChip();
   if (old && old.title !== chip.title) old.replaceWith(chip);
+  // The wallet's catching-up line too: a redraw at the end of a sync still drew it.
+  const line = document.getElementById('catchup');
+  if (line) line.textContent = catchUpText();
 }
 
 // What the dot in the top bar means: the wallet's view of the chain, and how fresh it is.
@@ -1046,7 +1044,12 @@ function openSyncInfo() {
 
 function renderShell() {
   const st = S.status;
-  const netChip = h('span', { class: 'chip ' + (st.network === 'main' ? 'accent' : 'info') }, st.network === 'main' ? 'Mainnet' : 'Testnet');
+  const main = st.network === 'main';
+  // The network, on every page; with the wallet in the browser it is also the switch.
+  const netChip = () =>
+    S.engine
+      ? h('button', { class: 'chip net ' + (main ? 'accent' : 'info'), onclick: openNetwork, title: 'Switch network', 'aria-label': (main ? 'Mainnet' : 'Testnet') + '. Switch network' }, main ? 'Mainnet' : 'Testnet', icon('chevron'))
+      : h('span', { class: 'chip ' + (main ? 'accent' : 'info') }, main ? 'Mainnet' : 'Testnet');
   const nav = (cls) =>
     VIEWS.map(([k, label, ic]) => h('button', { class: cls, 'aria-current': S.view === k ? 'page' : null, onclick: () => go(k) }, icon(ic), h('span', null, label)));
   const sidebar = h(
@@ -1061,7 +1064,7 @@ function renderShell() {
       h('a', { href: LINKS.github, target: '_blank', rel: 'noopener noreferrer' }, icon('github'), 'GitHub'),
       h('a', { href: LINKS.x, target: '_blank', rel: 'noopener noreferrer' }, icon('xlogo'), 'Follow on X'),
       h('a', { href: '#', onclick: (e) => { e.preventDefault(); openBackup(); } }, icon('shield'), 'Backup words'),
-      h('div', { class: 'who' }, h('span', null, st.browser ? 'Keys in this browser' : st.hosted ? 'Code ' + st.code : st.profile), netChip.cloneNode(true)),
+      h('div', { class: 'who' }, h('span', null, st.browser ? 'Keys in this browser' : st.hosted ? 'Code ' + st.code : st.profile), netChip()),
       h('a', { href: '#', onclick: (e) => { e.preventDefault(); lock(); } }, icon('lock'), st.hosted && !st.browser ? 'Sign out' : 'Lock wallet'),
     ),
   );
@@ -1070,12 +1073,84 @@ function renderShell() {
     { class: 'topbar' },
     h('a', { class: 'brand', href: '#', onclick: (e) => { e.preventDefault(); go('wallet'); } }, logo(), h('span', { class: 'wordmark' }, 'z', h('span', null, 'settle'))),
     h('span', { class: 'spacer' }),
-    netChip,
+    netChip(),
     syncChip(),
     h('button', { class: 'iconbtn menu', 'aria-label': 'Menu', onclick: openMenu }, icon('menu')),
   );
   const bottom = h('nav', { class: 'bottomnav', 'aria-label': 'Main' }, nav('navbtn'));
-  render(h('div', { class: 'shell' }, sidebar, h('div', { class: 'main' }, top, h('main', { class: 'content', id: 'content' }, skeleton())), bottom));
+  const mainnet = main
+    ? h('div', { class: 'netbar', role: 'note' }, icon('alert'), h('span', null, 'Mainnet: real ZEC. zsettle is young and not audited, so use small amounts.' + (S.hosted && S.hosted.has_house ? ' The House shop and free test coins are on testnet only.' : '')))
+    : null;
+  render(h('div', { class: 'shell' }, sidebar, h('div', { class: 'main' }, top, mainnet, h('main', { class: 'content', id: 'content' }, skeleton())), bottom));
+}
+
+// Testnet or mainnet: the same wallet and words on both, each network with its own coins,
+// items, shops and history. Switching needs no second unlock.
+function openNetwork() {
+  const cur = S.status.network;
+  const NETS = [
+    ['test', 'Testnet', 'Free test coins with no value.' + (S.hosted && S.hosted.has_house ? ' The House shop is here, to try a trade.' : '')],
+    ['main', 'Mainnet', 'Real ZEC. zsettle is young and not audited, so use small amounts.'],
+  ];
+  let pick = cur;
+  const err = h('p', { class: 'small err', role: 'alert' });
+  const note = h('p', { class: 'small muted', 'aria-live': 'polite' });
+  const btn = h('button', { class: 'btn primary', disabled: true }, 'Switch');
+  const rows = NETS.map(([n, title, text]) =>
+    h(
+      'button',
+      { class: 'li netopt', 'aria-pressed': String(n === cur), onclick: () => choose(n) },
+      h('span', { class: 'ico' + (n === 'main' ? ' acc' : '') }, icon(n === 'main' ? 'shield' : 'spark')),
+      h('span', { class: 'grow' }, h('div', { class: 'title' }, title + (n === cur ? ' (now)' : '')), h('div', { class: 'small muted' }, text)),
+      h('span', { class: 'tick' }, icon('check')),
+    ),
+  );
+  function choose(n) {
+    pick = n;
+    rows.forEach((r, i) => r.setAttribute('aria-pressed', String(NETS[i][0] === n)));
+    btn.disabled = n === cur;
+    btn.textContent = n === cur ? 'Switch' : 'Switch to ' + (n === 'main' ? 'mainnet' : 'testnet');
+  }
+  const sh = sheet({
+    title: 'Network',
+    body: [h('div', { class: 'list' }, rows), h('p', { class: 'small muted' }, 'Your wallet and its 24 words are the same on both networks. Each network has its own keys, coins, items, shops and history, so nothing on chain links the two.'), note, err],
+    foot: [btn],
+  });
+  btn.onclick = async () => {
+    if (pick === cur) return;
+    err.textContent = '';
+    btn.disabled = true;
+    sh.setDismissable(false);
+    note.textContent = S.syncing || S.status.syncing ? 'Finishing the sync first…' : 'Switching…';
+    S.timers.forEach(clearInterval);
+    // Coming back to the page starts a sync: not while the wallet moves.
+    S.busy = true;
+    try {
+      await S.engine.switchNetwork(pick);
+    } catch (e) {
+      S.busy = false;
+      sh.setDismissable(true);
+      note.textContent = '';
+      // Another wallet of that network, with its own lock: open it from the start page.
+      if (/separate .* wallet/.test(e.message)) {
+        sh.close();
+        S.preferNet = pick;
+        await lock();
+        return toast(human(e.message), 'err');
+      }
+      err.textContent = human(e.message);
+      btn.disabled = false;
+      startTimers();
+      return;
+    }
+    S.busy = false;
+    sh.setDismissable(true);
+    sh.close();
+    S.wallet = S.market = S.shop = S.activity = S.shops = S.status = S.lastKey = null;
+    S.faucetPending = false;
+    await refresh();
+    toast('Now on ' + (pick === 'main' ? 'mainnet' : 'testnet'));
+  };
 }
 
 function openMenu() {
@@ -1083,6 +1158,9 @@ function openMenu() {
   const sh = sheet({
     title: 'zsettle',
     body: [
+      S.engine
+        ? h('div', { class: 'list' }, h('button', { class: 'li', onclick: () => { sh.close(); openNetwork(); } }, h('span', { class: 'ico' }, icon('refresh')), h('span', { class: 'grow title' }, 'Network: ' + (S.status.network === 'main' ? 'Mainnet' : 'Testnet')), h('span', { class: 'small muted' }, 'Switch'), icon('chevron')))
+        : null,
       h('div', { class: 'list' }, a(LINKS.docs, 'book', 'Docs'), a(LINKS.github, 'github', 'Source on GitHub'), a(LINKS.x, 'xlogo', 'Follow on X')),
       h('p', { class: 'small muted' }, (S.status.browser ? 'Keys in this browser' : S.status.hosted ? 'Wallet code ' + S.status.code : 'Wallet ' + S.status.profile) + ' · ' + (S.status.network === 'main' ? 'Mainnet' : 'Testnet')),
     ],

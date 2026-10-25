@@ -152,7 +152,7 @@ async function idbDelete(key) {
     t.onerror = () => reject(t.error);
   });
 }
-// One wallet per network.
+// The wallet's copy for each network: the same words and lock, that network's own keys and data.
 const KEY = (network) => 'wallet-' + network;
 
 const enc = new TextEncoder();
@@ -321,16 +321,21 @@ export async function create({ network, phrase, birthday = 0, lock, passphrase }
     const salt = crypto.getRandomValues(new Uint8Array(16));
     made = { lock: { kind: 'passphrase', salt: b64u(salt) }, key: await keyFromPassphrase(passphrase, salt) };
   }
+  await makeRecord(network, phrase, birthday, made.lock, made.key, birthday ? 'Wallet restored' : 'Wallet created');
+}
+
+// A new stored wallet for a network, from its words, opened.
+async function makeRecord(network, phrase, birthday, lock, key, text) {
   if (!(await holdTab(network))) throw new Error(OTHER_TAB);
   try {
     const name = 'w' + b64u(crypto.getRandomValues(new Uint8Array(6)));
     await call('create', [name, network, phrase, birthday]);
     keepStorage();
     const view = await call('view');
-    E.key = made.key;
+    E.key = key;
     E.cfg = freshCfg();
-    E.cfg.activity.unshift({ kind: 'wallet', text: birthday ? 'Wallet restored' : 'Wallet created', at: now() });
-    E.record = { v: 1, name, network, birthday: view.birthday, lock: made.lock, phrase: await seal(made.key, enc.encode(phrase)), db: null, cfg: null };
+    E.cfg.activity.unshift({ kind: 'wallet', text, at: now() });
+    E.record = { v: 1, name, network, birthday: view.birthday, lock, phrase: await seal(key, enc.encode(phrase)), db: null, cfg: null };
     await saveDb();
     await saveCfg();
   } catch (e) {
@@ -347,13 +352,18 @@ export async function unlock(network, passphrase) {
   const key = await keyOf({ lock }, passphrase);
   const record = await idbGet(KEY(network));
   if (!record) throw new Error('this browser holds no wallet for that network');
+  await openRecord(record, key);
+}
+
+// A stored wallet opened with its key: the database into the worker, the app data here.
+async function openRecord(record, key) {
   let db;
   try {
     db = await unseal(key, record.db);
   } catch {
     throw new Error(record.lock.kind === 'passkey' ? 'this passkey does not open this wallet' : 'wrong passphrase');
   }
-  if (!(await holdTab(network))) throw new Error(OTHER_TAB);
+  if (!(await holdTab(record.network))) throw new Error(OTHER_TAB);
   try {
     await call('open', [record.name, record.network, record.birthday, db]);
   } catch (e) {
@@ -369,6 +379,58 @@ export async function unlock(network, passphrase) {
     E.cfg = freshCfg();
   }
   E.shop.code = E.cfg.listings ? await call('listingsCode', [E.cfg.listings]).catch(() => null) : null;
+}
+
+const netName = (network) => (network === 'main' ? 'mainnet' : 'testnet');
+
+/**
+ * The open wallet on the other network: the same 24 words and the same lock, with that
+ * network's own keys (ZIP 32 derives them per network), coins, items and history. The first
+ * switch makes that copy, starting at a recent block; later ones open it with the key in hand,
+ * so there is no second unlock. A copy this key does not open (other words, or the same words
+ * restored under a new lock) is left alone: it opens from the start page with its own lock.
+ */
+export async function switchNetwork(network) {
+  if (!E.record) throw new Error('Please unlock your wallet.');
+  if (network !== 'main' && network !== 'test') throw new Error('the network is main or test');
+  if (network === E.record.network) return;
+  const key = E.key;
+  const phrase = await phraseWith(key);
+  const kept = await idbGet(KEY(network));
+  if (kept) {
+    let same = false;
+    try {
+      same = dec.decode(await unseal(key, kept.phrase)) === phrase;
+    } catch {
+      /* locked another way */
+    }
+    if (!same) throw new Error('this browser holds a separate ' + netName(network) + ' wallet, with its own lock; unlock it on the start page');
+  }
+  await shopStop();
+  await idle();
+  const from = E.record;
+  await saveDb();
+  await saveCfg();
+  releaseTab();
+  E.record = E.cfg = E.phrase = E.shop.code = E.syncProgress = null;
+  try {
+    if (kept) await openRecord(kept, key);
+    else await makeRecord(network, phrase, 0, from.lock, key, 'Wallet ready on ' + netName(network));
+  } catch (e) {
+    // Back to the network it was on.
+    await openRecord(from, key).catch(() => {});
+    throw e;
+  }
+}
+
+// Wait until nothing runs in the wallet: no sync, no task, no shop pass.
+async function idle() {
+  for (let i = 0; i < 600; i++) {
+    const running = [...E.jobs.values()].some((j) => j.state === 'running');
+    if (!E.syncs && !bgSync && !running && !E.shop.busy) return;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  throw new Error('the wallet is still busy; try again in a minute');
 }
 
 export async function lock() {
