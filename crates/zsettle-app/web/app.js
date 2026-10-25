@@ -951,7 +951,7 @@ async function viewWelcomeBrowser() {
 /** One trade in three steps, for a first visit. */
 function howItWorks() {
   const steps = [
-    ['Get a wallet and coins', 'Your wallet is made in this browser and its keys stay here' + ((S.hosted && S.hosted.has_house && S.hosted.network === 'test') || (S.status && S.status.faucet) ? '; free test coins are one tap away.' : '.')],
+    ['Get a wallet and coins', 'Your wallet is made in this browser and its spending keys stay here' + ((S.hosted && S.hosted.has_house && S.hosted.network === 'test') || (S.status && S.status.faucet) ? '; free test coins are one tap away.' : '.')],
     ['Pick an item', 'Shops list real shielded notes, signed by their seller.'],
     ['Buy in one transaction', 'The item and the ZEC change hands together, or not at all. The seller never sees your address or balance.'],
   ];
