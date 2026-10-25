@@ -727,7 +727,7 @@ function viewCreate() {
     h(
       'div',
       { class: 'panel' },
-      h('div', { class: 'hero' }, logo(), h('h1', null, 'Trade privately on Zcash'), h('p', { class: 'lede' }, 'Buy and sell items for ZEC in one shielded transaction. No escrow, no one in the middle.')),
+      h('div', { class: 'hero' }, logo(), h('h1', null, 'Trade privately on Zcash'), h('p', { class: 'lede' }, 'Buy and sell items for ZEC in one shielded transaction. No escrow, no one holding the funds.')),
       h(
         'div',
         { class: 'card stack lg' },
@@ -833,7 +833,7 @@ async function viewWelcomeBrowser() {
     h(
       'div',
       { class: 'panel' },
-      hero('Trade privately on Zcash', 'Buy and sell items for ZEC in one shielded transaction. No escrow, no one in the middle.'),
+      hero('Trade privately on Zcash', 'Buy and sell items for ZEC in one shielded transaction. No escrow, no one holding the funds.'),
       h(
         'div',
         { class: 'card stack lg' },
@@ -843,7 +843,7 @@ async function viewWelcomeBrowser() {
         h(
           'div',
           { class: 'points' },
-          h('div', { class: 'p' }, icon('shield'), h('span', null, 'Your wallet lives in this browser. The keys never leave your device.')),
+          h('div', { class: 'p' }, icon('shield'), h('span', null, 'Your wallet lives in this browser. Its spending keys never leave your device.')),
           h('div', { class: 'p' }, icon('finger'), h('span', null, 'Unlock it with your fingerprint, face or device PIN.')),
           h('div', { class: 'p' }, icon('check'), h('span', null, 'Item and payment move together, or not at all.')),
         ),
@@ -1312,7 +1312,7 @@ function viewWallet() {
     { class: 'stack lg' },
     h('h2', { class: 'sr-only' }, 'Wallet'),
     S.status.browser
-      ? h('div', { class: 'callout info' }, icon('shield'), h('span', null, (S.status.network === 'test' ? 'Testnet: these coins are free and have no value. ' : '') + 'Your keys stay in this browser: proofs and signatures are made here, and the server only passes blocks along.'))
+      ? h('div', { class: 'callout info' }, icon('shield'), h('span', null, (S.status.network === 'test' ? 'Testnet: these coins are free and have no value. ' : '') + 'Your spending keys stay in this browser: proofs and signatures are made here. The server relays blocks and shop messages, and like any website it sees your IP address.'))
       : S.hosted
         ? h('div', { class: 'callout info' }, icon('info'), h('span', null, S.status.network === 'test' ? 'This wallet is on the Zcash testnet: its coins are free and have no value.' : 'This wallet is kept on this server.', S.status.passkey ? null : [' Your wallet code is ', h('b', null, S.status.code || ''), '; you need it to sign in again.']))
         : null,
