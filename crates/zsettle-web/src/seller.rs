@@ -23,7 +23,7 @@ use zsettle_core::{
     trade::{build_transfer, Output},
     wallet::{
         account_birthday, account_orchard_fvk, account_unspent_nullifiers, heights, ironwood_note,
-        largest_spendable_note, max_scanned_height, next_orchard_address, recent_ironwood_anchors,
+        largest_confirmed_note, max_scanned_height, next_orchard_address, recent_ironwood_anchors,
         record_transaction, Db, NoteRef,
     },
     DEFAULT_MAX_EXPIRY_DELTA, MIN_PRICE_ZAT, ZIP317_MARGINAL_FEE,
@@ -124,6 +124,8 @@ impl WebWallet {
             item_account: self.account(&db, ITEM_ACCOUNT.0)?,
             value_zat: zsettle_core::item::MIN_ITEM_VALUE,
             names: names.clone(),
+            // From the first confirmation, as the browser's payments.
+            min_confirmations: Some(1),
         };
         let (bytes, txid, indices) = mint::mint(&self.wallet, &mut db, &seed, &req)?;
         self.relay.send(&bytes).await?;
@@ -256,23 +258,34 @@ impl WebWallet {
         if meta["bought_from"].as_str().is_none() {
             meta["bought_from"] = json!(note);
         }
-        let min_conf = 3;
-        let (target, _) = heights(&db, min_conf)?;
-        let item_value = ironwood_note(&db, item_note, target)?.note.value().inner();
         let fee = zsettle_core::zip317_fee(2);
         // The smallest paying note that covers the fee exactly or leaves change above dust.
-        let mut exclude = Vec::new();
-        let mut fitting = Vec::new();
-        while let Some(n) = largest_spendable_note(&db, pay_account, target, &exclude)? {
-            exclude.push(n);
-            let v = ironwood_note(&db, n, target)?.note.value().inner();
-            if v == fee || v > fee + ZIP317_MARGINAL_FEE {
-                fitting.push((v, n));
+        // Coins pay from their first confirmation, as in the browser's payments; a note three
+        // blocks deep is taken when there is one, so the anchor sits where ZIP 315 wallets put
+        // theirs.
+        let mut found = None;
+        for min_conf in [3, 1] {
+            let (target, _) = heights(&db, min_conf)?;
+            let mut exclude = Vec::new();
+            let mut fitting = Vec::new();
+            while let Some(n) =
+                largest_confirmed_note(&db, pay_account, target, &exclude, min_conf)?
+            {
+                exclude.push(n);
+                let v = ironwood_note(&db, n, target)?.note.value().inner();
+                if v == fee || v > fee + ZIP317_MARGINAL_FEE {
+                    fitting.push((v, n));
+                }
+            }
+            if let Some(&(v, n)) = fitting.iter().min_by_key(|(v, _)| *v) {
+                found = Some((min_conf, target, v, n));
+                break;
             }
         }
-        let Some(&(pay_value, pay_note)) = fitting.iter().min_by_key(|(v, _)| *v) else {
+        let Some((min_conf, target, pay_value, pay_note)) = found else {
             return Err(anyhow!("no note can pay the {fee} zat fee yet"));
         };
+        let item_value = ironwood_note(&db, item_note, target)?.note.value().inner();
         let mut outputs = vec![Output {
             account: item_account,
             value: item_value,

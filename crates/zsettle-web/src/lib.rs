@@ -41,9 +41,9 @@ use zsettle_core::{
     trade::{build_self_spend, build_trade, TradeRequest},
     wallet::{
         account_birthday, account_orchard_fvk, find_account_by_ufvk, heights,
-        import_viewing_key_at, largest_confirmed_note, list_accounts, max_scanned_height,
-        parse_account, record_transaction, release_note, reservations, reserve_note,
-        reserved_notes, scanned_tip, MemBlockCache, NoteRef, Wallet, WalletAccount,
+        import_viewing_key_at, ironwood_note, largest_confirmed_note, list_accounts,
+        max_scanned_height, parse_account, record_transaction, release_note, reservations,
+        reserve_note, reserved_notes, scanned_tip, MemBlockCache, NoteRef, Wallet, WalletAccount,
         BIRTHDAY_ROUNDING,
     },
 };
@@ -967,12 +967,37 @@ impl WebWallet {
         // there is one: the trade's anchor is then a block every shop has already scanned. A
         // note from the latest block needs the anchor at the tip, and a shop that has not seen
         // that block yet answers after its next sync.
+        // A note pays when it covers the price and the fee exactly, or leaves change above
+        // dust (the rule `build_trade` applies).
+        let with_change = listed.price_zat + zsettle_core::zip317_fee(3);
+        let covers = |v: u64| {
+            v == listed.price_zat + zsettle_core::zip317_fee(2)
+                || v > with_change + zsettle_core::ZIP317_MARGINAL_FEE
+        };
         let mut paying = None;
+        let mut largest = None;
         for confirmations in [ANCHOR_CONFIRMATIONS, 1] {
             if let Some(n) = largest_confirmed_note(&db, buyer, target, &reserved, confirmations)? {
-                paying = Some((n, confirmations));
-                break;
+                let v = ironwood_note(&db, n, target)?.note.value().inner();
+                if covers(v) {
+                    paying = Some((n, confirmations));
+                    break;
+                }
+                largest = largest.max(Some(v));
             }
+        }
+        match largest {
+            Some(v) if paying.is_none() && v >= with_change => {
+                return Err(anyhow!(
+                    "the change would be dust that no wallet spends; add coins or pick a cheaper item"
+                ));
+            }
+            Some(_) if paying.is_none() => {
+                return Err(anyhow!(
+                    "not enough spendable ZEC in one note for the price and the network fee"
+                ));
+            }
+            _ => {}
         }
         let (paying, confirmations) = paying.ok_or_else(|| {
             anyhow!("no coins can pay yet: coins can be spent once they are in a block; coins held for an earlier offer are skipped")

@@ -575,6 +575,7 @@ fn main() -> Result<()> {
                 item_account: parse_account(&w.item_account)?,
                 value_zat: value,
                 names: names.clone(),
+                min_confirmations: None,
             };
             let (bytes, txid, indices) = zsettle_core::mint::mint(&wallet, &mut db, &seed, &req)
                 .map_err(|e| {

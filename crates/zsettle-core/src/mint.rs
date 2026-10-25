@@ -238,6 +238,9 @@ pub struct MintRequest {
     pub value_zat: u64,
     /// Item names, one note each, written into the memos; one transaction for all.
     pub names: Vec<String>,
+    /// Confirmations the paying notes need; `None` is ZIP 315's (3 for change, 10 for money
+    /// from others).
+    pub min_confirmations: Option<u32>,
 }
 
 /// A plain shielded payment from an account of this wallet.
@@ -275,6 +278,7 @@ pub fn mint(
         item_account,
         value_zat,
         names,
+        min_confirmations,
     } = req.clone();
     if names.is_empty() {
         return Err(anyhow!("nothing to mint: give at least one --name"));
@@ -310,7 +314,7 @@ pub fn mint(
         from_account,
         from_account_index,
         request,
-        None,
+        min_confirmations,
     )?;
     let indices = item_output_indices(wallet, db, &bytes, item_account, &names)?;
     Ok((bytes, txid, indices))
@@ -441,23 +445,43 @@ fn pay_request(
         ),
     );
     let input_selector = GreedyInputSelector::new();
-    let proposal =
-        propose_transfer::<_, _, _, _, zcash_client_sqlite::wallet::commitment_tree::Error>(
+    // The anchor shows on chain how deep the spent notes had to be. A payment allowed from
+    // fewer confirmations still anchors three blocks deep, as ZIP 315 wallets do, whenever
+    // notes that deep can pay; only otherwise does it go nearer the tip.
+    let policies: Vec<ConfirmationsPolicy> = match min_confirmations {
+        None => vec![ConfirmationsPolicy::default()],
+        Some(n) if n < 3 => vec![
+            crate::wallet::confirmations_policy(3),
+            crate::wallet::confirmations_policy(n),
+        ],
+        Some(n) => vec![crate::wallet::confirmations_policy(n)],
+    };
+    let mut proposal = None;
+    let mut last = None;
+    for policy in policies {
+        match propose_transfer::<_, _, _, _, zcash_client_sqlite::wallet::commitment_tree::Error>(
             db,
             &wallet.network,
             from_account,
             &input_selector,
             &change_strategy,
-            request,
-            min_confirmations.map_or_else(
-                ConfirmationsPolicy::default,
-                crate::wallet::confirmations_policy,
-            ),
+            request.clone(),
+            policy,
             &SpendPolicy::default(),
             None,
             None,
-        )
-        .map_err(|e| anyhow!("proposing: {e}"))?;
+        ) {
+            Ok(p) => {
+                proposal = Some(p);
+                break;
+            }
+            Err(e) => last = Some(anyhow!("proposing: {e}")),
+        }
+    }
+    let proposal = match proposal {
+        Some(p) => p,
+        None => return Err(last.unwrap_or_else(|| anyhow!("proposing: no policy"))),
+    };
 
     let usk = wallet.spending_key(seed, from_account_index)?;
     let txids = create_proposed_transactions::<
