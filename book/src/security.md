@@ -171,8 +171,9 @@ More rules:
   shop are rebuilt with the server's own security headers.
 - A browser shop is open only while its page is: it counts as closed 45 seconds after the page
   last asked for offers, and buyers then get `503`.
-- Mailboxes are kept in memory. After a restart of the server every browser shop is closed
-  until its owner opens it again.
+- Mailboxes are kept in memory. A restart of the server empties them: offers waiting at that
+  moment are lost, and a browser shop whose page is still open hands its listings over again by
+  itself the next time it asks for offers.
 
 The setup script adds more around the process; see [Hosting the demo](hosting.md#what-the-setup-protects).
 

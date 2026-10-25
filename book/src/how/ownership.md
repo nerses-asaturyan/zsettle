@@ -117,11 +117,12 @@ browser's barcode detector where it has one (Chrome, Edge, Samsung Internet on A
 with jsQR, loaded on first use, elsewhere (Safari on iPhone, Firefox).
 
 The QR code carries the same fields in a compact form that QR codes pack tighter
-(alphanumeric mode): `ZSP2.TEST.<key>.<birthday>.<txid>.<index>.<height>.<block hash>.<signature>.<label>.<code>`,
-in capitals, with the label and the live-check code in base32. A proof's code is 65 squares
+(alphanumeric mode): `ZSP2.<network>.<key>.<birthday>.<txid>.<index>.<height>.<block hash>.<signature>.<label>.<code>`,
+in capitals (the network is `TEST` or `MAIN`), with the label and the live-check code in base32. A proof's code is 65 squares
 wide instead of 81 to 85, so a phone reads it from further away. The app's checker turns it
 back into the usual text, which is what `check-proof` reads; shared and copied proofs are the
-usual text.
+usual text. A proof that would not come back exactly from the compact form keeps the usual text
+in its QR code.
 
 ## What it reveals
 

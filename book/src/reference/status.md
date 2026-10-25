@@ -24,7 +24,8 @@
 - Tests (`crates/zsettle-core/tests/` and unit tests): the proven settlement core, action
   pairing, redaction and proof checks, the seller-policy cases, the rotation transfer, listings
   signatures.
-- The app (`zsettle-app`) in local mode, and hosted mode for the public testnet demo.
+- The app (`zsettle-app`) in local mode, and hosted mode for the public demo (browser wallets
+  on the testnet or mainnet; the house shop and free coins on the testnet).
 
 The code was reviewed for privacy and soundness in several passes. The findings and what was
 done about each are in `CHANGELOG.md`. What remains by design is in `spec/THREAT_MODEL.md` and

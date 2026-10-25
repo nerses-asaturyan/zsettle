@@ -1387,7 +1387,7 @@ async function watchFaucet(f) {
   if (S.view === 'wallet') loadView(true);
   try {
     const j = await follow(f.job);
-    if (j.state === 'done') toast('Free test coins sent. They arrive in about a minute.');
+    if (j.state === 'done') toast('Free test coins on their way. They arrive in about a minute.');
   } catch {
     /* the Get coins button stays */
   } finally {
@@ -2142,7 +2142,7 @@ function listedOptions(it) {
     title: it.name || 'Item',
     body: [
       h('div', { class: 'summary' }, h('div', { class: 'r' }, h('span', null, 'Listed for'), h('b', null, zec(it.listed_zat)))),
-      h('p', { class: 'small muted' }, 'Delisting hides the item. Offers your shop already signed stay valid for up to 40 blocks; cancelling ends them for good by moving the item to a fresh note, for a network fee.'),
+      h('p', { class: 'small muted' }, 'Delisting hides the item. Offers your shop already signed stay valid for up to about 50 minutes; cancelling ends them for good by moving the item to a fresh note, for a network fee.'),
     ],
     foot: [
       h('button', { class: 'btn danger', onclick: () => confirmCancel(sh, it) }, 'Cancel offers'),

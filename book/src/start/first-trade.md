@@ -69,12 +69,13 @@ zsettle finish --full trade.pczt --signed outbox/trade.<tag>.signed.pczt --out t
 ## Notes on this walk-through
 
 - `init` prints the account UUIDs (`accounts` lists them again) and writes `env.sh` and
-  `env.ps1` into the wallet directory. Once you source it, no `--wallet`, `--identity`,
-  account or `--listings` flag is needed, which is why the commands above are so short.
+  `env.ps1` into the wallet directory. Once you source it, no `--wallet`, `--identity` or
+  account flag is needed, which is why the commands above are so short. The seller's `env.sh`
+  also names its own listings file; the buyer gives the seller's `--listings` each time.
 - Every `--listings` takes a file path or the URL a running service serves it at.
 - Amounts are zatoshis, or ZEC with a decimal point (`--price 0.001`).
 - Commands that act print one JSON line. `list`, `notes` and `items` print tables.
-- `zsettle-seller pay` and `zsettle pay` send ZEC out to any address, a phone wallet
-  included. No other tool is needed.
+- `zsettle-seller pay` and `zsettle pay` send ZEC out to a unified address with an
+  Orchard receiver, a phone wallet's included. No other tool is needed.
 
 The [CLI guide](../cli/index.md) explains each step in detail.

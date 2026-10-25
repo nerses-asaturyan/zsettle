@@ -28,6 +28,7 @@ Modules of `zsettle-core` (`crates/zsettle-core/src/`):
 | `pczt.rs` | PCZT helpers: redact, verify proof, sign, combine, extract. |
 | `policy.rs` | The seller's checks on an offer. |
 | `verify.rs` | Item history from compact blocks. |
+| `ownership.rs` | Ownership proofs: make, sign and check. |
 | `wallet.rs` | Wallet directory, keys, accounts, sync, note reservations. |
 | `broadcast.rs` | lightwalletd connection, consensus-branch check, broadcast. |
 
@@ -63,8 +64,9 @@ The Zcash stack is the published librustzcash crates of the NU7 release line
 ```
 
 - The CLIs link `zsettle-core` directly.
-- `zsettle-app` links `zsettle-core` only to read listings files, check a wallet passphrase
-  and decrypt the backup words when asked. Every wallet action is a run of `zsettle` or `zsettle-seller`. The app reads the
+- `zsettle-app` links `zsettle-core` to read and check listings files, check a wallet
+  passphrase and decrypt the backup words when asked; in hosted mode also for the chain relay,
+  the checks on browser shops' mailbox requests and the house shop's view of the chain tip. Every wallet action is a run of `zsettle` or `zsettle-seller`. The app reads the
   JSON they print. It removes the `ZSETTLE_*` variables from their environment and passes the
   wallet passphrase in `ZSETTLE_PASSPHRASE`, so the user's shell settings cannot point a
   command at another wallet.

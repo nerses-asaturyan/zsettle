@@ -7,7 +7,8 @@ visitor's browser:
 - The recovery phrase is made in the page and stays there, encrypted with AES-GCM under a key
   from a passkey (its PRF output) or a passphrase (PBKDF2, 600,000 rounds). The wallet
   database (notes and history) is kept in the browser's IndexedDB, encrypted with the same
-  key. One wallet per network.
+  key. One wallet, with the same words and lock on both networks; each network keeps its own
+  copy of the database.
 - Proving, signing and note scanning run in a Web Worker, with a thread pool for the proofs.
 - Selling runs in the page too (`src/seller.rs`): minting, listing, delisting, cancelling, and
   a shop that checks each offer with the seller service's checks and signs its half while the
@@ -56,7 +57,8 @@ None of this touches the native build of the other crates.
 ## Limits
 
 - The first trade of a visit builds the proving key (seconds natively, longer on a phone);
-  the page starts it in the background after the first sync.
+  the page starts it in the background once a shop opened in the Market has been scanned, if
+  the page is in front and the wallet is idle.
 - A payment from the page (Send) is built by the wallet library, which builds its own proving
   key each time.
 - The page buys from shops on the same server only: it talks to no other site.

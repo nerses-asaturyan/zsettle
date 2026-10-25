@@ -64,8 +64,8 @@ Data lives in `/var/lib/zsettle/data`:
 - `house/`: the house shop's wallet and shop;
 - `hub.json`: the house shop's port and the addresses that got test coins.
 
-The browser shops' mailboxes are kept in memory only, so a restart of the server closes every
-browser shop until its owner opens it again. Folders and files left by an older
+The browser shops' mailboxes are kept in memory only, so a restart of the server empties
+them; a shop whose page is still open opens again by itself the next time it asks for offers. Folders and files left by an older
 hosted mode (visitor wallets, `prf.salt`) are not loaded; you may move them away.
 
 State files are replaced whole (a new file, then a rename), so a crash never leaves half a

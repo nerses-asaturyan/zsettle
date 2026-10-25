@@ -14,8 +14,9 @@ What you can do there:
   wallet you made before, choose **Restore from 24 words**.
 - **Get free test coins.** If the server runs a house shop, a new testnet wallet is sent test
   coins right away, once per address (300,000 zatoshis, that is 0.003 TAZ). The wallet page
-  shows them on the way. If the faucet cannot pay at that moment, a **Get coins** button stays
-  for later.
+  shows them on the way. If the server refuses the request (its limits), a **Get coins** button
+  stays for later; if the house shop has no coins ready, the server keeps trying for about ten
+  minutes.
 - **Buy from an open shop.** The Market lists the shops that are open now. The house shop
   keeps a few items listed and makes new ones when they sell. The page checks the shop's
   signed price list, builds and proves the trade, and sends it.
@@ -45,6 +46,7 @@ page's colours. The page notices this and says so: use the app's menu (⋮ or ·
   page's code, so for real ZEC the strongest setting is running zsettle on your own computer.
 - Your wallet lives in this browser only. Keep the 24 words: they are the only way back if the
   browser loses its data, or on another device.
-- Your shop sells only while its page is open. If the server restarts, open the shop again.
+- Your shop sells only while its page is open. If the server restarts, a page that is still
+  open opens the shop again by itself.
 - The server limits how many requests, shops and test coins it serves. See
   [Security model and limits](../security.md#hosted-mode).

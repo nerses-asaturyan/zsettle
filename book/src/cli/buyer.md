@@ -1,7 +1,8 @@
 # Buying with zsettle
 
-The examples spell out every flag. With `env.sh` sourced, `--wallet`, `--identity`,
-`--buyer-account` / `--account` and `--listings` can be left out.
+The examples spell out every flag. With `env.sh` sourced, `--wallet`, `--identity` and
+`--buyer-account` / `--account` can be left out. `--listings` names the seller's file, so give
+it each time.
 
 ## 1. Look at the listings
 

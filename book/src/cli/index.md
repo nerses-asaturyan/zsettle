@@ -58,5 +58,5 @@ default is `https://zec.rocks:443`. Before building, minting or broadcasting, th
 server which consensus branch is live and stop with a message if this build does not sign for
 it.
 
-**Output.** Commands that act print one JSON line on stdout (`verify` prints a pretty JSON
-report). `list`, `notes` and `items` print tables. Warnings and notes go to stderr.
+**Output.** Commands that act print JSON on stdout, most of them one line (`verify`,
+`check-proof` and `prove` print pretty JSON). `list`, `notes` and `items` print tables. Warnings and notes go to stderr.

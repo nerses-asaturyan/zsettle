@@ -34,6 +34,8 @@ Common values:
 | `consolidate` | Merge an account's spendable notes into one. |
 | `pay` | Send ZEC to any unified address with an Orchard receiver. |
 | `notes` | List an account's unspent Ironwood notes. |
+| `tx` | Ask the light server where a transaction is: mined (at which height), in the mempool, or unknown. |
+| `upgrade` | Bring the wallet database schema up to date, with the seed for migrations that need it. |
 
 ### zsettle init
 
@@ -200,7 +202,7 @@ Several commands share the **wallet flags**:
 | `init` | Create a wallet with accounts `payout` (index 0) and `item` (index 1). |
 | `accounts` | List the wallet's accounts. |
 | `address` | Print a fresh Orchard-only address of an account. |
-| `pay` | Send ZEC from the payout account to any address. |
+| `pay` | Send ZEC from the payout account to a unified address with an Orchard receiver. |
 | `sync` | Sync the wallet. |
 | `new-item-account` | Create another item account. |
 | `mint` | Mint items. |
@@ -210,6 +212,7 @@ Several commands share the **wallet flags**:
 | `prove` | Sign an ownership proof for an item note, made after a recent block; shareable. |
 | `sign` | Check and sign one trade PCZT. |
 | `serve` | Run the seller service. |
+| `upgrade` | Bring the wallet database schema up to date, with the seed for migrations that need it. |
 
 ### zsettle-seller init
 

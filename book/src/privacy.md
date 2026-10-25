@@ -119,8 +119,9 @@ shop key starts (rounded down to 1,000 blocks), the listed items whose blocks it
 you open a shop (which shows which shop you opened; the list is public), the transactions of
 your item notes whose names it fetches after a restore (compact blocks carry no memos; the
 shop that sold you the item already knows that transaction), and each transaction it sends.
-The server passes these requests on to its light server (zec.rocks by default), which sees
-them coming from the server, not from you.
+The server passes these requests on to its light server (zec.rocks, or testnet.zec.rocks on
+the testnet, by default), which sees them coming from the server, not from you. The page syncs
+every 20 seconds while it is on screen, so the server also sees when it is open.
 
 Item histories and ownership-proof checks also run in the page, over blocks fetched through
 the relay. The trace reads on to the chain tip, so the block ranges do not show the server

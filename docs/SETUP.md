@@ -30,7 +30,7 @@ Prefer a passphrase to a key file? Omit `--identity`: `init` asks for a passphra
 
 The wallet layout is the one of [zcash-devtool](https://github.com/zcash/zcash-devtool) (`data.sqlite`, `keys.toml` with an age-encrypted mnemonic), so devtool can open these wallets too, and wallets made with devtool work here. The default server of every command is the zec.rocks server of the wallet's network (`https://zec.rocks:443` on mainnet, `https://testnet.zec.rocks:443` on the testnet); `--server` overrides it. The first connection to it occasionally stalls; a retry connects in under a second.
 
-The README uses the short names `S`, `B` and `~/seller.key`; this document keeps everything under `~/.zsettle`. The rule is the same: the key file lives outside the wallet directory.
+[A first trade on the command line](../book/src/start/first-trade.md) uses the short names `S`, `B` and `~/seller.key`; this document keeps everything under `~/.zsettle`. The rule is the same: the key file lives outside the wallet directory.
 
 ## Syncing
 
@@ -52,7 +52,7 @@ zsettle-seller pay --to <unified address> --amount 0.001      # from the payout 
 zsettle pay --wallet ~/.zsettle/buyer --account <BUYER_ACCOUNT_UUID> --identity ~/.zsettle/buyer.key --to <unified address> --amount 0.001
 ```
 
-Sends from an account of a wallet to any address, a phone wallet's included (`--memo` optional); without the environment, give `--wallet`, `--account` and `--identity`. The same command funds a counterparty's wallet.
+Sends from an account of a wallet to a unified address with an Orchard receiver, a phone wallet's included (`--memo` optional); without the environment, give `--wallet`, `--account` and `--identity`. The same command funds a counterparty's wallet.
 
 ## Files the tools write
 

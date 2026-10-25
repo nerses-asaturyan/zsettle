@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Docs match the code: a browser shop whose page is open reopens by itself after a server restart; Buy shows the price, fee and total (the payment goes to the signed payout address); the faucet's Get coins button stays only when the server refuses; `pay` needs an Orchard receiver; the buyer's `env.sh` does not set `--listings`; `tx` and `upgrade` in the command tables; the seller service's deferral limits, reason files and events; note reservations last until `rotate`; the compact QR form's network field; HTTP status codes of the hosted server. The page's 20-second sync is named on the Privacy page.
+- App: the faucet toast says the coins are on their way (the server has only accepted the request), and a listed item's sheet says signed offers stay valid for up to about 50 minutes (it said 40 blocks; from NU7 that is 120).
+
+
 - App, after a desktop test: the wallet syncs every 20 seconds while its page is on screen, also when another window has the focus, so a payment shows up by itself; it synced once a minute, and only in a focused window. A sync with nothing new takes about half a second.
 - App: a proof's QR code is smaller and bigger on screen. It carries the proof's fields in capitals and digits, which QR codes pack tighter (65 squares wide instead of 81 to 85), and on a computer it is drawn up to 440 pixels wide. The camera asks for a sharper picture (1920 by 1080), the reader starts without waiting for an event Safari may not send and tries each frame at a few crops and scales (jsQR misses a slightly blurred code at some sizes), and the hint says to hold the phone about 20 cm away. The checker turns the compact code back into the usual proof text. The QR encoder gains alphanumeric mode; byte mode codes are unchanged.
 - App: unlocking says "Opening your wallet…" once the passkey has answered.

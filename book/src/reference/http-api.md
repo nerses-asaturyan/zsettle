@@ -49,8 +49,9 @@ A hosted server keeps no visitor wallets: the wallet runs in the visitor's page.
 | `/shop/<code>/...` | A shop, for buyers. See below. |
 | any other `/api/` call | `404` with `{"error":"this server keeps no wallets: the wallet runs in your browser"}`. |
 
-Every POST under `/api/` needs the header `X-Zsettle: 1`. Errors answer `400` with
-`{"error": "..."}`. The relay, offer and API-call limits answer `429`; the mailbox, shop-list
+Every POST needs the header `X-Zsettle: 1`; without it the answer is `403`. Errors answer
+`400` with `{"error": "..."}`. The relay, offer and API-call rate limits answer `429`, and too
+many relay calls at once `503`; the mailbox, shop-list
 and faucet limits answer `400` with the reason.
 
 ### Shops, for buyers
@@ -63,7 +64,7 @@ Each shop is reached through the app:
 | `POST /shop/<code>/offer` | `POST /offer` |
 | `GET /shop/<code>/reply/<tag>` | `GET /reply/<tag>` |
 
-Anything else under `/shop/` answers `404`. The answers are those of the seller service above.
+Anything else under `/shop/` answers `404`; a shop code that is not open answers `503`. The answers are those of the seller service above.
 
 - **The house shop** (`code` is `house`) is a `zsettle-seller serve` process of the server.
   The app passes the request on. A closed shop answers `503`, and a shop that does not answer
@@ -76,7 +77,7 @@ Anything else under `/shop/` answers `404`. The answers are those of the seller 
   uploaded. `offer` stores the envelope and answers `{"tag", "reply"}` as the seller service
   does; it answers `503` when the shop is closed (its page has not asked for offers in the last
   45 seconds) or too many offers wait (20, or 8 MiB, per shop), and `413` for an empty envelope
-  or one above 1 MiB. An offer the shop does not answer within 15 minutes is dropped, and all
+  or one above 1 MiB (`400` for a request body more than 4 KiB above that). An offer the shop does not answer within 15 minutes is dropped, and all
   of a shop's waiting offers when it closes. `reply/<tag>` answers `200` with the signed PCZT,
   `202` "pending" while the offer waits, and `410` with the reason when it was refused or is no
   longer there.

@@ -69,24 +69,26 @@ site that is not on the home screen), so keep the 24 words.
   (see [Privacy](../privacy.md#on-chain)).
 - **Send** pays a unified address with an Orchard receiver.
 - On the testnet, a new wallet asks the server's faucet for free test coins at once, if the
-  server runs a house shop. Each address gets them once. If it fails, a **Get coins** button
-  stays for later.
+  server runs a house shop. Each address gets them once. If the server refuses the request
+  (its limits), a **Get coins** button stays for later; if the house shop has no coins ready,
+  the server keeps trying for about ten minutes.
 - **Market** lists the open shops of this server. Opening a shop adds its item key to the
   wallet and scans for its items in the background, so a purchase does not wait for that scan.
   The scan starts at the block of the oldest listed item (rounded down to 1,000 blocks), not at
   the shop's own start. A purchase made before the scan ends says it is waiting for it.
-- **Buy** shows the price and the shop's payment address from its signed price list, which
-  the wallet has checked. It then builds and proves the trade in the page, hands the shop its
-  copy, waits for the shop's signature, signs the payment and sends the transaction. If the
-  shop's signed list says another price or address by then, the purchase stops. The paying
+- **Buy** shows the price, the network fee and the total, from the shop's signed price list,
+  which the wallet has checked. It then builds and proves the trade in the page, hands the shop
+  its copy, waits for the shop's signature, signs the payment and sends the transaction. The
+  payment goes to the payout address in the signed list. If the shop's signed list says another
+  price by then, the purchase stops. The paying
   note is saved as held for this offer before the offer leaves. On a phone, proving takes up
   to a minute or two.
 - **History** traces an item through the chain in the page, with the shop's signed listings
   key and the wallet's own item key, as `zsettle verify` does.
-- **Prove** makes an ownership proof of an item you hold, as `zsettle-seller prove` does.
+- **Prove I own it** makes an ownership proof of an item you hold, as `zsettle-seller prove` does.
   Anyone can check it with `zsettle check-proof` or the app; the app checks it in the page.
 - After a restore, item names come back with the next sync: the wallet fetches each item
-  note's transaction and reads its memo with its own key. The activity list starts empty.
+  note's transaction and reads its memo with its own key. The activity list starts with "Wallet restored".
 - **Backup words** shows the 24 words again, after the passkey or the passphrase.
 
 ## Sell from the browser
@@ -103,14 +105,16 @@ Minting, listing, delisting and cancelling all run in the page, on the **Sell** 
 The shop is open while its page is open. The page checks each offer with the same checks as
 the seller service (`zsettle-seller serve`), signs its half of a trade it accepts, and posts
 the reply. Close the page, or lock the wallet, and the shop closes; the server counts it as
-closed 45 seconds after the page last asked for offers. A server restart closes it too; open it
-again from the page.
+closed 45 seconds after the page last asked for offers. A server restart empties the shops'
+mailboxes: a shop whose page is still open opens again by itself the next time it asks for
+offers (every few seconds). Offers that were waiting at that moment are lost; those buyers'
+ZEC does not move.
 
 The server keeps a mailbox for your shop: the signed listings, the offers buyers leave, and
 your replies. Every request the page makes to it is signed with your item key, so nobody else
 can change your listings or answer for your shop.
 
-**Cancel** spends the item to a fresh note of the same account, so no offer the shop signed
+**Cancel offers**, on a listed item, spends it to a fresh note of the same account, so no offer the shop signed
 earlier can settle. Delisting alone does not do that.
 
 ## What the server can and cannot do
