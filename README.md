@@ -6,6 +6,14 @@ the buyer builds and proves it, the seller checks it and signs only the item's h
 buyer signs the payment's half and broadcasts. Either both halves land on chain, or nothing
 moves.
 
+## Demo video
+
+[![The zsettle demo video, 1:58](docs/video/cover.jpg)](https://nerses-asaturyan.github.io/zsettle/video/zsettle-demo.mp4)
+
+One buyer on the hosted testnet demo: a new wallet in the browser, a purchase from the house
+shop, the item's history, the trade on chain, and an ownership proof. The file is also in
+[`docs/video/`](docs/video/zsettle-demo.mp4).
+
 ## How one trade works
 
 1. The seller publishes a signed listings file: a viewing key for the item account, a payout

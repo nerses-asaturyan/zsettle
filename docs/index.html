@@ -51,7 +51,7 @@ ol.steps span { color: var(--text2); font-size: 16px; }
 .compare tr:last-child td { border-bottom: 0; }
 .compare td:last-child { color: var(--text); font-weight: 650; }
 .scroll { overflow-x: auto; }
-.video { aspect-ratio: 16/9; border-radius: 20px; background: var(--surface); border: 1px solid var(--line); display: grid; place-items: center; color: var(--muted); }
+.video { display: block; width: 100%; height: auto; aspect-ratio: 16/9; border-radius: 20px; background: var(--surface); border: 1px solid var(--line); }
 footer { padding: 36px 0 56px; color: var(--muted); font-size: 15px; display: flex; gap: 16px; flex-wrap: wrap; border-top: 1px solid var(--line); margin-top: 24px; }
 footer a { color: var(--muted); }
 </style>
@@ -114,7 +114,7 @@ footer a { color: var(--muted); }
 
   <section>
     <h2>See it in two minutes</h2>
-    <div class="video" id="video">The demo video appears here.</div>
+    <video class="video" id="video" controls preload="metadata" poster="video/poster.jpg" src="video/zsettle-demo.mp4"></video>
   </section>
 
   <footer>

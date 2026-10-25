@@ -52,6 +52,8 @@ jobs:
           cp "$bin/zsettle$ext" "$bin/zsettle-seller$ext" "$bin/zsettle-app$ext" dist/
           cp README.md CHANGELOG.md LICENSE-APACHE LICENSE-MIT dist/
           cp -r docs examples spec dist/
+          # The demo video is on the project page; the archives leave it out.
+          rm -rf dist/docs/video
           if [ "${{ runner.os }}" = "Windows" ]; then
             7z a "zsettle-${{ matrix.name }}.zip" ./dist/* > /dev/null
           else
