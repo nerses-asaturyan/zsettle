@@ -59,6 +59,7 @@ export function start() {
       if (!self.crossOriginIsolated) throw new Error('This browser cannot run the wallet here (the page is not isolated). Try a current Chrome, Safari, Firefox or Edge.');
       const module = await WebAssembly.compileStreaming(fetch('/pkg/zsettle_web_bg.wasm'));
       const exports = await init({ module_or_path: module });
+      reserveHeap(exports);
       await initThreadPool(Math.max(2, Math.min(navigator.hardwareConcurrency || 4, 8)));
       // The wallet's worker, and a helper that builds the proving key in the background:
       // they share the module and the memory, so the key the helper builds is the one
@@ -68,6 +69,26 @@ export function start() {
     })();
   }
   return E.started;
+}
+
+// Safari 26.0 to 26.2 checks memory.fill and memory.copy in one thread against the memory's
+// size from before another thread grew it, so the wallet traps with "Out of bounds memory
+// access" as soon as its threads start. On WebKit the heap is grown here once, before any
+// other thread runs, and freed again: the threads then take their memory from it and do not
+// grow the memory themselves. A purchase peaks near 150 MB; the first size that can be had
+// is kept.
+const RESERVE_MB = [512, 384, 256];
+
+function reserveHeap(exports) {
+  const ua = navigator.userAgent;
+  if (!/AppleWebKit\//.test(ua) || /(Chrome|Chromium|Edg|OPR|Firefox)\//.test(ua)) return;
+  for (const mb of RESERVE_MB) {
+    try {
+      const n = mb * 1024 * 1024;
+      exports.__wbindgen_free(exports.__wbindgen_malloc(n, 16), n, 16);
+      return;
+    } catch (e) {}
+  }
 }
 
 function spawn(module, memory) {

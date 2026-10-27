@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1 (27 October 2026)
+
+- Wallet in the browser: it starts on Safari 26.0 to 26.2 (iPhone, iPad and Mac). Those versions check some memory operations in one thread against the memory's size from before another thread grew it, so the wallet stopped with "Out of bounds memory access" as its threads started. On Safari and the other WebKit browsers the page now grows the wallet's memory once, by 512 MB (less if the browser refuses), before any other thread runs, and the threads take their memory from it. A purchase needs about 150 MB. Chrome, Edge and Firefox are unchanged.
+
 ## 0.1.0 (26 October 2026)
 
 - Docs match the code: a browser shop whose page is open reopens by itself after a server restart; Buy shows the price, fee and total (the payment goes to the signed payout address); the faucet's Get coins button stays only when the server refuses; `pay` needs an Orchard receiver; the buyer's `env.sh` does not set `--listings`; `tx` and `upgrade` in the command tables; the seller service's deferral limits, reason files and events; note reservations last until `rotate`; the compact QR form's network field; HTTP status codes of the hosted server. The page's 20-second sync is named on the Privacy page.

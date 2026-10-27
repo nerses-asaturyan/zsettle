@@ -3,7 +3,7 @@
 # atomics) and with a stand-in for libsqlite3-sys; neither touches the native build.
 [package]
 name = "zsettle-web"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/nerses-asaturyan/zsettle"

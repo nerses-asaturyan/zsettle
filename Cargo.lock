@@ -4862,7 +4862,7 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zsettle"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -4879,7 +4879,7 @@ dependencies = [
 
 [[package]]
 name = "zsettle-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "blake2b_simd",
@@ -4896,7 +4896,7 @@ dependencies = [
 
 [[package]]
 name = "zsettle-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "age",
  "anyhow",
@@ -4941,7 +4941,7 @@ dependencies = [
 
 [[package]]
 name = "zsettle-seller"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",

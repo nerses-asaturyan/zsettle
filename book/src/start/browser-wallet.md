@@ -133,7 +133,9 @@ setting run the tools or the app on your own computer; see [Install or build](in
 
 A current Chrome, Edge, Safari or Firefox. The page needs cross-origin isolation (for the
 threads), which the server sets up; a browser inside another app may block passkeys. The
-first visit downloads about 4.5 MB.
+first visit downloads about 4.5 MB. On Safari, and on every browser on an iPhone or iPad, the
+page sets aside 512 MB of memory when it starts: Safari 26.0 to 26.2 stops a wallet whose
+threads grow their memory later.
 
 ## Limits
 
