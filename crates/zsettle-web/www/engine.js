@@ -19,6 +19,7 @@ const E = {
   dead: null,
   warm: false,
   started: null, // the engine starting: calls wait for it
+  stage: null, // what the engine is doing while it starts
   syncs: 0, // syncs running now
   syncProgress: null, // the running sync's { scanned, tip }
   pendingPasskey: null, // a passkey made but not yet read: { network, lock }
@@ -57,18 +58,38 @@ export function start() {
   if (!E.started) {
     E.started = (async () => {
       if (!self.crossOriginIsolated) throw new Error('This browser cannot run the wallet here (the page is not isolated). Try a current Chrome, Safari, Firefox or Edge.');
+      E.stage = 'Downloading the wallet';
       const module = await WebAssembly.compileStreaming(fetch('/pkg/zsettle_web_bg.wasm'));
+      E.stage = 'Starting the wallet';
       const exports = await init({ module_or_path: module });
       reserveHeap(exports);
-      await initThreadPool(Math.max(2, Math.min(navigator.hardwareConcurrency || 4, 8)));
+      E.stage = 'Starting the wallet’s threads';
+      await inTime(initThreadPool(Math.max(2, Math.min(navigator.hardwareConcurrency || 4, 8))), 'its threads');
       // The wallet's worker, and a helper that builds the proving key in the background:
       // they share the module and the memory, so the key the helper builds is the one
       // trades use.
-      E.worker = await spawn(module, exports.memory);
-      E.helper = await spawn(module, exports.memory);
+      E.stage = 'Starting the wallet’s worker';
+      E.worker = await inTime(spawn(module, exports.memory), 'its worker');
+      E.helper = await inTime(spawn(module, exports.memory), 'its helper');
+      E.stage = null;
     })();
   }
   return E.started;
+}
+
+/** What the engine is doing while it starts, or null once it is up. */
+export const startStage = () => E.stage;
+
+// A thread that fails as it starts is not reported to the page, which would wait for ever: a
+// step that takes this long has failed.
+const START_LIMIT_MS = 60000;
+
+function inTime(promise, what) {
+  let timer;
+  const late = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('The wallet did not start: ' + what + ' did not answer within a minute. Close other tabs and reload the page.')), START_LIMIT_MS);
+  });
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
 }
 
 // Safari 26.0 to 26.2 checks memory.fill and memory.copy in one thread against the memory's
@@ -101,6 +122,8 @@ function spawn(module, memory) {
         // A worker cannot go on after a panic. The helper only builds the proving key; a
         // crashed wallet worker fails its calls and takes no more until the page reloads.
         console.warn('wallet worker:', data.err);
+        // A worker that crashes as it starts fails the start (once it was ready, this does nothing).
+        reject(new Error(data.err.split('\n')[0]));
         if (worker !== E.worker) return;
         E.dead = 'The wallet stopped: ' + data.err.split('\n')[0] + ' Reload the page.';
         for (const [id, p] of pending) {

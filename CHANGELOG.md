@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2 (28 October 2026)
+
+- Wallet in the browser: Create a wallet and Restore now say what the wallet is doing while it starts (downloading, starting its threads, starting its worker) instead of showing nothing until it is up. A start step that takes more than a minute, or a worker that crashes as it starts, now ends with an error that names the step instead of waiting for ever.
+
 ## 0.1.1 (27 October 2026)
 
 - Wallet in the browser: it starts on Safari 26.0 to 26.2 (iPhone, iPad and Mac). Those versions check some memory operations in one thread against the memory's size from before another thread grew it, so the wallet stopped with "Out of bounds memory access" as its threads started. On Safari and the other WebKit browsers the page now grows the wallet's memory once, by 512 MB (less if the browser refuses), before any other thread runs, and the threads take their memory from it. A purchase needs about 150 MB. Chrome, Edge and Firefox are unchanged.

@@ -774,6 +774,17 @@ async function viewWelcomeBrowser() {
       note.textContent = '';
     }
   }
+  // The engine may still be starting when the visitor taps: show what it is doing until it is up.
+  async function engineUp() {
+    const show = () => (note.textContent = S.engine.startStage() ? S.engine.startStage() + '…' : '');
+    show();
+    const timer = setInterval(show, 250);
+    try {
+      await S.engine.start();
+    } finally {
+      clearInterval(timer);
+    }
+  }
   async function opened(fresh) {
     S.view = 'wallet';
     await refresh();
@@ -848,8 +859,9 @@ async function viewWelcomeBrowser() {
           h('div', { class: 'p' }, icon('check'), h('span', null, 'Item and payment move together, or not at all.')),
         ),
         h('div', { class: 'field' }, h('label', null, 'Network'), seg),
-        h('button', { class: 'btn primary lg block', onclick: () => createSheet(network) }, icon('spark'), 'Create a wallet'),
-        h('button', { class: 'btn lg block', onclick: () => restoreSheet(network) }, icon('down'), 'Restore from 24 words'),
+        h('button', { class: 'btn primary lg block', onclick: (e) => act(e.currentTarget, async () => { await engineUp(); await createSheet(network); }) }, icon('spark'), 'Create a wallet'),
+        h('button', { class: 'btn lg block', onclick: (e) => act(e.currentTarget, async () => { await engineUp(); restoreSheet(network); }) }, icon('down'), 'Restore from 24 words'),
+        note,
         err,
       ),
       howItWorks(),
